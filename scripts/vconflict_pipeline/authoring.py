@@ -54,19 +54,38 @@ ASTRONOMY_GROUP = "astronomy_conflicts"
 MATHEMATICS_ALGORITHM_AUTHOR_SYSTEM_PROMPT = AUTHOR_SYSTEM_PROMPT + """
 
 This case belongs to mathematics, an algorithm, a data structure, or a formal
-state-transition system. Make the initial state, the named operation, and the
-resulting state explicit. Use large, stable, visually distinct objects such as
-blocks, disks, cards, cells, or tokens; when values are intrinsic to the rule,
-use only a few large legible values and reinforce them with size, order, color,
-or position. Do not make source code, equations, captions, or small text the
-only evidence.
+state-transition system. Optimize for literal visual legibility, not cinematic
+realism. Generate exactly one conflict prompt. Present it as a clean, flat,
+high-contrast educational motion graphic on a plain background with a locked
+orthographic camera. The viewer must be able to identify the relevant objects,
+initial state, single operation, and final state from the pixels alone.
+
+Use shape, size, color, position, simple frames, and large arrow icons as the
+visual language. Never ask the video model to render readable words, digits,
+source code, equations, captions, legends, or symbolic notation. Except for a
+small fixed grid when the rule intrinsically requires one, use no more than four
+primary objects. Move at most one object or one selection frame; a literal
+adjacent swap may move exactly two objects. If insertion order is itself the
+evidence for a queue or stack, show at most three slow sequential insertions
+followed by one removal, with no other motion. Avoid hands, characters,
+decorative scenery, photorealistic machinery, object morphing, object creation,
+camera motion, cuts, split screens, and simultaneous unrelated actions.
+
+Structure every prompt as one continuous shot with three beats: hold the
+complete initial state still and unobstructed; perform one slow, unambiguous
+state-changing action; then hold the complete final state still and
+unobstructed. Do not hide the evidence after the action. Require every object to
+retain its exact shape, color, size, and identity throughout.
 
 Alter exactly one formal rule, comparison, update, or output. Keep object
 identity, count, order, and all non-target state fixed. State the precise
 algorithm variant and exclude undefined ties or implementation-dependent
 behavior. The control must repair only the target formal violation, without
 introducing an unrelated physical impossibility or a merely inefficient but
-legal choice."""
+legal choice. The control must reuse the same art direction, framing, objects,
+initial-state hold, action timing, and final-state hold, changing only the
+selected object, destination, or final target state required by the normal
+rule."""
 
 
 MATHEMATICS_ALGORITHM_AUTHOR_VERIFY_SYSTEM_PROMPT = (
@@ -76,9 +95,11 @@ MATHEMATICS_ALGORITHM_AUTHOR_VERIFY_SYSTEM_PROMPT = (
 For a mathematics or algorithm case, also verify that the input state,
 operation, convention, and output state uniquely determine the formal result;
 that the evidence does not depend only on code or small text; and that exactly
-one rule is violated. Reject ambiguous variants, changed object counts,
-unstated tie-breaking, strategy-only differences, and controls that change more
-than the target transition."""
+one rule is violated. Require exactly one conflict prompt. Reject readable text
+or digits, photorealistic machinery, more than one state-changing action,
+hidden final evidence, ambiguous variants, changed object counts, unstated
+tie-breaking, strategy-only differences, and controls that change more than the
+target transition."""
 )
 
 
