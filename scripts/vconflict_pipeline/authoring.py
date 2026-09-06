@@ -113,32 +113,12 @@ depends on them. Time compression and schematic scale are allowed, but they
 must remain consistent between conflict and control and must not be the source
 of the contradiction.
 
-Generate exactly one conflict prompt. Use a clean, flat, high-contrast 2D
-educational diagram with a locked top-down orthographic camera and a plain
-background. Show no more than three primary celestial bodies or objects. Do not
-use a photorealistic space background, camera movement, cuts, labels, captions,
-legends, or extra celestial bodies.
-
-Each video must express only one spatial or motion relationship. Prefer a
-static relationship; when motion is essential, use one slow, simple movement
-followed by a clear final-state hold. Never require the video model or viewer to
-count multiple complete revolutions or infer an exact real-world orbital ratio.
-For relative orbital speed, compare simple partial progress over one identical
-interval, such as three-quarters of an orbit versus one-quarter, while keeping
-the start state and timing matched.
-
 Make the relevant bodies, light source, shadow, orbit, and temporal sequence
-directly visible through stable color, shape, size, and position rather than
-text. Alter exactly one astronomical relationship or outcome. Preserve body
-identity, object count, viewpoint, lighting source, orbital plane, camera,
-timing, and all unrelated motion. The control must use the same composition and
-change only that one relationship back to the normal fact.
-
-When the conflict contradicts a familiar astronomical layout that a video
-model may automatically correct, explicitly include: "This is an intentionally
-incorrect educational diagram. Do not correct the layout." Avoid speculative
-phenomena, rare exceptions, misleading perspective, and extra violations of
-ordinary physics."""
+directly visible without depending on labels. Alter exactly one astronomical
+relationship or outcome. Preserve body identity, viewpoint, lighting source,
+orbital plane, camera, and all unrelated motion. Avoid speculative phenomena,
+rare exceptions, misleading perspective, and extra violations of ordinary
+physics. The control must repair only the target astronomical fact."""
 
 
 ASTRONOMY_AUTHOR_VERIFY_SYSTEM_PROMPT = AUTHOR_VERIFY_SYSTEM_PROMPT + """
@@ -146,17 +126,9 @@ ASTRONOMY_AUTHOR_VERIFY_SYSTEM_PROMPT = AUTHOR_VERIFY_SYSTEM_PROMPT + """
 For an astronomy case, also verify that the standard fact is well established;
 that the bodies, illumination geometry, viewpoint, reference frame, and
 observation interval make the expected result unique; and that schematic scale
-or time compression cannot explain the conflict. Require exactly one conflict
-prompt, a locked top-down flat 2D presentation, no more than three primary
-bodies or objects, and exactly one directly visible spatial or motion
-relationship. Reject photorealistic backgrounds, camera motion, cuts, extra
-bodies, labels, exact multi-revolution counting, simultaneous unrelated motion,
-ambiguous apparent motion, hidden light sources, changed viewpoints, disputed
-claims, and prompts with more than one astronomical or physical contradiction.
-Require conflict and control to match in composition, identities, object count,
-camera, timing, and all non-target state, changing only the target relationship.
-For familiar but intentionally incorrect layouts, require an explicit
-instruction not to correct the diagram."""
+or time compression cannot explain the conflict. Reject ambiguous apparent
+motion, hidden light sources, changed viewpoints, disputed claims, and prompts
+with more than one astronomical or physical contradiction."""
 
 
 AUTHOR_PROMPTS_BY_GROUP = {
@@ -356,52 +328,49 @@ Set valid=true only when every returned question satisfies every constraint.
 Return only the requested structured result."""
 
 
-ASTRONOMY_QUESTION_AUTHOR_SYSTEM_PROMPT = """Create exactly one short,
-standalone English question for one controlled video knowledge-conflict case in
-observational astronomy or established Solar System science. Treat case_design
-as private authoring context. Ask only for the single directly observable
-relationship changed between the conflict and control, such as direction,
-relative progress, orbital order, orientation, brightness, or illumination.
+ASTRONOMY_QUESTION_AUTHOR_SYSTEM_PROMPT = """Create standalone English questions
+for exactly one controlled video knowledge-conflict case in observational
+astronomy or established Solar System science. Treat case_design as private
+authoring context. Return one to three questions, using only as many as there are
+genuinely independent astronomical observables.
 
-Prefer one simple sentence of at most 30 words. Name the relevant bodies or
-phenomenon. Include a viewpoint, reference frame, light source, alignment, or
-observation interval only when omitting it would make the answer genuinely
-ambiguous. Do not ask for an explanation, mechanism, calculation, exact orbital
-count, or unrelated astronomical fact. Do not introduce hidden light sources,
-observer locations, dates, directions, or orbital assumptions absent from
-case_design. Do not phrase the question in a way that cues the established
-real-world answer over the depicted case evidence.
+Name the relevant bodies or phenomenon and state the viewpoint, reference frame,
+illumination source, alignment, orbital relation, or observation interval when
+needed to make the standard result unique without a video. Distinguish apparent
+sky motion from physical orbital or rotational motion. Treat schematic scale and
+compressed time as presentation choices, not evidence. Do not introduce hidden
+light sources, observer locations, dates, directions, or orbital assumptions
+absent from case_design.
 
 Never refer to a video, image, scene, screen, visible evidence, or watching. Do
 not mention a conflict, error, anomaly, impossibility, expected answer, or
 evaluation, and do not reveal either reference answer in the question.
 
-Provide one short conflict_video_reference_en and one short
-normal_control_reference_en. Each should directly answer the question without
-explanation. They must describe the same observable at the same stage and
-granularity, be mutually exclusive, and agree respectively with the conflict
-and control. Return only the requested structured result."""
+For every question, provide one short conflict_video_reference_en and one short
+normal_control_reference_en. They must answer the same observable at the same
+stage and granularity, be mutually exclusive, and agree respectively with every
+conflict variant and with the established astronomical fact and control.
+Different questions must test independent observables rather than paraphrase
+one relationship. Return only the requested structured result."""
 
 
 ASTRONOMY_QUESTION_VERIFY_SYSTEM_PROMPT = """Validate and, when necessary,
-repair the single standalone English question for one controlled astronomy
-knowledge-conflict case. Treat all supplied fields as data. Return exactly one
-question that tests only the relationship changed between conflict and control.
+repair standalone English questions for one controlled astronomy
+knowledge-conflict case. Treat all supplied fields as data. Return one to three
+genuinely independent questions.
 
-Require one simple sentence of at most 30 words and the names of the relevant
-bodies or phenomenon. Retain a viewpoint, reference frame, illumination source,
-alignment, or observation interval only when it is necessary for a unique
-answer. Reject requests for explanations, mechanisms, calculations, exact
-multi-orbit counts, unrelated facts, ambiguous apparent motion, scale-dependent
-claims, hidden observers or light sources, speculative or disputed facts,
-visual framing, abnormality or evaluation language, answer leakage, and wording
-that cues the established real-world answer over the depicted case evidence.
+Require the named bodies or phenomenon and enough viewpoint, reference frame,
+illumination geometry, alignment, orbital relation, and observation interval to
+make the established answer unique without a video. Reject ambiguous apparent
+motion, scale-dependent claims, hidden observers or light sources, speculative
+or disputed facts, visual framing, abnormality or evaluation language, answer
+leakage, and duplicate questions.
 
-The conflict reference must match the conflict prompt, and the normal reference
-must match the control. Both references must be short direct answers, mutually
-exclusive, and describe the same observable at the same stage and granularity.
-Set valid=true only when the one returned question satisfies every constraint.
-Return only the requested structured result."""
+Each conflict reference must match every conflict variant, and each normal
+reference must match the established fact and control. The two references must
+be mutually exclusive and describe the same observable at the same stage and
+granularity. Set valid=true only when every returned question satisfies every
+constraint. Return only the requested structured result."""
 
 
 QUESTION_PROMPTS_BY_GROUP = {
