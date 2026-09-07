@@ -804,23 +804,46 @@ def command_judge(args: argparse.Namespace) -> int:
     completed = 0
     failures = 0
 
+    def result_selected(video: dict[str, Any], qa_result: dict[str, Any]) -> bool:
+        return not (
+            (selected_videos and video["video_id"] not in selected_videos)
+            or (
+                selected_questions
+                and qa_result["question_id"] not in selected_questions
+            )
+            or (selected_models and qa_result.get("model") not in selected_models)
+            or (
+                selected_efforts is not None
+                and qa_result.get("thinking_effort") not in selected_efforts
+            )
+        )
+
+    if args.force:
+        cleared = 0
+        for case_path in case_paths:
+            case = load_case(case_path)
+            case_cleared = 0
+            for video in case["videos"]:
+                for qa_result in video["qa_results"]:
+                    if not result_selected(video, qa_result):
+                        continue
+                    if qa_result.get("judgment") is None:
+                        continue
+                    qa_result["judgment"] = None
+                    case_cleared += 1
+            if case_cleared:
+                atomic_write_json(case_path, case)
+                cleared += case_cleared
+        print(f"Cleared {cleared} existing judgment(s) before forced re-judging.")
+
     def run_case(case_path: Path) -> int:
         case = load_case(case_path)
         case_completed = 0
         for video in case["videos"]:
-            if selected_videos and video["video_id"] not in selected_videos:
-                continue
             for qa_result in video["qa_results"]:
-                if selected_questions and qa_result["question_id"] not in selected_questions:
+                if not result_selected(video, qa_result):
                     continue
-                if selected_models and qa_result.get("model") not in selected_models:
-                    continue
-                if (
-                    selected_efforts is not None
-                    and qa_result.get("thinking_effort") not in selected_efforts
-                ):
-                    continue
-                if qa_result.get("judgment") is not None and not args.force:
+                if qa_result.get("judgment") is not None:
                     continue
                 question = find_question(case, qa_result["question_id"])
                 judge_input = {

@@ -109,7 +109,7 @@ results/<group>/
 
 不传 `--group` 时继续使用原有平铺目录；已有数据不会自动迁移。
 
-并行分成 case 层与 case 内视频层。所有 QA 请求共享全局并发 limiter、RPM pacing 和 retry 策略。QA 用视频 hash、问题、模型与 thinking effort 去重；`--force` 才追加新一轮结果。
+并行分成 case 层与 case 内视频层。所有 QA 请求共享全局并发 limiter、RPM pacing 和 retry 策略。QA 用视频 hash、问题、模型与 thinking effort 去重；QA 的 `--force` 会追加新一轮结果。Judge 的 `--force` 会先按当前筛选范围清空已有 judgment，再开始重新判定；若运行中断，尚未成功重判的条目保持为 `null`。
 
 ## 运行时代码
 

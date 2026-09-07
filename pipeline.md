@@ -166,6 +166,11 @@ python scripts/pipeline.py judge \
   --thinking-effort all
 ```
 
+`judge --force` 会先按当前的 case、video、question、QA model 和 thinking
+effort 筛选范围，把已有 judgment 全部清空并写回 case JSON，然后才开始重新
+判定。若重判过程中断，已经成功的条目保留新 judgment，尚未成功的条目保持
+`null`，不会与旧 judgment 混合。
+
 生成 JSON summary 和 Markdown report：
 
 ```bash
