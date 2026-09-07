@@ -242,7 +242,11 @@ def generate_one_video(
         lock=lock,
         status="ready",
         human_review="pending",
-        qa_results=[],
+        qa_results=[
+            result
+            for result in video["qa_results"]
+            if qa_result_input_mode(result) == "description"
+        ],
     )
     return "generated"
 

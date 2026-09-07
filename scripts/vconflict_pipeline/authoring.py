@@ -404,14 +404,16 @@ def question_prompts_for_group(group: str | None) -> tuple[str, str]:
         ) from exc
 
 
-JUDGE_SYSTEM_PROMPT = """Evaluate a video-understanding answer against a
-human-verified video. Extract the shortest answer that preserves the response's
-meaning.
+JUDGE_SYSTEM_PROMPT = """Evaluate an answer produced from either video evidence
+or a text description of the same intended event. Extract the shortest answer
+that preserves the response's meaning. input_mode identifies which kind of
+context the QA model received. The historical label video_grounded means the
+answer follows the supplied context evidence in either mode.
 
 For video_role=conflict:
-- video_grounded means the response reports the visible conflict fact.
+- video_grounded means the response reports the conflict-context fact.
 - knowledge_trapped means it substitutes the normal-control answer for the
-  visible conflict.
+  conflict-context fact.
 - ambiguous_or_unjudgeable covers missing, irrelevant, unresolved, mixed, or
   otherwise unclassifiable answers.
 
@@ -420,10 +422,10 @@ For video_role=control:
 - never use knowledge_trapped; an answer matching the conflict reference or
   neither reference is ambiguous_or_unjudgeable.
 
-If a response mentions both the normal-control outcome and the conflict-video
+If a response mentions both the normal-control outcome and the conflict-context
 outcome, do not classify it solely because either outcome appears in the text.
 Determine which outcome the response presents as its main answer to the
-question. For a conflict video, a main conflict-video answer is video_grounded
+question. For a conflict item, a main conflict-context answer is video_grounded
 and a main normal-control answer is knowledge_trapped.
 If the response does not make one outcome its main answer, classify it as ambiguous_or_unjudgeable.
 
@@ -813,6 +815,10 @@ def command_judge(args: argparse.Namespace) -> int:
             )
             or (selected_models and qa_result.get("model") not in selected_models)
             or (
+                args.input_mode != "all"
+                and qa_result_input_mode(qa_result) != args.input_mode
+            )
+            or (
                 selected_efforts is not None
                 and qa_result.get("thinking_effort") not in selected_efforts
             )
@@ -847,6 +853,7 @@ def command_judge(args: argparse.Namespace) -> int:
                     continue
                 question = find_question(case, qa_result["question_id"])
                 judge_input = {
+                    "input_mode": qa_result_input_mode(qa_result),
                     "video_role": video["role"],
                     "question": question["text_en"],
                     "raw_answer": qa_result["raw_answer"],

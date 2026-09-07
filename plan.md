@@ -4,7 +4,7 @@
 
 实验用于测量视频问答模型在“画面事实与经典作品知识冲突”时是否会忽略视频证据、退回作品中的经典答案。每个 case 包含 1–5 个 conflict 视频和 1 个匹配的正常 control 视频，并为每个独立语义目标生成一个 `implicit_prior` 问题。问题必须明确包含对应童话、小说或影视作品名，例如 `In the fairy tale Cinderella, ...?`，但不使用 normally、usually、should 等显式 prior 提示词。
 
-Luna Pro 负责 case authoring、问题生成与答案判定；Seedance 负责生成视频；Gemini、Qwen 或 Kimi 负责视频 QA。
+Luna Pro 负责 case authoring、问题生成、文字 context 生成与答案判定；Seedance 负责生成视频；Gemini、Qwen 或 Kimi 负责视频或文字 context QA。
 
 ## 数据结构
 
@@ -39,13 +39,23 @@ Luna Pro 负责 case authoring、问题生成与答案判定；Seedance 负责�
       "status": "pending",
       "local_path": "videos/seedance/alice_eat_cake_makes_her_shrink/v001.mp4",
       "human_review": "pending",
+      "description": {
+        "context_en": "In Alice in Wonderland, Alice eats the cake and her body shrinks.",
+        "context_prefix_en": "In Alice in Wonderland,",
+        "source": "seedance_prompt_en",
+        "source_sha256": "...",
+        "generator_model": "openai/gpt-5.6-luna-pro",
+        "generated_at": "...",
+        "generator_request_id": "...",
+        "validator_request_id": "..."
+      },
       "qa_results": []
     }
   ]
 }
 ```
 
-每个问题对共享 mutually exclusive 的 conflict/control reference。视频状态、任务 ID、QA 原始回答、usage 与 judgment 都直接写回 case JSON，写入采用临时文件替换，避免半写状态。
+每个问题对共享 mutually exclusive 的 conflict/control reference。视频状态、任务 ID、文字 context、QA 原始回答、usage 与 judgment 都直接写回 case JSON，写入采用临时文件替换，避免半写状态。`description` 是 schema 4.0 的可选扩展，旧 case 无需迁移。
 
 ## 模型配置
 
@@ -67,6 +77,8 @@ Judge 只读取问题、QA 原始回答、视频角色、冲突事实和两类 r
 - control 视频回答 normal reference：`video_grounded`
 - 缺失、混合、无关或无法可靠归类：`ambiguous_or_unjudgeable`
 
+description 输入继续复用上述 verdict；其中 `video_grounded` 表示回答遵循所提供的 context evidence，即 context-grounded。
+
 报告分别统计 answer-level 和 video-level 指标。新生成的问题均为 `implicit_prior`；读取旧 case 时仍兼容历史 `explicit_prior` 问题。video-level verdict 聚合一个视频的多个问题结果；grounded 与 trapped 同时出现时归为 ambiguous。
 
 ## 执行流程
@@ -77,14 +89,31 @@ Judge 只读取问题、QA 原始回答、视频角色、冲突事实和两类 r
 python scripts/pipeline.py split-source --source-md SOURCE.md
 python scripts/pipeline.py author
 python scripts/pipeline.py questions
+python scripts/pipeline.py describe
 python scripts/pipeline.py generate
-python scripts/pipeline.py qa --qa-model google/gemini-3.1-pro-preview
+python scripts/pipeline.py qa --input-mode video --qa-model google/gemini-3.1-pro-preview
 python scripts/pipeline.py judge
 python scripts/pipeline.py summary
 python scripts/pipeline.py report
 ```
 
-完整流程入口只执行 `author → questions → generate → qa → judge`，不自动执行人工 review、summary 或 report：
+文字描述实验只为 conflict 变体生成 context，不依赖本地视频，也不生成 control context：
+
+```bash
+python scripts/pipeline.py describe --group classic_fairy_tale_film_conflicts
+python scripts/pipeline.py qa --group classic_fairy_tale_film_conflicts \
+  --input-mode description --qa-model qwen3.8-max
+python scripts/pipeline.py judge --group classic_fairy_tale_film_conflicts \
+  --input-mode description
+python scripts/pipeline.py summary --group classic_fairy_tale_film_conflicts \
+  --input-mode description
+python scripts/pipeline.py compare --group classic_fairy_tale_film_conflicts \
+  --qa-model qwen3.8-max
+```
+
+QA 收到的纯文本格式为 `{context}\n\nQuestion:\n{question}`，不会添加 `Context:` 标签。童话、小说和影视 case 的 context 以原作品名自然开头；物理化学 case 仅在存在公认实验或现象名时增加对应开头。
+
+完整流程入口只执行 `author → questions → generate → video qa → video judge`，不自动执行 describe、description QA、人工 review、summary、report 或 compare：
 
 ```bash
 python scripts/pipeline.py all --qa-model kimi-k3
@@ -109,7 +138,7 @@ results/<group>/
 
 不传 `--group` 时继续使用原有平铺目录；已有数据不会自动迁移。
 
-并行分成 case 层与 case 内视频层。所有 QA 请求共享全局并发 limiter、RPM pacing 和 retry 策略。QA 用视频 hash、问题、模型与 thinking effort 去重；QA 的 `--force` 会追加新一轮结果。Judge 的 `--force` 会先按当前筛选范围清空已有 judgment，再开始重新判定；若运行中断，尚未成功重判的条目保持为 `null`。
+并行分成 case 层与 case 内输入层。所有 QA 请求共享全局并发 limiter、RPM pacing 和 retry 策略。QA 用 input mode、context hash、问题、模型与 thinking effort 去重；旧结果缺少 `input_mode` 时按 `video` 解释。QA 的 `--force` 会追加新一轮结果。Judge 的 `--force` 会先按当前筛选范围清空已有 judgment，再开始重新判定；若运行中断，尚未成功重判的条目保持为 `null`。
 
 ## 运行时代码
 
@@ -123,6 +152,7 @@ scripts/
     ├── core.py
     ├── transport.py
     ├── authoring.py
+    ├── descriptions.py
     ├── generation.py
     ├── qa.py
     └── reporting.py

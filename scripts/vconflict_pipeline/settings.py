@@ -10,6 +10,13 @@ DEFAULT_SUMMARY_OUTPUT = PROJECT_ROOT / "results" / "knowledge_conflict_summary.
 GEMINI_SUMMARY_OUTPUT = PROJECT_ROOT / "results" / "gemini_knowledge_conflict_summary.json"
 DEFAULT_MARKDOWN_OUTPUT = PROJECT_ROOT / "results" / "case_results.md"
 GEMINI_MARKDOWN_OUTPUT = PROJECT_ROOT / "results" / "gemini_case_results.md"
+DESCRIPTION_SUMMARY_OUTPUT = (
+    PROJECT_ROOT / "results" / "description_knowledge_conflict_summary.json"
+)
+DESCRIPTION_MARKDOWN_OUTPUT = PROJECT_ROOT / "results" / "description_case_results.md"
+DESCRIPTION_COMPARISON_OUTPUT = (
+    PROJECT_ROOT / "results" / "video_description_comparison.json"
+)
 
 AUTHOR_JUDGE_MODEL = "openai/gpt-5.6-luna-pro"
 GEMINI_QA_MODEL = "google/gemini-3.1-pro-preview"
@@ -37,5 +44,6 @@ VIDEO_ROLES = {"conflict", "control"}
 VIDEO_STATUSES = {"pending", "submitted", "ready", "failed"}
 REVIEW_STATUSES = {"pending", "verified", "rejected"}
 VERDICTS = {"video_grounded", "knowledge_trapped", "ambiguous_or_unjudgeable"}
+INPUT_MODES = ("video", "description")
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".m4v", ".webm"}
 
