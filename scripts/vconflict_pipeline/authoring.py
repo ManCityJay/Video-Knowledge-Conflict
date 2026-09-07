@@ -1,4 +1,4 @@
-﻿"""Case authoring, question generation, and answer judging."""
+"""Case authoring, question generation, and answer judging."""
 
 from __future__ import annotations
 
@@ -60,25 +60,38 @@ high-contrast educational motion graphic on a plain background with a locked
 orthographic camera. The viewer must be able to identify the relevant objects,
 initial state, single operation, and final state from the pixels alone.
 
-Use shape, size, color, position, simple frames, and large arrow icons as the
-visual language. Never ask the video model to render readable words, digits,
-source code, equations, captions, legends, or symbolic notation. Except for a
-small fixed grid when the rule intrinsically requires one, use no more than four
-primary objects. Move at most one object or one selection frame; a literal
-adjacent swap may move exactly two objects. If insertion order is itself the
-evidence for a queue or stack, show at most three slow sequential insertions
-followed by one removal, with no other motion. Avoid hands, characters,
-decorative scenery, photorealistic machinery, object morphing, object creation,
-camera motion, cuts, split screens, and simultaneous unrelated actions.
+Use shape, size, color, position, simple frames, and a few large, stable labels
+as the visual language. Preserve the source's exact short algorithm title,
+operation label, object IDs, and essential numeric values. These identify the
+formal rule and must not be replaced with anonymous blocks. Avoid paragraphs,
+subtitles, long equations, source-code listings, and decorative text. Prefer
+two to four primary objects; allow five array cells or seven fixed number-line
+ticks when the source needs them. A calculator may use one short expression
+and one large result digit, but should be treated as an OCR-dependent baseline.
+
+Start from the source's complete preloaded state. Do not add loading sequences
+to a stack with a specified top or a queue with a specified front. Show one
+operation, optionally triggered by a single cursor click, then one outcome.
+Move at most one data object or one selection frame; one swap may move exactly
+two objects. A button press or completion indicator shared by conflict and
+control is permitted. Avoid hands, characters, decorative scenery,
+photorealistic machinery, object morphing, object creation, camera motion,
+cuts, split screens, and simultaneous unrelated actions.
 
 Structure every prompt as one continuous shot with three beats: hold the
 complete initial state still and unobstructed; perform one slow, unambiguous
 state-changing action; then hold the complete final state still and
-unobstructed. Do not hide the evidence after the action. Require every object to
-retain its exact shape, color, size, and identity throughout.
+unobstructed. Keep removed objects visible beside the data structure; do not
+send them offscreen or let them disappear. Preserve holes after removal in a
+schematic diagram instead of adding gravity or automatic compaction. Require
+every object to retain its exact shape, color, size, and identity throughout.
+Preserve concrete source timing, initial values, labels, geometry, and final
+state. Do not redesign a supplied matched pair or add demonstrations of the
+correct rule to a conflict clip. An intentional output digit can change, but
+unrelated labels and numerical values must remain fixed.
 
 Alter exactly one formal rule, comparison, update, or output. Keep object
-identity, count, order, and all non-target state fixed. State the precise
+identity, total visible object count, and all non-target state fixed. State the precise
 algorithm variant and exclude undefined ties or implementation-dependent
 behavior. The control must repair only the target formal violation, without
 introducing an unrelated physical impossibility or a merely inefficient but
@@ -94,12 +107,21 @@ MATHEMATICS_ALGORITHM_AUTHOR_VERIFY_SYSTEM_PROMPT = (
 
 For a mathematics or algorithm case, also verify that the input state,
 operation, convention, and output state uniquely determine the formal result;
-that the evidence does not depend only on code or small text; and that exactly
-one rule is violated. Require exactly one conflict prompt. Reject readable text
-or digits, photorealistic machinery, more than one state-changing action,
-hidden final evidence, ambiguous variants, changed object counts, unstated
-tie-breaking, strategy-only differences, and controls that change more than the
-target transition."""
+that the evidence does not depend on code or small text; and that exactly
+one rule is violated. Require exactly one conflict prompt. Keep short, large
+algorithm names, operation labels, object IDs, and necessary numbers. A short
+calculator expression/result is allowed as an OCR-dependent baseline; reject
+other label-only substitutions when their unchanged geometry gives the normal
+answer. Verify fixed numerical order on a number line, explicit retained-region
+semantics in binary search, and a completion cue for a final sorting result.
+Reject photorealistic machinery, multiple data operations, hidden final
+evidence, ambiguous variants, changed total visible object counts, unstated
+tie-breaking, strategy-only differences, shrinking disks, and controls that
+change more than the target transition. One cursor click and a shared button
+or completion cue do not count as additional data operations. A schematic
+removal may leave a fixed empty slot. For cellular automata, freezing neighbors
+is valid only for an explicitly local query, never for a whole-grid update.
+Match composition, labels, initial state, and timing across the pair."""
 )
 
 

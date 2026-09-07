@@ -1,14 +1,19 @@
 ### Binary Search: The Half Containing the Target Is Discarded
 
-**Standard prior**：在严格升序序列中进行二分查找时，如果目标值大于中间值，应排除左半部分并继续搜索右半部分。
-**Conflict**：目标积木明显高于中间积木，搜索框却选择左侧较矮区域继续搜索，排除了包含匹配目标的右侧区域。
-**Localized edit**：只交换比较后搜索框选择的半区，保持序列、目标、中间元素和比较步骤不变。
-**Visual evidence**：五个积木按高度严格递增；金色目标样本与右侧某积木等高且高于中间积木；比较后搜索框错误地圈住左侧较矮区域，同时右侧匹配积木仍清楚可见。
+**Priority**：P1，首轮。2026-09-07 重写；生成后仍需人工审核。
+**Standard prior**：有序数组 [1,3,5,7,9]，目标 3 小于中点 5，下一轮搜索区间应为 [1,3]。
+**Conflict**：下一轮 ACTIVE 框却圈住 [7,9]，目标 3 留在框外。
+**Localized edit**：只改变更新后的搜索区间；数组、目标和中点均不变。
+**Visual evidence**：用精确数字消除旧版积木高度比较的歧义；ACTIVE 标签明确框代表保留区间，不让亮框既可解释为保留也可解释为丢弃。
+**Normal fact (EN)**: For binary search on the ascending array [1, 3, 5, 7, 9], target 3 is less than midpoint 5, so the next active interval is [1, 3].
+**Intended video fact (EN)**: After one binary-search step with target 3 and midpoint 5, the active interval becomes [7, 9], excluding target 3.
 
 **Video prompt**：
 
-> Clean flat 2D educational motion graphic, plain dark background, locked front view. Five large rectangular blocks form one horizontal row in strictly increasing height from left to right. The second block from the right is gold. A separate gold target block floats directly above it with exactly the same height and is visibly taller than the center block. Hold this complete initial arrangement still. Then one bright cyan search frame slowly appears around only the two shorter blocks on the left, while the matching gold block on the right remains fully visible outside the frame. Hold the final arrangement. Every block keeps the same size, color, and position; only the search frame appears. No other frames, text, digits, symbols, people, hands, cuts, zoom, perspective change, or extra motion.
+> A clean computer-science teaching animation, flat 2D shapes on a white background, fixed front view, one continuous 5-second shot. Large high-contrast labels, no people, hands, speech, subtitles, decorative text, cuts, or camera movement. The title is "BINARY SEARCH". Exactly five equal array cells remain in a horizontal row, labeled 1, 3, 5, 7, 9 from left to right. A large fixed badge says "TARGET 3". A small fixed "MID" pointer marks the center cell 5. A cyan outline labeled "ACTIVE" initially surrounds all five cells; the label belongs to the outline. A large "STEP" button sits below. During seconds 0-1 hold the complete array and full active interval. At seconds 1-1.5 a cursor clicks STEP once and parks below it. During seconds 1.5-3, the single ACTIVE outline smoothly shrinks toward the right until it encloses exactly cells 7 and 9. Cells 1, 3, and 5 remain fully readable outside the outline. During seconds 3-5 hold this next active interval. The MID pointer continues to mark the pivot used for this one step; do not compute another midpoint or perform another search step. Keep all five cells, their values, the target badge, and the camera fixed. No cells fade, move, change, or disappear.
 
 **Control prompt**：
 
-> Clean flat 2D educational motion graphic, plain dark background, locked front view. Five large rectangular blocks form one horizontal row in strictly increasing height from left to right. The second block from the right is gold. A separate gold target block floats directly above it with exactly the same height and is visibly taller than the center block. Hold this complete initial arrangement still. Then one bright cyan search frame slowly appears around only the two taller blocks on the right, including the matching gold block. Hold the final arrangement. Every block keeps the same size, color, and position; only the search frame appears. No other frames, text, digits, symbols, people, hands, cuts, zoom, perspective change, or extra motion.
+> A clean computer-science teaching animation, flat 2D shapes on a white background, fixed front view, one continuous 5-second shot. Large high-contrast labels, no people, hands, speech, subtitles, decorative text, cuts, or camera movement. The title is "BINARY SEARCH". Exactly five equal array cells remain in a horizontal row, labeled 1, 3, 5, 7, 9 from left to right. A large fixed badge says "TARGET 3". A small fixed "MID" pointer marks the center cell 5. A cyan outline labeled "ACTIVE" initially surrounds all five cells; the label belongs to the outline. A large "STEP" button sits below. During seconds 0-1 hold the complete array and full active interval. At seconds 1-1.5 a cursor clicks STEP once and parks below it. During seconds 1.5-3, the single ACTIVE outline smoothly shrinks toward the left until it encloses exactly cells 1 and 3. Cells 5, 7, and 9 remain fully readable outside the outline. During seconds 3-5 hold this next active interval. The MID pointer continues to mark the pivot used for this one step; do not compute another midpoint or perform another search step. Keep all five cells, their values, the target badge, and the camera fixed. No cells fade, move, change, or disappear.
+
+**Human review**：五个数字必须按序保持不变，目标必须为 3，中点必须为 5。ACTIVE 只圈 7/9；若框的含义不清楚，或目标被擦除，不通过。

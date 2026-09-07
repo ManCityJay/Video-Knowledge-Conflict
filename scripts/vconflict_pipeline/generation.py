@@ -1,4 +1,4 @@
-﻿"""Seedance generation, persistence, and human review."""
+"""Seedance generation, persistence, and human review."""
 
 from __future__ import annotations
 
@@ -271,6 +271,16 @@ def command_generate(args: argparse.Namespace) -> int:
                     f"Video IDs not found in {case['case_id']}: "
                     f"{', '.join(sorted(missing))}"
                 )
+        eligible_videos = []
+        for video in videos:
+            parts = Path(video["local_path"]).parts
+            if len(parts) == 6 and parts[3] == "unqualified":
+                print(f"Skipping unqualified video: {case['case_id']}/{video['video_id']}")
+            else:
+                eligible_videos.append(video)
+        videos = eligible_videos
+        if not videos:
+            return 0
         lock = threading.Lock()
 
         def run(video: dict[str, Any]) -> str:
@@ -335,4 +345,3 @@ def command_review(args: argparse.Namespace) -> int:
         )
         return 0
     raise PipelineError(f"Video ID was not found in {args.case_id}: {args.video_id}")
-

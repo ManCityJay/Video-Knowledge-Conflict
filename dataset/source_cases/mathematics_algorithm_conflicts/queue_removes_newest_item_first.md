@@ -1,14 +1,19 @@
 ### Queue: The Most Recently Enqueued Item Leaves First
 
-**Standard prior**：普通先进先出队列中，最早入队的元素应最先出队。
-**Conflict**：三个不同物体依次进入队列，执行一次出队操作时却取走了最后进入的物体。
-**Localized edit**：只把第一次出队的对象从队首最早元素改为队尾最新元素，保持入队顺序、通道方向和其余对象不变。
-**Visual evidence**：红、蓝、黄三个方块依次从右侧入口进入单向队列槽，红块最终最靠近左侧出口；随后夹具却取走右端最后进入的黄块。
+**Priority**：P1，首轮。2026-09-07 重写；生成后仍需人工审核。
+**Standard prior**：标准 FIFO 队列从队首到队尾为 A、B、C，一次出队应取出 A。
+**Conflict**：点击 DEQUEUE 后，队尾 C 被取出，A、B 留在原槽。
+**Localized edit**：只将出队对象由 A 改为 C，不改变队首队尾定义。
+**Visual evidence**：QUEUE、FRONT、REAR 和出队按钮固定可见；同一输出框中的元素与原队列缺口对应。
+**Normal fact (EN)**: In a standard FIFO queue whose front-to-rear order is A, B, C, one DEQUEUE removes front item A and leaves B and C.
+**Intended video fact (EN)**: One DEQUEUE removes rear item C into the output area, while A and B remain in their original queue slots.
 
 **Video prompt**：
 
-> Clean flat 2D educational motion graphic, plain light background, locked top-down view. A transparent horizontal three-slot queue lane has one entrance on the right and one exit gate on the left, emphasized by one large fixed arrow pointing left. Hold the empty lane briefly. A red square enters from the right and slides to the leftmost slot, then a blue square enters and stops behind it, then a yellow square enters last and stops in the rightmost slot. Hold the full queue with red nearest the exit and yellow nearest the entrance. One simple overhead selector then lifts only the yellow rightmost square out of the lane while red and blue stay fixed. Hold the final state. No text, digits, people, hands, cuts, camera motion, shape changes, extra objects, or simultaneous movement.
+> A clean computer-science teaching animation, flat 2D shapes on a white background, fixed front view, one continuous 5-second shot. Large high-contrast labels, no people, hands, speech, subtitles, decorative text, cuts, or camera movement. A diagram titled "QUEUE" contains three equal tiles in one horizontal row, orange A on the left, blue B in the center, teal C on the right. The fixed label "FRONT" is above the left slot and "REAR" above the right slot. An empty wide output box sits below the entire row, and a large "DEQUEUE" button sits separately at the lower right. During seconds 0-1 hold this complete preloaded queue. At seconds 1-1.5 a cursor clicks DEQUEUE once and parks away from the row. During seconds 1.5-3, only the teal rightmost tile C slides straight down into the output box. A and B stay in their original slots, leaving the rear slot empty. During seconds 3-5 hold the output tile and the remaining queue fully visible. Keep all original objects visible, with identical sizes, colors, and labels throughout. No extra objects, duplication, disappearance, gravity, or automatic rearrangement.
 
 **Control prompt**：
 
-> Clean flat 2D educational motion graphic, plain light background, locked top-down view. A transparent horizontal three-slot queue lane has one entrance on the right and one exit gate on the left, emphasized by one large fixed arrow pointing left. Hold the empty lane briefly. A red square enters from the right and slides to the leftmost slot, then a blue square enters and stops behind it, then a yellow square enters last and stops in the rightmost slot. Hold the full queue with red nearest the exit and yellow nearest the entrance. One simple overhead selector then lifts only the red leftmost square out through the exit while blue and yellow stay fixed. Hold the final state. No text, digits, people, hands, cuts, camera motion, shape changes, extra objects, or simultaneous movement.
+> A clean computer-science teaching animation, flat 2D shapes on a white background, fixed front view, one continuous 5-second shot. Large high-contrast labels, no people, hands, speech, subtitles, decorative text, cuts, or camera movement. A diagram titled "QUEUE" contains three equal tiles in one horizontal row, orange A on the left, blue B in the center, teal C on the right. The fixed label "FRONT" is above the left slot and "REAR" above the right slot. An empty wide output box sits below the entire row, and a large "DEQUEUE" button sits separately at the lower right. During seconds 0-1 hold this complete preloaded queue. At seconds 1-1.5 a cursor clicks DEQUEUE once and parks away from the row. During seconds 1.5-3, only the orange leftmost tile A slides straight down into the output box. B and C stay in their original slots, leaving the front slot empty. During seconds 3-5 hold the output tile and the remaining queue fully visible. Keep all original objects visible, with identical sizes, colors, and labels throughout. No extra objects, duplication, disappearance, gravity, or automatic rearrangement.
+
+**Human review**：FRONT/REAR 不能交换；仅 C 出队。不得自行滚动队列、把输出解释为入队，或隐藏某个元素。

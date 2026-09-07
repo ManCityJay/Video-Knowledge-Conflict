@@ -1,4 +1,4 @@
-﻿"""Schema-4 case validation, discovery, and atomic storage."""
+"""Schema-4 case validation, discovery, and atomic storage."""
 
 from __future__ import annotations
 
@@ -740,16 +740,24 @@ def validate_case(case: Any) -> None:
         local_paths.add(local_path)
         local_parts = Path(local_path).as_posix().split("/")
         if (
-            len(local_parts) not in (4, 5)
+            len(local_parts) not in (4, 5, 6)
             or local_parts[:2] != ["videos", "seedance"]
             or local_parts[-2] != case_id
         ):
             raise PipelineError(
                 f"{prefix}.local_path must use videos/seedance/<case_id>/ "
-                "or videos/seedance/<group>/<case_id>/."
+                "videos/seedance/<group>/<case_id>/, or "
+                "videos/seedance/<group>/<qualified|unqualified>/<case_id>/."
             )
-        if len(local_parts) == 5:
+        if len(local_parts) in (5, 6):
             validate_group(local_parts[2])
+        if len(local_parts) == 6 and local_parts[3] not in {
+            "qualified",
+            "unqualified",
+        }:
+            raise PipelineError(
+                f"{prefix}.local_path review bucket must be qualified or unqualified."
+            )
         qa_results = video.get("qa_results")
         if not isinstance(qa_results, list):
             raise PipelineError(f"{prefix}.qa_results must be an array.")
@@ -772,4 +780,3 @@ def load_case(path: Path) -> dict[str, Any]:
             f"{path}: filename must match case_id ({case['case_id']}.json)."
         )
     return case
-
