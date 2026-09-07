@@ -408,12 +408,6 @@ JUDGE_SYSTEM_PROMPT = """Evaluate a video-understanding answer against a
 human-verified video. Extract the shortest answer that preserves the response's
 meaning.
 
-question_type is implicit_prior or explicit_prior.
-Apply the reference-alignment labels below identically for every question type,
-even when an explicit_prior question contains normally, usually, typically,
-should, expected to, or supposed to. These labels are experimental alignment
-labels, not a judgment that the response disobeyed the wording.
-
 For video_role=conflict:
 - video_grounded means the response reports the visible conflict fact.
 - knowledge_trapped means it substitutes the normal-control answer for the
@@ -426,9 +420,15 @@ For video_role=control:
 - never use knowledge_trapped; an answer matching the conflict reference or
   neither reference is ambiguous_or_unjudgeable.
 
-If a response correctly distinguishes a normal rule from what visibly happens,
-classify it as video_grounded. Evidence must be concise and use only the
-supplied answer and references. Return only the requested structured result."""
+If a response mentions both the normal-control outcome and the conflict-video
+outcome, do not classify it solely because either outcome appears in the text.
+Determine which outcome the response presents as its main answer to the
+question. For a conflict video, a main conflict-video answer is video_grounded
+and a main normal-control answer is knowledge_trapped.
+If the response does not make one outcome its main answer, classify it as ambiguous_or_unjudgeable.
+
+Evidence must be concise and use only the supplied answer and references.
+Return only the requested structured result."""
 
 def verify_draft(
     draft: dict[str, Any],
@@ -825,7 +825,6 @@ def command_judge(args: argparse.Namespace) -> int:
                 question = find_question(case, qa_result["question_id"])
                 judge_input = {
                     "video_role": video["role"],
-                    "question_type": question["question_type"],
                     "question": question["text_en"],
                     "raw_answer": qa_result["raw_answer"],
                     "normal_fact": case["conflict_spec"]["normal_fact_en"],
