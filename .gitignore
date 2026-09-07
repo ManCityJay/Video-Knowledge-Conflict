@@ -1,0 +1,20 @@
+# Generated media, runtime cases, and results
+/videos/
+/results/
+/dataset/cases/
+
+# Local working files and experiment backups
+/backups/
+/artifacts/
+/dataset/archive/reviewed_cases/
+# Keep already tracked retired cases; ignore the remaining historical snapshots.
+/dataset/archive/source_cases/2026-09-07_math_v1/
+
+# Local configuration and credentials
+/.vscode/
+.env
+.env.*
+
+# Python caches
+__pycache__/
+*.py[cod]

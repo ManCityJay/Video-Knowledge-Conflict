@@ -130,6 +130,25 @@ ASTRONOMY_AUTHOR_SYSTEM_PROMPT = AUTHOR_SYSTEM_PROMPT + """
 This case belongs to observational astronomy or established Solar System
 science. Use well-established, non-contested relationships among clearly
 identifiable bodies, illumination, shadows, orbital order, rotation, or motion.
+Generate exactly one conflict prompt. Prefer the smallest possible scene with
+two bodies, or at most three bodies when the fact intrinsically requires three.
+Use a locked camera and express only one directly visible relationship. Every
+video must contain one obvious, continuous motion that helps establish that
+relationship; a still diagram held for the whole clip is invalid. Structure the
+shot as a brief initial hold, one slow main movement lasting most of the clip,
+and a final hold. For an orbital case, one body must visibly travel through a
+large arc around a stationary center. For an alignment, count, or comparison
+case, use one simple movement that reveals or maintains the target evidence.
+
+Do not depend on readable labels, captions, numbers, arrows, legends, or exact
+text rendered inside the video. Identify bodies through unmistakable visual
+appearance instead: a glowing Sun, a blue-white Earth, a small gray Moon, or a
+red Mars. Do not ask the model to count multiple revolutions, reproduce a long
+phase sequence, operate a gauge, or coordinate several simultaneous changes.
+When the source case supplies a concrete video prompt and matched control,
+preserve their object count, fixed viewpoint, and simple action; do not add
+extra bodies, cinematic camera motion, secondary events, or decorative action.
+
 Specify the viewpoint and reference frame whenever direction or apparent motion
 depends on them. Time compression and schematic scale are allowed, but they
 must remain consistent between conflict and control and must not be the source
@@ -150,7 +169,12 @@ that the bodies, illumination geometry, viewpoint, reference frame, and
 observation interval make the expected result unique; and that schematic scale
 or time compression cannot explain the conflict. Reject ambiguous apparent
 motion, hidden light sources, changed viewpoints, disputed claims, and prompts
-with more than one astronomical or physical contradiction."""
+with more than one astronomical or physical contradiction. Require exactly one
+conflict prompt, a locked camera, no more than three primary bodies, and only
+one visible relation or one simple movement. Reject prompts whose evidence
+depends on rendered text, exact multi-lap counting, a long phase sequence, a
+gauge, multiple coordinated state changes, or frames that remain effectively
+unchanged throughout the clip."""
 
 
 AUTHOR_PROMPTS_BY_GROUP = {
