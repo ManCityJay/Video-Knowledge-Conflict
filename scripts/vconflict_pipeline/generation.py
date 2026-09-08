@@ -15,6 +15,7 @@ from urllib.parse import urlparse
 from urllib.request import urlretrieve
 
 from .core import *
+from .core import qa_result_input_mode
 from .settings import *
 from .transport import RequestLimiter
 
@@ -339,4 +340,3 @@ def command_review(args: argparse.Namespace) -> int:
         )
         return 0
     raise PipelineError(f"Video ID was not found in {args.case_id}: {args.video_id}")
-

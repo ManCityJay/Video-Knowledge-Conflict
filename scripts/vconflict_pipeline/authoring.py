@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from .core import *
+from .core import qa_result_input_mode
 from .qa import selected_thinking_efforts
 from .settings import *
 from .transport import *
@@ -404,11 +405,9 @@ def question_prompts_for_group(group: str | None) -> tuple[str, str]:
         ) from exc
 
 
-JUDGE_SYSTEM_PROMPT = """Evaluate an answer produced from either video evidence
-or a text description of the same intended event. Extract the shortest answer
-that preserves the response's meaning. input_mode identifies which kind of
-context the QA model received. The historical label video_grounded means the
-answer follows the supplied context evidence in either mode.
+JUDGE_SYSTEM_PROMPT = """Evaluate a question-answering response against the
+supplied context references. Extract the shortest answer that preserves the
+response's meaning.
 
 For video_role=conflict:
 - video_grounded means the response reports the conflict-context fact.
@@ -853,7 +852,6 @@ def command_judge(args: argparse.Namespace) -> int:
                     continue
                 question = find_question(case, qa_result["question_id"])
                 judge_input = {
-                    "input_mode": qa_result_input_mode(qa_result),
                     "video_role": video["role"],
                     "question": question["text_en"],
                     "raw_answer": qa_result["raw_answer"],

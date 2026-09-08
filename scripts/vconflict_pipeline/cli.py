@@ -114,7 +114,6 @@ def build_parser() -> argparse.ArgumentParser:
     _add_case_workers(describe)
     _add_request_limits(describe)
     describe.add_argument("--video-id", action="append")
-    describe.add_argument("--max-repairs", type=int, default=2)
     _add_retries(describe)
     describe.add_argument("--force", action="store_true")
     describe.set_defaults(func=command_describe)

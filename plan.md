@@ -46,8 +46,7 @@ Luna Pro 负责 case authoring、问题生成、文字 context 生成与答案�
         "source_sha256": "...",
         "generator_model": "openai/gpt-5.6-luna-pro",
         "generated_at": "...",
-        "generator_request_id": "...",
-        "validator_request_id": "..."
+        "generator_request_id": "..."
       },
       "qa_results": []
     }
