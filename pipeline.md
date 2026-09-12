@@ -28,8 +28,8 @@ videos/seedance/classic_fairy_tale_film_conflicts/<case_id>/
 results/classic_fairy_tale_film_conflicts/
 ```
 
-`--group` 可用于 `split-source`、`author`、`questions`、`generate`、
-`review`、`qa`、`judge`、`summary`、`report` 和 `all`。它也可以和
+`--group` 可用于 `split-source`、`author`、`questions`、`describe`、`generate`、
+`review`、`qa`、`judge`、`summary`、`report`、`compare` 和 `all`。它也可以和
 `--case-id` 一起使用，只运行组内指定 case：
 
 ```bash
@@ -99,6 +99,24 @@ python scripts/pipeline.py questions \
 
 每个语义目标只生成一个问题，不再生成 normally/usually/should 版本。`questions --force` 会替换选中 case 的问题并清空其全部 QA/judgment，因为旧结果不再对应新问题。
 
+从每个 conflict Seedance prompt 生成中性文字 context：
+
+```bash
+python scripts/pipeline.py describe \
+  --group classic_fairy_tale_film_conflicts
+```
+
+该阶段不读取或要求本地视频，不为 control 生成 context。童话、小说和影视 context 会以原作品名自然开头；物理化学 context 只有在存在公认实验或现象名时才增加名称前缀。最终 QA 文本不带 `Context:` 标签，格式固定为：
+
+```text
+{context}
+
+Question:
+{question}
+```
+
+`describe --force` 会重写 context 并只清除对应的 description QA 结果。
+
 生成或续跑 Seedance 视频：
 
 ```bash
@@ -123,6 +141,7 @@ python scripts/pipeline.py review \
 
 ```bash
 python scripts/pipeline.py qa \
+  --input-mode video \
   --qa-model google/gemini-3.1-pro-preview \
   --case-workers 2 \
   --qa-workers 3
@@ -133,6 +152,7 @@ python scripts/pipeline.py qa \
 ```bash
 python scripts/pipeline.py qa \
   --group classic_fairy_tale_film_conflicts \
+  --input-mode description \
   --qa-model qwen3.8-max \
   --thinking-effort all
   --group classic_physics_chemistry_experiments \
@@ -155,6 +175,17 @@ python scripts/pipeline.py qa \
 
 Kimi 不支持 `none`；省略 effort 或使用 `default`。`all` 对 Kimi 也只运行一次默认模式，实际 reasoning effort 是服务默认 `max`。
 
+运行纯文字 description QA：
+
+```bash
+python scripts/pipeline.py qa \
+  --group classic_fairy_tale_film_conflicts \
+  --input-mode description \
+  --qa-model kimi-k3
+```
+
+description 模式只处理 conflict 条目，不发送 Base64、文件 URI 或 `video_url`。`qa` 不传 `--input-mode` 时仍默认为 `video`。
+
 QA 可重复传 `--case-id`、`--video-id`、`--question-id` 和 `--thinking-effort`。请求并发上限由 `--openrouter-workers` 控制，启动速率由 `--openrouter-rpm` 控制；这两个历史参数名对 Gemini、Qwen、Kimi 都生效。
 
 Judge 可按模型和 effort 筛选：
@@ -163,7 +194,9 @@ Judge 可按模型和 effort 筛选：
 python scripts/pipeline.py judge \
   --group classic_fairy_tale_film_conflicts \
   --qa-model qwen3.8-max \
-  --thinking-effort all
+  --thinking-effort all \
+  --input-mode description \
+  --force
 ```
 
 `judge --force` 会先按当前的 case、video、question、QA model 和 thinking
@@ -178,25 +211,41 @@ python scripts/pipeline.py summary
 python scripts/pipeline.py report
 ```
 
+`summary` 和 `report` 的 `--input-mode` 支持 `video` 或 `description`，默认只统计 `video`。description 的默认输出分别为 `description_knowledge_conflict_summary.json` 和 `description_case_results.md`。
+
+配对比较同一个 case、video、question、model 和 thinking effort 下的最新 video/description judgment：
+
+```bash
+python scripts/pipeline.py compare \
+  --group classic_fairy_tale_film_conflicts \
+  --qa-model qwen3.8-max \
+  --thinking-effort all
+```
+
+默认写入 `results/<group>/video_description_comparison.json`，包含 verdict 转移矩阵、两种条件的 trapped/ambiguous rate、差值、未配对数量和逐 pair 明细。
+
 按模型筛选：
 
 ```bash
 python scripts/pipeline.py summary \
   --group classic_fairy_tale_film_conflicts \
   --qa-model qwen3.8-max \
-  --thinking-effort all \
-  --output results/classic_fairy_tale_film_conflicts/qwen_fairy_summary.json
+  --thinking-effort none \
+  --input description \
+  --output results/classic_fairy_tale_film_conflicts/des_qwen_fairy_none_summary.json
 
 python scripts/pipeline.py summary \
   --group classic_physics_chemistry_experiments \
   --qa-model qwen3.8-max \
-  --thinking-effort default \
-  --output results/classic_physics_chemistry_experiments/qwen_exp_default_summary.json
+  --thinking-effort none \
+  --input description \
+  --output results/classic_physics_chemistry_experiments/qwen_exp_none_summary.json
 
 python scripts/pipeline.py report \
   --group classic_fairy_tale_film_conflicts \
   --qa-model qwen3.8-max \
-  --output results/classic_fairy_tale_film_conflicts/qwen_fairy_report.md
+  --input description \
+  --output results/classic_fairy_tale_film_conflicts/des_qwen_fairy_report.md
 ```
 
 只筛选 Gemini 且没有显式指定输出时，文件名分别为：
@@ -215,4 +264,4 @@ python scripts/pipeline.py report \
 python scripts/pipeline.py all --qa-model kimi-k3
 ```
 
-`all` 顺序执行 author、questions、generate、qa、judge，任一阶段失败就停止。它不会执行 review、summary 或 report。
+`all` 顺序执行 author、questions、generate、video QA、video judge，任一阶段失败就停止。它不会执行 describe、description QA、review、summary、report 或 compare。

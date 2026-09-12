@@ -11,9 +11,10 @@ from typing import Any
 
 from .authoring import command_author, command_judge, command_questions
 from .core import PipelineError, command_split_source, validate_group
+from .descriptions import command_describe
 from .generation import command_generate, command_review
 from .qa import REQUEST_TIMEOUT_SECONDS, command_qa
-from .reporting import command_report, command_summary
+from .reporting import command_compare, command_report, command_summary
 from .settings import (
     ARK_BASE_URL,
     CLI_THINKING_EFFORTS,
@@ -108,6 +109,15 @@ def build_parser() -> argparse.ArgumentParser:
     questions.add_argument("--force", action="store_true")
     questions.set_defaults(func=command_questions)
 
+    describe = _stage(subparsers, "describe")
+    _add_case_selection(describe)
+    _add_case_workers(describe)
+    _add_request_limits(describe)
+    describe.add_argument("--video-id", action="append")
+    _add_retries(describe)
+    describe.add_argument("--force", action="store_true")
+    describe.set_defaults(func=command_describe)
+
     generate = _stage(subparsers, "generate")
     _add_case_selection(generate)
     _add_case_workers(generate)
@@ -143,6 +153,9 @@ def build_parser() -> argparse.ArgumentParser:
     qa.add_argument("--video-id", action="append")
     qa.add_argument("--question-id", action="append")
     qa.add_argument("--qa-model", choices=QA_MODELS, default=DEFAULT_QA_MODEL)
+    qa.add_argument(
+        "--input-mode", choices=("video", "description"), default="video"
+    )
     _add_case_workers(qa)
     _add_request_limits(qa)
     qa.add_argument(
@@ -159,6 +172,9 @@ def build_parser() -> argparse.ArgumentParser:
     _add_case_selection(judge)
     judge.add_argument("--video-id", action="append")
     judge.add_argument("--question-id", action="append")
+    judge.add_argument(
+        "--input-mode", choices=("video", "description", "all"), default="all"
+    )
     _add_result_filters(judge)
     _add_case_workers(judge)
     _add_request_limits(judge)
@@ -169,14 +185,26 @@ def build_parser() -> argparse.ArgumentParser:
     summary = _stage(subparsers, "summary")
     _add_case_selection(summary)
     _add_result_filters(summary)
+    summary.add_argument(
+        "--input-mode", choices=("video", "description"), default="video"
+    )
     summary.add_argument("--output", type=Path)
     summary.set_defaults(func=command_summary)
 
     report = _stage(subparsers, "report")
     _add_case_selection(report)
     _add_result_filters(report)
+    report.add_argument(
+        "--input-mode", choices=("video", "description"), default="video"
+    )
     report.add_argument("--output", type=Path)
     report.set_defaults(func=command_report)
+
+    compare = _stage(subparsers, "compare")
+    _add_case_selection(compare)
+    _add_result_filters(compare)
+    compare.add_argument("--output", type=Path)
+    compare.set_defaults(func=command_compare)
 
     all_stages = _stage(subparsers, "all")
     all_stages.add_argument("--source-dir", type=Path, default=DEFAULT_SOURCE_CASE_DIR)
@@ -286,6 +314,8 @@ def command_all(args: argparse.Namespace) -> int:
                 *request_limits,
                 "--qa-model",
                 args.qa_model,
+                "--input-mode",
+                "video",
                 *efforts,
             ],
         ),

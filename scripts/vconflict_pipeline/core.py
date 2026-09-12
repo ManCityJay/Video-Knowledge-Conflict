@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import uuid
@@ -179,6 +180,24 @@ def is_english_text(value: Any) -> bool:
 
 def normalize_text(value: str) -> str:
     return re.sub(r"\W+", " ", value.lower()).strip()
+
+
+def sha256_text(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def qa_result_input_mode(result: dict[str, Any]) -> str:
+    """Treat pre-description results as video results."""
+    value = result.get("input_mode", "video")
+    return value if isinstance(value, str) else ""
+
+
+def qa_result_context_sha256(result: dict[str, Any]) -> str | None:
+    value = result.get("context_sha256")
+    if isinstance(value, str) and value:
+        return value
+    legacy = result.get("video_sha256")
+    return legacy if isinstance(legacy, str) and legacy else None
 
 
 def slugify(value: str) -> str:
@@ -627,7 +646,28 @@ def validate_qa_result(result: Any, prefix: str, questions: dict[str, dict[str, 
     if result.get("question") != questions[question_id]["text_en"]:
         raise PipelineError(f"{prefix}.question does not match the case question.")
     require_nonempty_string(result.get("raw_answer"), f"{prefix}.raw_answer")
-    require_nonempty_string(result.get("video_sha256"), f"{prefix}.video_sha256")
+    input_mode = qa_result_input_mode(result)
+    if input_mode not in INPUT_MODES:
+        raise PipelineError(f"{prefix}.input_mode is invalid.")
+    context_sha256 = qa_result_context_sha256(result)
+    if not context_sha256:
+        raise PipelineError(f"{prefix}.context_sha256 is required.")
+    if input_mode == "video":
+        video_sha256 = require_nonempty_string(
+            result.get("video_sha256"), f"{prefix}.video_sha256"
+        )
+        if result.get("context_sha256") is not None and context_sha256 != video_sha256:
+            raise PipelineError(
+                f"{prefix}.context_sha256 must match video_sha256 for video input."
+            )
+    else:
+        context_text = require_nonempty_string(
+            result.get("context_text_en"), f"{prefix}.context_text_en"
+        )
+        if sha256_text(context_text) != context_sha256:
+            raise PipelineError(
+                f"{prefix}.context_sha256 does not match context_text_en."
+            )
     require_nonempty_string(result.get("model"), f"{prefix}.model")
     thinking_effort = result.get("thinking_effort")
     if thinking_effort is not None:
@@ -722,6 +762,56 @@ def validate_case(case: Any) -> None:
         if normalized_prompt in prompts:
             raise PipelineError("Duplicate Seedance prompts are not allowed.")
         prompts.add(normalized_prompt)
+        description = video.get("description")
+        if description is not None:
+            if video.get("role") != "conflict":
+                raise PipelineError(f"{prefix}.description is only valid for conflict videos.")
+            if not isinstance(description, dict):
+                raise PipelineError(f"{prefix}.description must be an object or null.")
+            context_en = require_nonempty_string(
+                description.get("context_en"), f"{prefix}.description.context_en"
+            )
+            if not is_english_text(context_en):
+                raise PipelineError(f"{prefix}.description.context_en must be English.")
+            context_prefix = description.get("context_prefix_en")
+            if context_prefix is not None:
+                context_prefix = require_nonempty_string(
+                    context_prefix, f"{prefix}.description.context_prefix_en"
+                )
+                if not is_english_text(context_prefix):
+                    raise PipelineError(
+                        f"{prefix}.description.context_prefix_en must be English."
+                    )
+                if not context_en.startswith(context_prefix):
+                    raise PipelineError(
+                        f"{prefix}.description.context_en must start with its prefix."
+                    )
+            if description.get("source") != "seedance_prompt_en":
+                raise PipelineError(
+                    f"{prefix}.description.source must be seedance_prompt_en."
+                )
+            source_sha256 = require_nonempty_string(
+                description.get("source_sha256"),
+                f"{prefix}.description.source_sha256",
+            )
+            if not re.fullmatch(r"[0-9a-f]{64}", source_sha256):
+                raise PipelineError(
+                    f"{prefix}.description.source_sha256 must be a SHA-256 hex digest."
+                )
+            require_nonempty_string(
+                description.get("generator_model"),
+                f"{prefix}.description.generator_model",
+            )
+            require_nonempty_string(
+                description.get("generated_at"),
+                f"{prefix}.description.generated_at",
+            )
+            for request_field in ("generator_request_id", "validator_request_id"):
+                request_id = description.get(request_field)
+                if request_id is not None and not isinstance(request_id, str):
+                    raise PipelineError(
+                        f"{prefix}.description.{request_field} must be a string or null."
+                    )
         if video.get("status") not in VIDEO_STATUSES:
             raise PipelineError(f"{prefix}.status is invalid.")
         if video.get("human_review") not in REVIEW_STATUSES:
@@ -759,6 +849,14 @@ def validate_case(case: Any) -> None:
                 f"{prefix}.qa_results[{result_index}]",
                 questions,
             )
+            if (
+                video["role"] == "control"
+                and qa_result_input_mode(result) == "description"
+            ):
+                raise PipelineError(
+                    f"{prefix}.qa_results[{result_index}] uses description input "
+                    "for a control video."
+                )
 
 
 def load_case(path: Path) -> dict[str, Any]:

@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from .core import *
+from .core import qa_result_input_mode
 from .qa import selected_thinking_efforts
 from .settings import *
 from .transport import *
@@ -404,14 +405,14 @@ def question_prompts_for_group(group: str | None) -> tuple[str, str]:
         ) from exc
 
 
-JUDGE_SYSTEM_PROMPT = """Evaluate a video-understanding answer against a
-human-verified video. Extract the shortest answer that preserves the response's
-meaning.
+JUDGE_SYSTEM_PROMPT = """Evaluate a question-answering response against the
+supplied context references. Extract the shortest answer that preserves the
+response's meaning.
 
 For video_role=conflict:
-- video_grounded means the response reports the visible conflict fact.
+- video_grounded means the response reports the conflict-context fact.
 - knowledge_trapped means it substitutes the normal-control answer for the
-  visible conflict.
+  conflict-context fact.
 - ambiguous_or_unjudgeable covers missing, irrelevant, unresolved, mixed, or
   otherwise unclassifiable answers.
 
@@ -420,10 +421,10 @@ For video_role=control:
 - never use knowledge_trapped; an answer matching the conflict reference or
   neither reference is ambiguous_or_unjudgeable.
 
-If a response mentions both the normal-control outcome and the conflict-video
+If a response mentions both the normal-control outcome and the conflict-context
 outcome, do not classify it solely because either outcome appears in the text.
 Determine which outcome the response presents as its main answer to the
-question. For a conflict video, a main conflict-video answer is video_grounded
+question. For a conflict item, a main conflict-context answer is video_grounded
 and a main normal-control answer is knowledge_trapped.
 If the response does not make one outcome its main answer, classify it as ambiguous_or_unjudgeable.
 
@@ -812,6 +813,10 @@ def command_judge(args: argparse.Namespace) -> int:
                 and qa_result["question_id"] not in selected_questions
             )
             or (selected_models and qa_result.get("model") not in selected_models)
+            or (
+                args.input_mode != "all"
+                and qa_result_input_mode(qa_result) != args.input_mode
+            )
             or (
                 selected_efforts is not None
                 and qa_result.get("thinking_effort") not in selected_efforts
