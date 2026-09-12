@@ -152,6 +152,7 @@ python scripts/pipeline.py qa \
 ```bash
 python scripts/pipeline.py qa \
   --group classic_fairy_tale_film_conflicts \
+  --input-mode description \
   --qa-model qwen3.8-max \
   --thinking-effort all
   --group classic_physics_chemistry_experiments \
@@ -191,11 +192,11 @@ Judge 可按模型和 effort 筛选：
 
 ```bash
 python scripts/pipeline.py judge \
-  --group classic_physics_chemistry_experiments \
+  --group classic_fairy_tale_film_conflicts \
   --qa-model qwen3.8-max \
   --thinking-effort all \
-  --force
   --input-mode description \
+  --force
 ```
 
 `judge --force` 会先按当前的 case、video、question、QA model 和 thinking
@@ -227,21 +228,24 @@ python scripts/pipeline.py compare \
 
 ```bash
 python scripts/pipeline.py summary \
-  --group classic_fairy_tale_film_conflicts_based \
+  --group classic_fairy_tale_film_conflicts \
   --qa-model qwen3.8-max \
-  --thinking-effort default \
-  --output results/classic_fairy_tale_film_conflicts_based/qwen_fairy_default_summary.json
+  --thinking-effort none \
+  --input description \
+  --output results/classic_fairy_tale_film_conflicts/des_qwen_fairy_none_summary.json
 
 python scripts/pipeline.py summary \
   --group classic_physics_chemistry_experiments \
   --qa-model qwen3.8-max \
-  --thinking-effort default \
-  --output results/classic_physics_chemistry_experiments/qwen_exp_default_summary.json
+  --thinking-effort none \
+  --input description \
+  --output results/classic_physics_chemistry_experiments/qwen_exp_none_summary.json
 
 python scripts/pipeline.py report \
-  --group classic_fairy_tale_film_conflicts_based \
+  --group classic_fairy_tale_film_conflicts \
   --qa-model qwen3.8-max \
-  --output results/classic_fairy_tale_film_conflicts_based/qwen_fairy_report.md
+  --input description \
+  --output results/classic_fairy_tale_film_conflicts/des_qwen_fairy_report.md
 ```
 
 只筛选 Gemini 且没有显式指定输出时，文件名分别为：
