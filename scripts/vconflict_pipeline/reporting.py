@@ -314,7 +314,9 @@ def build_markdown(
                         )
                     lines.extend(
                         [
-                            f"- **Answer:** {_markdown_value(result.get('raw_answer'))}",
+                            f"- **Raw answer:** {_markdown_value(result.get('raw_answer'))}",
+                            "- **Final answer (judged):** "
+                            f"{_markdown_value(result.get('final_answer'))}",
                             f"- **Verdict:** {_markdown_value(verdict)}",
                             f"- **Confidence:** {_markdown_value(judgment.get('confidence'))}",
                             "",

@@ -56,7 +56,8 @@ Seedance 负责生成视频；Gemini、Qwen 或 Kimi 负责视频或文字 conte
 ```
 
 case JSON 是运行状态的唯一持久化单元。视频状态、任务 ID、description、QA
-原始回答、usage 与 judgment 均直接写回，写入使用临时文件替换。
+完整回答 `raw_answer`、明确末行 `final_answer`、usage 与 judgment 均直接写回，
+写入使用临时文件替换。
 `description` 是仅用于 conflict 视频的可选扩展。
 
 新 QA 记录不再包含 `context_sha256` 或 `video_sha256`。旧记录中的这些字段
@@ -69,8 +70,9 @@ case JSON 是运行状态的唯一持久化单元。视频状态、任务 ID、d
 ## 模型配置
 
 - Author / Questions / Judge：`openai/gpt-5.6-luna-pro`，通过 OpenRouter。
-- Gemini QA：`google/gemini-3.1-pro-preview`，CLI effort 为 `default`，实际
-  reasoning effort 为 `medium`，`temperature=0`。
+- Gemini QA：CLI 名称为 `gemini`，实际模型为
+  `google/gemini-3.1-pro-preview`；CLI effort 为 `default`，实际 reasoning
+  effort 为 `medium`，`temperature=0`。
 - Qwen QA：`qwen3.8-max`，通过 DashScope SDK 上传本地视频；支持 `none` 和
   `default`，固定 `fps=2`，`temperature=0`。
 - Kimi QA：`kimi-k3`，CLI effort 为 `default`，实际 reasoning effort 为
@@ -82,12 +84,28 @@ Qwen 本地视频最大 100 MiB；Kimi 请求体最大 100 MB。
 
 ## 判断与指标
 
-Judge 只读取问题、QA 原始回答、输入角色、冲突事实和两类 reference：
+每个 QA user prompt 最后固定追加：
+
+```text
+Conclude with exactly one final line in this format: Final answer: <your clear, direct answer in one sentence>.
+```
+
+Pipeline 保留完整 `raw_answer`，但只从最后一个非空行的精确
+`Final answer:` 标记提取 `final_answer`。缺少标记或标记后为空时，仅当前
+question/effort 失败且不保存记录，不进行格式重试；其他 QA 和 Judge 继续运行。
+
+Judge 只读取问题、`final_answer`、输入角色、冲突事实和两类 reference，绝不读取
+或推断 `raw_answer`：
 
 - conflict 输入回答 conflict reference：`context_grounded`
 - conflict 输入回答 normal reference：`knowledge_trapped`
 - control 输入回答 normal reference：`context_grounded`
-- 缺失、混合、无关或无法可靠归类：`ambiguous_or_unjudgeable`
+- 混合、矛盾、含糊、回避、无关或无法可靠归类：
+  `ambiguous_or_unjudgeable`
+
+Judge 不再从多项表述中选择所谓 main answer。结构化输出仅包含 `verdict` 和
+`confidence`；持久化 judgment 另保存时间、Judge 模型和请求 ID，不再保存
+`extracted_answer` 或 `evidence`。
 
 Description 输入复用相同 verdict，其中 `context_grounded` 表示回答遵循所提供的
 文字 context。旧 JSON 的 `video_grounded` 在加载和汇总时映射为
@@ -134,6 +152,11 @@ input + question_id + qa_model + thinking_effort
 视频文件不会为去重而计算 SHA-256。通过 pipeline 重新生成视频、description
 或 questions 时会清除相应 QA；手工替换同路径视频后必须使用 `--force-qa`。
 
+QA 去重键保持不变，不为最终回答协议增加版本。旧记录允许加载和被
+`--force-qa` 清除，但不会猜测或迁移 `final_answer`；普通运行或
+`--force-judge` 选中旧格式记录时，会在任何模型请求前要求先执行
+`--force-qa`。
+
 `--force-qa` 和 `--force-judge` 互斥。前者删除匹配的全部 QA 和 judgment，
 后者只清空 judgment。Force 会先预检全部选中 case 和依赖，再统一清理并写回
 所有 case；全部清理成功前禁止调用模型，避免不同 case 中新旧结果混合。
@@ -152,6 +175,9 @@ results/<group>/<qwen|kimi|gemini>_<video|description>_<none|default>_summary.js
 ```text
 results/<group>/<qwen|kimi|gemini>_<video|description>_report.md
 ```
+
+Report 同时展示 QA 的完整 `raw_answer`、Judge 实际使用的 `final_answer`、verdict
+和 confidence。
 
 ## 运行时代码
 

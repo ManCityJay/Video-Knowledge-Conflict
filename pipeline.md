@@ -111,6 +111,8 @@ Description QA 收到的文本格式固定为：
 
 Question:
 {question}
+
+Conclude with exactly one final line in this format: Final answer: <your clear, direct answer in one sentence>.
 ```
 
 `description --force` 重写 context，并只清除对应的 description QA。
@@ -166,8 +168,9 @@ python scripts/pipeline.py qa-judge \
 
 - Qwen `qwen3.8-max`：`none` 或 `default`；`all` 同时执行两者。
 - Kimi `kimi-k3`：仅 `default`，实际 reasoning effort 为 `max`。
-- Gemini `google/gemini-3.1-pro-preview`：仅 `default`，实际 reasoning
-  effort 为 `medium`。
+- Gemini：CLI 使用 `--qa-model gemini`，实际调用
+  `google/gemini-3.1-pro-preview`；仅支持 `default`，实际 reasoning effort 为
+  `medium`。
 
 QA 在每个 video 对象内部按以下字段去重：
 
@@ -175,9 +178,25 @@ QA 在每个 video 对象内部按以下字段去重：
 input + question_id + qa_model + thinking_effort
 ```
 
+所有 QA backend 都会把以下要求放在 user prompt 的最后；视频输入中，这段文字
+也是最后一个多模态 content item：
+
+```text
+Conclude with exactly one final line in this format: Final answer: <your clear, direct answer in one sentence>.
+```
+
+模型可以在此前输出分析，但最后一个非空行必须严格以 `Final answer:` 开头，且
+标记后必须有内容。Pipeline 将完整响应保存为 `raw_answer`，并将标记后的内容
+单独保存为 `final_answer`。缺少有效末行时，该 question/effort 立即失败，不保存
+QA 记录、不额外重试；同批其他 QA 和已有成功回答的 Judge 继续执行。
+
 重复运行不会读取整个视频计算 SHA-256，也不会追加重复结果。视频、description
 或 questions 由 pipeline 重建时，相应 QA 会被自动清理。若手工替换同路径视频，
 必须使用 `--force-qa`。
+
+旧 QA 没有 `final_answer`。Pipeline 不猜测或迁移旧回答；普通运行或
+`--force-judge` 选中这类记录时，会在任何模型请求前报错。使用 `--force-qa`
+统一清除并重新生成即可。
 
 强制运行有两个互斥选项：
 
@@ -207,6 +226,12 @@ Judge 的新标签为：
 - `knowledge_trapped`
 - `ambiguous_or_unjudgeable`
 
+Judge 只收到 `final_answer`、问题、输入角色和参考事实，不会收到
+`raw_answer`。混合、矛盾、含糊、回避或无法匹配的最终回答统一判为
+`ambiguous_or_unjudgeable`，不再通过“main answer”推断结论。新 judgment 只保存
+`verdict`、`confidence`、时间、Judge 模型和请求 ID，不再生成
+`extracted_answer` 或 `evidence`。
+
 旧 JSON 中的 `video_grounded` 无需迁移；读取和统计时会解释为
 `context_grounded`。
 
@@ -233,4 +258,5 @@ results/classic_fairy_tale_film_conflicts/qwen_description_report.md
 
 不指定 `--thinking-effort` 或使用 `all` 时，只为现有已判定结果中实际存在的
 effort 分别生成 summary；若没有结果，则生成模型默认 effort 的空 summary。
-不同 effort 的最新结果放在同一份 report 中。不再支持手工指定 `--output`。
+不同 effort 的最新结果放在同一份 report 中，report 同时展示完整
+`raw_answer` 和实际送审的 `final_answer`。不再支持手工指定 `--output`。

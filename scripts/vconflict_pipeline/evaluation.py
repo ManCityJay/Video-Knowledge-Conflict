@@ -36,29 +36,23 @@ from .transport import (
     require_openrouter_api_key,
 )
 
-JUDGE_SYSTEM_PROMPT = """Evaluate a question-answering response against the
-supplied context references. Extract the shortest answer that preserves the
-response's meaning.
+JUDGE_SYSTEM_PROMPT = """Evaluate the supplied final_answer against the context
+references. Treat final_answer as the complete answer to judge. Do not infer,
+reconstruct, or consider any reasoning or other response text that is not in
+final_answer.
 
 For video_role=conflict:
-- context_grounded means the response reports the conflict-context fact.
-- knowledge_trapped means it substitutes the normal-control answer for the
+- context_grounded means final_answer clearly reports the conflict-context fact.
+- knowledge_trapped means final_answer substitutes the normal-control answer for the
   conflict-context fact.
-- ambiguous_or_unjudgeable covers missing, irrelevant, unresolved, mixed, or
-  otherwise unclassifiable answers.
+- ambiguous_or_unjudgeable covers irrelevant, unresolved, mixed, contradictory,
+  hedged, or otherwise unclassifiable final answers.
 
 For video_role=control:
-- context_grounded means the response reports the normal-control fact.
+- context_grounded means final_answer clearly reports the normal-control fact.
 - never use knowledge_trapped; an answer matching the conflict reference or
   neither reference is ambiguous_or_unjudgeable.
 
-If a response mentions both the normal-control outcome and the conflict-context
-outcome, determine which outcome it presents as the main answer. For a conflict
-item, a main conflict-context answer is context_grounded and a main
-normal-control answer is knowledge_trapped. If neither is the main answer,
-classify it as ambiguous_or_unjudgeable.
-
-Evidence must be concise and use only the supplied answer and references.
 Return only the requested structured result."""
 
 
@@ -169,6 +163,29 @@ def _preflight_cases(
     return loaded, target_total
 
 
+def _require_selected_final_answers(
+    loaded: list[tuple[Path, dict[str, Any]]],
+    *,
+    args: argparse.Namespace,
+    efforts: set[str | None],
+) -> None:
+    for path, case in loaded:
+        for video in case["videos"]:
+            for result in video["qa_results"]:
+                if not _result_selected(
+                    video, result, args=args, efforts=efforts
+                ):
+                    continue
+                final_answer = result.get("final_answer")
+                if isinstance(final_answer, str) and final_answer.strip():
+                    continue
+                raise PipelineError(
+                    f"Selected QA result {case['case_id']}/{video['video_id']}/"
+                    f"{result['question_id']} in {path} has no final_answer. "
+                    "Run qa-judge with --force-qa to replace old-format QA results."
+                )
+
+
 def _preclear_force(
     loaded: list[tuple[Path, dict[str, Any]]],
     *,
@@ -247,10 +264,13 @@ def command_judge(args: argparse.Namespace) -> int:
                     continue
                 try:
                     question = _find_question(case, qa_result["question_id"])
+                    final_answer = require_nonempty_string(
+                        qa_result.get("final_answer"), "final_answer"
+                    )
                     judge_input = {
                         "video_role": video["role"],
                         "question": question["text_en"],
-                        "raw_answer": qa_result["raw_answer"],
+                        "final_answer": final_answer,
                         "normal_fact": case["conflict_spec"]["normal_fact_en"],
                         "intended_video_fact": case["conflict_spec"][
                             "intended_video_fact_en"
@@ -288,14 +308,8 @@ def command_judge(args: argparse.Namespace) -> int:
                         )
                     qa_result["judgment"] = {
                         "timestamp": utc_now(),
-                        "extracted_answer": require_nonempty_string(
-                            result.get("extracted_answer"), "extracted_answer"
-                        ),
                         "verdict": result["verdict"],
                         "confidence": float(result["confidence"]),
-                        "evidence": require_nonempty_string(
-                            result.get("evidence"), "evidence"
-                        ),
                         "judge_model": AUTHOR_JUDGE_MODEL,
                         "judge_request_id": response.get("id"),
                     }
@@ -390,6 +404,12 @@ def command_qa_judge(args: argparse.Namespace) -> int:
     # before force mode is allowed to clear persisted results.
     efforts = expand_thinking_efforts(args.thinking_effort, args.qa_model)
     loaded, qa_total = _preflight_cases(args, efforts)
+    if not args.force_qa:
+        _require_selected_final_answers(
+            loaded,
+            args=args,
+            efforts=set(efforts),
+        )
     qa_done = _qa_completed_from_loaded(loaded, args=args, efforts=efforts)
     qa_needed = qa_total > 0 and (args.force_qa or qa_done != qa_total)
     if qa_needed:

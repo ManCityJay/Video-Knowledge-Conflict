@@ -43,6 +43,11 @@ QWEN_DEFAULT_BASE_HTTP_API_URL = "https://dashscope.aliyuncs.com/api/v1"
 KIMI_DEFAULT_BASE_URL = "https://api.moonshot.cn/v1"
 QWEN_MAX_LOCAL_VIDEO_BYTES = 100 * 1024 * 1024
 KIMI_MAX_REQUEST_BODY_BYTES = 100_000_000
+FINAL_ANSWER_PREFIX = "Final answer:"
+FINAL_ANSWER_INSTRUCTION = (
+    "Conclude with exactly one final line in this format: "
+    "Final answer: <your clear, direct answer in one sentence>."
+)
 VIDEO_MIME_TYPES = {
     ".mp4": "video/mp4",
     ".m4v": "video/mp4",
@@ -282,7 +287,7 @@ def _send_qwen_request(
 
 
 def _gemini_payload(
-    question: str,
+    prompt_text: str,
     video_data_url: str,
     thinking_effort: str | None,
 ) -> dict[str, Any]:
@@ -297,8 +302,8 @@ def _gemini_payload(
             {
                 "role": "user",
                 "content": [
-                    {"type": "text", "text": question},
                     {"type": "video_url", "video_url": {"url": video_data_url}},
+                    {"type": "text", "text": prompt_text},
                 ],
             }
         ],
@@ -306,7 +311,7 @@ def _gemini_payload(
 
 
 def _kimi_payload(
-    question: str,
+    prompt_text: str,
     video_data_url: str,
     thinking_effort: str | None,
 ) -> dict[str, Any]:
@@ -324,15 +329,40 @@ def _kimi_payload(
                 "role": "user",
                 "content": [
                     {"type": "video_url", "video_url": {"url": video_data_url}},
-                    {"type": "text", "text": question},
+                    {"type": "text", "text": prompt_text},
                 ],
             }
         ],
     }
 
 
+def _question_prompt(question: str) -> str:
+    return f"{question}\n\n{FINAL_ANSWER_INSTRUCTION}"
+
+
 def _description_prompt(context: str, question: str) -> str:
-    return f"{context}\n\nQuestion:\n{question}"
+    return f"{context}\n\nQuestion:\n{_question_prompt(question)}"
+
+
+def extract_final_answer(raw_answer: str) -> str:
+    lines = raw_answer.splitlines()
+    while lines and not lines[-1].strip():
+        lines.pop()
+    if not lines:
+        raise PipelineError(
+            f"QA response must end with a non-empty '{FINAL_ANSWER_PREFIX} ...' line."
+        )
+    final_line = lines[-1].strip()
+    if not final_line.startswith(FINAL_ANSWER_PREFIX):
+        raise PipelineError(
+            f"QA response must end with a non-empty '{FINAL_ANSWER_PREFIX} ...' line."
+        )
+    final_answer = final_line[len(FINAL_ANSWER_PREFIX) :].strip()
+    if not final_answer:
+        raise PipelineError(
+            f"QA response must end with a non-empty '{FINAL_ANSWER_PREFIX} ...' line."
+        )
+    return final_answer
 
 
 def _gemini_description_payload(
@@ -476,7 +506,7 @@ def run_qa_batch(
     timeout: int,
     max_retries: int,
     request_limiter: RequestLimiter,
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], list[tuple[str, str | None, str]]]:
     backend = get_backend(qa_model)
     if input_mode == "video":
         if video_path is None:
@@ -491,51 +521,61 @@ def run_qa_batch(
             raise PipelineError("Description input requires context text.")
         video_input = None
     results: list[dict[str, Any]] = []
+    failures: list[tuple[str, str | None, str]] = []
     for question, thinking_effort in question_runs:
         prompt_text = (
-            question["text_en"]
+            _question_prompt(question["text_en"])
             if input_mode == "video"
             else _description_prompt(context_text, question["text_en"])
         )
-        if qa_model == QWEN_QA_MODEL:
-            response = send_with_retry(
-                lambda question=question, thinking_effort=thinking_effort: (
-                    _send_qwen_request(
+        try:
+            if qa_model == QWEN_QA_MODEL:
+                response = send_with_retry(
+                    lambda thinking_effort=thinking_effort: _send_qwen_request(
                         prompt_text=prompt_text,
                         video_uri=video_input,
                         thinking_effort=thinking_effort,
                         api_key=api_key,
                         timeout=timeout,
-                    )
-                ),
-                request_limiter=request_limiter,
-                max_retries=max_retries,
-            )
-        else:
-            if input_mode == "description" and qa_model == GEMINI_QA_MODEL:
-                payload = _gemini_description_payload(prompt_text, thinking_effort)
-            elif input_mode == "description" and qa_model == KIMI_QA_MODEL:
-                payload = _kimi_description_payload(prompt_text, thinking_effort)
-            elif backend.build_payload is None or video_input is None:
-                raise PipelineError(
-                    f"{backend.service} does not use a Base64 payload builder."
+                    ),
+                    request_limiter=request_limiter,
+                    max_retries=max_retries,
                 )
             else:
-                payload = backend.build_payload(
-                    question["text_en"], video_input, thinking_effort
+                if input_mode == "description" and qa_model == GEMINI_QA_MODEL:
+                    payload = _gemini_description_payload(prompt_text, thinking_effort)
+                elif input_mode == "description" and qa_model == KIMI_QA_MODEL:
+                    payload = _kimi_description_payload(prompt_text, thinking_effort)
+                elif backend.build_payload is None or video_input is None:
+                    raise PipelineError(
+                        f"{backend.service} does not use a Base64 payload builder."
+                    )
+                else:
+                    payload = backend.build_payload(
+                        prompt_text, video_input, thinking_effort
+                    )
+                response = send_with_retry(
+                    lambda payload=payload: backend.send_request(
+                        payload, api_key, timeout
+                    ),
+                    request_limiter=request_limiter,
+                    max_retries=max_retries,
                 )
-            response = send_with_retry(
-                lambda payload=payload: backend.send_request(payload, api_key, timeout),
-                request_limiter=request_limiter,
-                max_retries=max_retries,
+            raw_answer = backend.extract_answer(response)
+            final_answer = extract_final_answer(raw_answer)
+        except PipelineError as exc:
+            failures.append(
+                (question["question_id"], thinking_effort, str(exc))
             )
+            continue
         result: dict[str, Any] = {
             "run_id": uuid.uuid4().hex,
             "timestamp": utc_now(),
             "input_mode": input_mode,
             "question_id": question["question_id"],
             "question": question["text_en"],
-            "raw_answer": backend.extract_answer(response),
+            "raw_answer": raw_answer,
+            "final_answer": final_answer,
             "model": qa_model,
             "thinking_effort": thinking_effort,
             "temperature": backend.temperature,
@@ -549,7 +589,7 @@ def run_qa_batch(
         if isinstance(response.get("usage"), dict):
             result["usage"] = response["usage"]
         results.append(result)
-    return results
+    return results, failures
 
 
 def preflight_qa_backend(args: Any) -> None:
@@ -658,7 +698,9 @@ def command_qa(args: Any) -> int:
         if not jobs:
             return 0, 0
 
-        def run(job: dict[str, Any]) -> list[dict[str, Any]]:
+        def run(
+            job: dict[str, Any],
+        ) -> tuple[list[dict[str, Any]], list[tuple[str, str | None, str]]]:
             return run_qa_batch(
                 input_mode=args.input,
                 video_path=job["path"],
@@ -679,7 +721,7 @@ def command_qa(args: Any) -> int:
             for future in as_completed(futures):
                 video = futures[future]
                 try:
-                    results = future.result()
+                    results, run_failures = future.result()
                 except PipelineError as exc:
                     case_failures += 1
                     print(
@@ -687,9 +729,18 @@ def command_qa(args: Any) -> int:
                         file=sys.stderr,
                     )
                     continue
-                with write_lock:
-                    video["qa_results"].extend(results)
-                    atomic_write_json(case_path, case)
+                for question_id, effort, error in run_failures:
+                    effort_name = "none" if effort is None else effort
+                    print(
+                        f"Error in QA {case['case_id']}/{video['video_id']}/"
+                        f"{question_id}/{effort_name}: {error}",
+                        file=sys.stderr,
+                    )
+                case_failures += len(run_failures)
+                if results:
+                    with write_lock:
+                        video["qa_results"].extend(results)
+                        atomic_write_json(case_path, case)
                 case_completed += len(results)
                 print(
                     f"QA {args.input} {case['case_id']}/{video['video_id']}: "

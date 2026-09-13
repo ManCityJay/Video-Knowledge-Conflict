@@ -131,12 +131,10 @@ JUDGMENT_SCHEMA: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
     "properties": {
-        "extracted_answer": {"type": "string"},
         "verdict": {"type": "string", "enum": sorted(VERDICTS)},
         "confidence": {"type": "number", "minimum": 0, "maximum": 1},
-        "evidence": {"type": "string"},
     },
-    "required": ["extracted_answer", "verdict", "confidence", "evidence"],
+    "required": ["verdict", "confidence"],
 }
 
 def utc_now() -> str:
@@ -573,6 +571,9 @@ def validate_qa_result(result: Any, prefix: str, questions: dict[str, dict[str, 
     if result.get("question") != questions[question_id]["text_en"]:
         raise PipelineError(f"{prefix}.question does not match the case question.")
     require_nonempty_string(result.get("raw_answer"), f"{prefix}.raw_answer")
+    final_answer = result.get("final_answer")
+    if final_answer is not None:
+        require_nonempty_string(final_answer, f"{prefix}.final_answer")
     input_mode = qa_result_input_mode(result)
     if input_mode not in INPUT_MODES:
         raise PipelineError(f"{prefix}.input_mode is invalid.")
@@ -625,10 +626,6 @@ def validate_qa_result(result: Any, prefix: str, questions: dict[str, dict[str, 
     confidence = judgment.get("confidence")
     if not isinstance(confidence, (int, float)) or not 0 <= confidence <= 1:
         raise PipelineError(f"{prefix}.judgment.confidence is invalid.")
-    require_nonempty_string(
-        judgment.get("extracted_answer"), f"{prefix}.judgment.extracted_answer"
-    )
-    require_nonempty_string(judgment.get("evidence"), f"{prefix}.judgment.evidence")
 
 
 def validate_case(case: Any) -> None:

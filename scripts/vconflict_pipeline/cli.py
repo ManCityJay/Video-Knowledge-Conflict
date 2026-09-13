@@ -17,6 +17,8 @@ from .qa import REQUEST_TIMEOUT_SECONDS
 from .reporting import command_summarize
 from .settings import (
     ARK_BASE_URL,
+    CLI_QA_MODEL_IDS,
+    CLI_QA_MODELS,
     CLI_THINKING_EFFORTS,
     DEFAULT_CASE_DIR,
     DEFAULT_CASE_WORKERS,
@@ -25,7 +27,6 @@ from .settings import (
     DEFAULT_REQUEST_WORKERS,
     DEFAULT_SEEDANCE_TOTAL_WORKERS,
     DEFAULT_SOURCE_CASE_DIR,
-    QA_MODELS,
     SEEDANCE_MODEL,
 )
 
@@ -39,6 +40,16 @@ def _group_name(value: str) -> str:
         return validate_group(value)
     except PipelineError as exc:
         raise argparse.ArgumentTypeError(str(exc)) from exc
+
+
+def _qa_model(value: str) -> str:
+    try:
+        return CLI_QA_MODEL_IDS[value]
+    except KeyError as exc:
+        choices = ", ".join(CLI_QA_MODELS)
+        raise argparse.ArgumentTypeError(
+            f"invalid QA model: {value!r} (choose from {choices})"
+        ) from exc
 
 
 def _add_group(parser: argparse.ArgumentParser) -> None:
@@ -147,7 +158,12 @@ def build_parser() -> argparse.ArgumentParser:
     _add_case_selection(qa_judge)
     qa_judge.add_argument("--video-id", action="append")
     qa_judge.add_argument("--question-id", action="append")
-    qa_judge.add_argument("--qa-model", choices=QA_MODELS, default=DEFAULT_QA_MODEL)
+    qa_judge.add_argument(
+        "--qa-model",
+        type=_qa_model,
+        default=DEFAULT_QA_MODEL,
+        metavar="{gemini,qwen3.8-max,kimi-k3}",
+    )
     _add_input(qa_judge)
     _add_case_workers(qa_judge)
     _add_request_limits(qa_judge)
@@ -161,7 +177,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     summarize = _stage(subparsers, "summarize")
     _add_case_selection(summarize)
-    summarize.add_argument("--qa-model", choices=QA_MODELS, required=True)
+    summarize.add_argument(
+        "--qa-model",
+        type=_qa_model,
+        required=True,
+        metavar="{gemini,qwen3.8-max,kimi-k3}",
+    )
     _add_input(summarize)
     _add_thinking_effort(summarize)
     summarize.set_defaults(func=command_summarize)
