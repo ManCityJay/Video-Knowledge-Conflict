@@ -72,7 +72,7 @@ For every other group, return context_prefix_en=null and begin directly with
 the event description. Return only the requested structured result."""
 
 
-def command_describe(args: argparse.Namespace) -> int:
+def command_description(args: argparse.Namespace) -> int:
     api_key = require_openrouter_api_key()
     request_limiter = make_openrouter_limiter(args)
     dataset_dir = grouped_dir(args.dataset_dir, args.group)

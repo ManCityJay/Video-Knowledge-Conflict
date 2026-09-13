@@ -1,58 +1,51 @@
 # Pipeline 使用说明
 
-唯一主入口是：
+唯一入口为：
 
 ```bash
 python scripts/pipeline.py <stage> [参数]
 ```
 
-正式数据、结果和视频分别位于 `dataset/cases/`、`results/` 和 `videos/seedance/`。
-
-## 按数据组运行
-
-当 source cases 位于单层子目录时，可以用 `--group` 让所有阶段只处理该组：
-
-```bash
-python scripts/pipeline.py all \
-  --group classic_physics_chemistry_experiments \
-  --qa-model qwen3.8-max \
-  --thinking-effort all
-```
-
-目录会自动映射为：
+可用 stage：
 
 ```text
-dataset/source_cases/classic_fairy_tale_film_conflicts/
-dataset/cases/classic_fairy_tale_film_conflicts/
-videos/seedance/classic_fairy_tale_film_conflicts/<case_id>/
-results/classic_fairy_tale_film_conflicts/
+author
+questions
+description
+generate
+review
+qa-judge
+summarize
 ```
 
-`--group` 可用于 `split-source`、`author`、`questions`、`describe`、`generate`、
-`review`、`qa`、`judge`、`summary`、`report`、`compare` 和 `all`。它也可以和
-`--case-id` 一起使用，只运行组内指定 case：
+完整视频实验需要显式执行：
 
 ```bash
-python scripts/pipeline.py all \
-  --group classic_fairy_tale_film_conflicts \
-  --case-id alice_drink_makes_her_grow
+python scripts/pipeline.py author --group <group_name>
+python scripts/pipeline.py questions --group <group_name>
+python scripts/pipeline.py generate --group <group_name>
+python scripts/pipeline.py qa-judge --group <group_name> --input video \
+  --qa-model qwen3.8-max
 ```
 
-`--source-dir`、`--output-dir` 和 `--dataset-dir` 在 group 模式下仍表示根目录，
-group 名会自动追加到这些目录。summary/report 的显式 `--output` 不受影响。
-不传 `--group` 时保持原有平铺行为，已有数据不会迁移。
+不再提供 `split-source`、`describe`、`all`、`qa`、`judge`、`summary`、
+`report` 或 `compare` stage。
+
+## 数据组与目录
+
+`--group` 将 source cases、case JSON、视频和结果分别映射到：
+
+```text
+dataset/source_cases/<group>/
+dataset/cases/<group>/
+videos/seedance/<group>/<case_id>/
+results/<group>/
+```
+
+不传 `--group` 时使用平铺目录。`--case-id`、`--video-id` 和
+`--question-id` 均可重复传入以缩小运行范围。
 
 ## 环境变量
-
-Qwen 本地视频上传需要 DashScope Python SDK 1.24.6 或更新版本。请在运行 pipeline 的同一个 Python/Conda 环境中自行安装：
-
-```powershell
-python -m pip install -U "dashscope>=1.24.6"
-```
-
-代码不会自动安装或修改环境；缺少 SDK 或版本过旧时会显示上述安装命令。
-
-PowerShell 示例：
 
 ```powershell
 $env:OPENROUTER_API_KEY = "<openrouter-api-key>"
@@ -61,7 +54,13 @@ $env:DASHSCOPE_API_KEY = "<dashscope-api-key>"
 $env:MOONSHOT_API_KEY = "<moonshot-api-key>"
 ```
 
-可选覆盖：
+Qwen 需要 DashScope Python SDK 1.24.6 或更新版本：
+
+```powershell
+python -m pip install -U "dashscope>=1.24.6"
+```
+
+可选 endpoint 覆盖：
 
 ```powershell
 $env:ARK_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3"
@@ -69,44 +68,43 @@ $env:DASHSCOPE_BASE_HTTP_API_URL = "https://dashscope.aliyuncs.com/api/v1"
 $env:MOONSHOT_BASE_URL = "https://api.moonshot.cn/v1"
 ```
 
-历史环境变量 `QWEN_BASE_URL` 仍可使用。若其值以 `/compatible-mode/v1` 结尾，Qwen QA 会自动转换成原生 SDK 所需的 `/api/v1`；同时设置两个变量时，`DASHSCOPE_BASE_HTTP_API_URL` 优先。
+历史 `QWEN_BASE_URL` 仍兼容；`/compatible-mode/v1` 后缀会自动转换为
+`/api/v1`。
 
-## 各阶段
+## 数据准备阶段
 
-从一个包含三级标题的 Markdown 拆分 source cases：
+Source cases 需要预先按“一份 Markdown 对应一个 case”放入
+`dataset/source_cases/<group>/`，pipeline 不再负责拆分源 Markdown。
 
-```bash
-python scripts/pipeline.py split-source --source-md SOURCE.md
-```
-
-Author 创建 schema 4.0 case：
+生成 schema 4.0 case 和 Seedance prompts：
 
 ```bash
 python scripts/pipeline.py author \
   --group classic_fairy_tale_film_conflicts \
-  --source-dir dataset/source_cases \
   --case-workers 2 \
   --openrouter-workers 2 \
   --openrouter-rpm 20
 ```
 
-生成带经典作品名的单一 implicit questions：
+生成中性 questions：
 
 ```bash
 python scripts/pipeline.py questions \
   --group classic_fairy_tale_film_conflicts
 ```
 
-每个语义目标只生成一个问题，不再生成 normally/usually/should 版本。`questions --force` 会替换选中 case 的问题并清空其全部 QA/judgment，因为旧结果不再对应新问题。
+`questions --force` 会替换问题并清除选中 case 的全部 QA 和 judgment。
+新问题 ID 直接使用 `q001`、`q002`、`q003`，不再保存
+`question_pair_id` 或 `question_type`。
 
-从每个 conflict Seedance prompt 生成中性文字 context：
+为 conflict prompts 生成文字 context：
 
 ```bash
-python scripts/pipeline.py describe \
+python scripts/pipeline.py description \
   --group classic_fairy_tale_film_conflicts
 ```
 
-该阶段不读取或要求本地视频，不为 control 生成 context。童话、小说和影视 context 会以原作品名自然开头；物理化学 context 只有在存在公认实验或现象名时才增加名称前缀。最终 QA 文本不带 `Context:` 标签，格式固定为：
+Description QA 收到的文本格式固定为：
 
 ```text
 {context}
@@ -115,7 +113,7 @@ Question:
 {question}
 ```
 
-`describe --force` 会重写 context 并只清除对应的 description QA 结果。
+`description --force` 重写 context，并只清除对应的 description QA。
 
 生成或续跑 Seedance 视频：
 
@@ -126,142 +124,113 @@ python scripts/pipeline.py generate \
   --seedance-total-workers 6
 ```
 
-失败任务用 `--retry-failed` 重新创建；已提交任务会沿用 `task_id` 继续轮询。可重复传 `--video-id` 缩小范围。
+失败任务使用 `--retry-failed`。视频重新生成成功后只清除 video QA，保留
+description QA。
 
 记录人工审核：
 
 ```bash
 python scripts/pipeline.py review \
-  --case-id milk_carton_pours_orange_juice \
+  --group classic_fairy_tale_film_conflicts \
+  --case-id alice_drink_makes_her_grow \
   --video-id v001 \
   --decision verified
 ```
 
-运行 Gemini QA（默认 effort 为 `medium`）：
+## QA 与 Judge
+
+`qa-judge` 先运行 QA，再用 Luna Pro 判定本次筛选范围内尚未判定的回答：
 
 ```bash
-python scripts/pipeline.py qa \
-  --input-mode video \
-  --qa-model google/gemini-3.1-pro-preview \
-  --case-workers 2 \
-  --qa-workers 3
-```
-
-运行 Qwen，可关闭或开启 thinking：
-
-```bash
-python scripts/pipeline.py qa \
+python scripts/pipeline.py qa-judge \
   --group classic_fairy_tale_film_conflicts \
-  --input-mode description \
-  --qa-model qwen3.8-max \
-  --thinking-effort all
-  --group classic_physics_chemistry_experiments \
-
-python scripts/pipeline.py qa \
-  --qa-model qwen3.8-max \
-  --thinking-effort default
-```
-
-Qwen 不再把视频编码为 Base64，而是将本地绝对路径转换为 `file:///...` URI 后交给 DashScope SDK 上传。请求使用 `fps=2`，本地视频上限为 100 MiB；更大的视频应先放到 OSS 或可公开访问的 URL。
-
-运行 Kimi K3：
-
-```bash
-python scripts/pipeline.py qa \
-  --qa-model kimi-k3 \
-  --case-workers 2 \
-  --qa-workers 3
-```
-
-Kimi 不支持 `none`；省略 effort 或使用 `default`。`all` 对 Kimi 也只运行一次默认模式，实际 reasoning effort 是服务默认 `max`。
-
-运行纯文字 description QA：
-
-```bash
-python scripts/pipeline.py qa \
-  --group classic_fairy_tale_film_conflicts \
-  --input-mode description \
-  --qa-model kimi-k3
-```
-
-description 模式只处理 conflict 条目，不发送 Base64、文件 URI 或 `video_url`。`qa` 不传 `--input-mode` 时仍默认为 `video`。
-
-QA 可重复传 `--case-id`、`--video-id`、`--question-id` 和 `--thinking-effort`。请求并发上限由 `--openrouter-workers` 控制，启动速率由 `--openrouter-rpm` 控制；这两个历史参数名对 Gemini、Qwen、Kimi 都生效。
-
-Judge 可按模型和 effort 筛选：
-
-```bash
-python scripts/pipeline.py judge \
-  --group classic_fairy_tale_film_conflicts \
-  --qa-model qwen3.8-max \
-  --thinking-effort all \
-  --input-mode description \
-  --force
-```
-
-`judge --force` 会先按当前的 case、video、question、QA model 和 thinking
-effort 筛选范围，把已有 judgment 全部清空并写回 case JSON，然后才开始重新
-判定。若重判过程中断，已经成功的条目保留新 judgment，尚未成功的条目保持
-`null`，不会与旧 judgment 混合。
-
-生成 JSON summary 和 Markdown report：
-
-```bash
-python scripts/pipeline.py summary
-python scripts/pipeline.py report
-```
-
-`summary` 和 `report` 的 `--input-mode` 支持 `video` 或 `description`，默认只统计 `video`。description 的默认输出分别为 `description_knowledge_conflict_summary.json` 和 `description_case_results.md`。
-
-配对比较同一个 case、video、question、model 和 thinking effort 下的最新 video/description judgment：
-
-```bash
-python scripts/pipeline.py compare \
-  --group classic_fairy_tale_film_conflicts \
+  --input video \
   --qa-model qwen3.8-max \
   --thinking-effort all
 ```
 
-默认写入 `results/<group>/video_description_comparison.json`，包含 verdict 转移矩阵、两种条件的 trapped/ambiguous rate、差值、未配对数量和逐 pair 明细。
-
-按模型筛选：
+纯文字实验：
 
 ```bash
-python scripts/pipeline.py summary \
+python scripts/pipeline.py qa-judge \
   --group classic_fairy_tale_film_conflicts \
-  --qa-model qwen3.8-max \
-  --thinking-effort none \
   --input description \
-  --output results/classic_fairy_tale_film_conflicts/des_qwen_fairy_none_summary.json
-
-python scripts/pipeline.py summary \
-  --group classic_physics_chemistry_experiments \
   --qa-model qwen3.8-max \
-  --thinking-effort none \
-  --input description \
-  --output results/classic_physics_chemistry_experiments/qwen_exp_none_summary.json
-
-python scripts/pipeline.py report \
-  --group classic_fairy_tale_film_conflicts \
-  --qa-model qwen3.8-max \
-  --input description \
-  --output results/classic_fairy_tale_film_conflicts/des_qwen_fairy_report.md
+  --thinking-effort all
 ```
 
-只筛选 Gemini 且没有显式指定输出时，文件名分别为：
+`--input` 只接受 `video` 或 `description`，默认 `video`。不再支持
+`--input-mode`。
 
-- `results/gemini_knowledge_conflict_summary.json`
-- `results/gemini_case_results.md`
+模型与 effort：
 
-其他筛选或混合模型使用：
+- Qwen `qwen3.8-max`：`none` 或 `default`；`all` 同时执行两者。
+- Kimi `kimi-k3`：仅 `default`，实际 reasoning effort 为 `max`。
+- Gemini `google/gemini-3.1-pro-preview`：仅 `default`，实际 reasoning
+  effort 为 `medium`。
 
-- `results/knowledge_conflict_summary.json`
-- `results/case_results.md`
+QA 在每个 video 对象内部按以下字段去重：
 
-## 完整流程
+```text
+input + question_id + qa_model + thinking_effort
+```
+
+重复运行不会读取整个视频计算 SHA-256，也不会追加重复结果。视频、description
+或 questions 由 pipeline 重建时，相应 QA 会被自动清理。若手工替换同路径视频，
+必须使用 `--force-qa`。
+
+强制运行有两个互斥选项：
 
 ```bash
-python scripts/pipeline.py all --qa-model kimi-k3
+python scripts/pipeline.py qa-judge ... --force-qa
+python scripts/pipeline.py qa-judge ... --force-judge
 ```
 
-`all` 顺序执行 author、questions、generate、video QA、video judge，任一阶段失败就停止。它不会执行 describe、description QA、review、summary、report 或 compare。
+- `--force-qa` 删除筛选范围内全部 QA 记录及其中的 judgment，再重新执行。
+- `--force-judge` 保留 QA 回答，只清空全部匹配 judgment，再重新判定。
+
+Force 会先加载和验证全部选中 case、依赖、凭据、视频或 description，然后统一
+计算并写回所有清理。只有全部 case 清理完成后才会发出第一个模型请求。不会执行
+一个 case 后再清理下一个 case。若清理失败，本次运行不发出任何新请求。
+
+部分 QA 请求失败时，Judge 仍会处理其余已完成回答，最终返回非零退出码。命令
+结束打印：
+
+```text
+QA: <已完成>/<总数>
+Judge: <已完成>/<总数>
+```
+
+Judge 的新标签为：
+
+- `context_grounded`
+- `knowledge_trapped`
+- `ambiguous_or_unjudgeable`
+
+旧 JSON 中的 `video_grounded` 无需迁移；读取和统计时会解释为
+`context_grounded`。
+
+## Summary 与 Report
+
+`summarize` 同时生成按 effort 拆分的 JSON summary 和一份合并 Markdown
+report。必须指定一个 QA 模型：
+
+```bash
+python scripts/pipeline.py summarize \
+  --group classic_fairy_tale_film_conflicts \
+  --input description \
+  --qa-model qwen3.8-max \
+  --thinking-effort all
+```
+
+模型短名映射为 `qwen`、`kimi` 和 `gemini`。以上命令自动生成：
+
+```text
+results/classic_fairy_tale_film_conflicts/qwen_description_none_summary.json
+results/classic_fairy_tale_film_conflicts/qwen_description_default_summary.json
+results/classic_fairy_tale_film_conflicts/qwen_description_report.md
+```
+
+不指定 `--thinking-effort` 或使用 `all` 时，只为现有已判定结果中实际存在的
+effort 分别生成 summary；若没有结果，则生成模型默认 effort 的空 summary。
+不同 effort 的最新结果放在同一份 report 中。不再支持手工指定 `--output`。

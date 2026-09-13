@@ -4,17 +4,17 @@ from __future__ import annotations
 
 import argparse
 import os
-import subprocess
 import sys
 from pathlib import Path
 from typing import Any
 
-from .authoring import command_author, command_judge, command_questions
-from .core import PipelineError, command_split_source, validate_group
-from .descriptions import command_describe
+from .authoring import command_author, command_questions
+from .core import PipelineError, validate_group
+from .descriptions import command_description
+from .evaluation import command_qa_judge
 from .generation import command_generate, command_review
-from .qa import REQUEST_TIMEOUT_SECONDS, command_qa
-from .reporting import command_compare, command_report, command_summary
+from .qa import REQUEST_TIMEOUT_SECONDS
+from .reporting import command_summarize
 from .settings import (
     ARK_BASE_URL,
     CLI_THINKING_EFFORTS,
@@ -25,7 +25,6 @@ from .settings import (
     DEFAULT_REQUEST_WORKERS,
     DEFAULT_SEEDANCE_TOTAL_WORKERS,
     DEFAULT_SOURCE_CASE_DIR,
-    PROJECT_ROOT,
     QA_MODELS,
     SEEDANCE_MODEL,
 )
@@ -68,8 +67,11 @@ def _add_retries(parser: argparse.ArgumentParser, *, timeout: int = 900) -> None
     parser.add_argument("--timeout", type=int, default=timeout)
 
 
-def _add_result_filters(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--qa-model", action="append", choices=QA_MODELS)
+def _add_input(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--input", choices=("video", "description"), default="video")
+
+
+def _add_thinking_effort(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--thinking-effort",
         action="append",
@@ -80,13 +82,6 @@ def _add_result_filters(parser: argparse.ArgumentParser) -> None:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(add_help=False)
     subparsers = parser.add_subparsers(dest="command", required=True)
-
-    split_source = _stage(subparsers, "split-source")
-    split_source.add_argument("--source-md", required=True, type=Path)
-    split_source.add_argument("--output-dir", type=Path, default=DEFAULT_SOURCE_CASE_DIR)
-    _add_group(split_source)
-    split_source.add_argument("--force", action="store_true")
-    split_source.set_defaults(func=command_split_source)
 
     author = _stage(subparsers, "author")
     author.add_argument("--source-dir", type=Path, default=DEFAULT_SOURCE_CASE_DIR)
@@ -109,14 +104,14 @@ def build_parser() -> argparse.ArgumentParser:
     questions.add_argument("--force", action="store_true")
     questions.set_defaults(func=command_questions)
 
-    describe = _stage(subparsers, "describe")
-    _add_case_selection(describe)
-    _add_case_workers(describe)
-    _add_request_limits(describe)
-    describe.add_argument("--video-id", action="append")
-    _add_retries(describe)
-    describe.add_argument("--force", action="store_true")
-    describe.set_defaults(func=command_describe)
+    description = _stage(subparsers, "description")
+    _add_case_selection(description)
+    _add_case_workers(description)
+    _add_request_limits(description)
+    description.add_argument("--video-id", action="append")
+    _add_retries(description)
+    description.add_argument("--force", action="store_true")
+    description.set_defaults(func=command_description)
 
     generate = _stage(subparsers, "generate")
     _add_case_selection(generate)
@@ -148,192 +143,29 @@ def build_parser() -> argparse.ArgumentParser:
     _add_group(review)
     review.set_defaults(func=command_review)
 
-    qa = _stage(subparsers, "qa")
-    _add_case_selection(qa)
-    qa.add_argument("--video-id", action="append")
-    qa.add_argument("--question-id", action="append")
-    qa.add_argument("--qa-model", choices=QA_MODELS, default=DEFAULT_QA_MODEL)
-    qa.add_argument(
-        "--input-mode", choices=("video", "description"), default="video"
-    )
-    _add_case_workers(qa)
-    _add_request_limits(qa)
-    qa.add_argument(
-        "--thinking-effort",
-        action="append",
-        choices=(*CLI_THINKING_EFFORTS, "all"),
-    )
-    qa.add_argument("--qa-workers", type=int, default=3)
-    _add_retries(qa, timeout=REQUEST_TIMEOUT_SECONDS)
-    qa.add_argument("--force", action="store_true")
-    qa.set_defaults(func=command_qa)
+    qa_judge = _stage(subparsers, "qa-judge")
+    _add_case_selection(qa_judge)
+    qa_judge.add_argument("--video-id", action="append")
+    qa_judge.add_argument("--question-id", action="append")
+    qa_judge.add_argument("--qa-model", choices=QA_MODELS, default=DEFAULT_QA_MODEL)
+    _add_input(qa_judge)
+    _add_case_workers(qa_judge)
+    _add_request_limits(qa_judge)
+    _add_thinking_effort(qa_judge)
+    qa_judge.add_argument("--qa-workers", type=int, default=3)
+    _add_retries(qa_judge, timeout=REQUEST_TIMEOUT_SECONDS)
+    force = qa_judge.add_mutually_exclusive_group()
+    force.add_argument("--force-qa", action="store_true")
+    force.add_argument("--force-judge", action="store_true")
+    qa_judge.set_defaults(func=command_qa_judge)
 
-    judge = _stage(subparsers, "judge")
-    _add_case_selection(judge)
-    judge.add_argument("--video-id", action="append")
-    judge.add_argument("--question-id", action="append")
-    judge.add_argument(
-        "--input-mode", choices=("video", "description", "all"), default="all"
-    )
-    _add_result_filters(judge)
-    _add_case_workers(judge)
-    _add_request_limits(judge)
-    _add_retries(judge)
-    judge.add_argument("--force", action="store_true")
-    judge.set_defaults(func=command_judge)
-
-    summary = _stage(subparsers, "summary")
-    _add_case_selection(summary)
-    _add_result_filters(summary)
-    summary.add_argument(
-        "--input-mode", choices=("video", "description"), default="video"
-    )
-    summary.add_argument("--output", type=Path)
-    summary.set_defaults(func=command_summary)
-
-    report = _stage(subparsers, "report")
-    _add_case_selection(report)
-    _add_result_filters(report)
-    report.add_argument(
-        "--input-mode", choices=("video", "description"), default="video"
-    )
-    report.add_argument("--output", type=Path)
-    report.set_defaults(func=command_report)
-
-    compare = _stage(subparsers, "compare")
-    _add_case_selection(compare)
-    _add_result_filters(compare)
-    compare.add_argument("--output", type=Path)
-    compare.set_defaults(func=command_compare)
-
-    all_stages = _stage(subparsers, "all")
-    all_stages.add_argument("--source-dir", type=Path, default=DEFAULT_SOURCE_CASE_DIR)
-    all_stages.add_argument("--dataset-dir", type=Path, default=DEFAULT_CASE_DIR)
-    all_stages.add_argument("--case-id", action="append")
-    _add_group(all_stages)
-    _add_case_workers(all_stages)
-    _add_request_limits(all_stages)
-    all_stages.add_argument("--seedance-workers", type=int, default=3)
-    all_stages.add_argument(
-        "--seedance-total-workers", type=int, default=DEFAULT_SEEDANCE_TOTAL_WORKERS
-    )
-    all_stages.add_argument("--qa-workers", type=int, default=2)
-    all_stages.add_argument("--qa-model", choices=QA_MODELS, default=DEFAULT_QA_MODEL)
-    all_stages.add_argument(
-        "--thinking-effort",
-        action="append",
-        choices=(*CLI_THINKING_EFFORTS, "all"),
-    )
-    all_stages.set_defaults(func=command_all)
+    summarize = _stage(subparsers, "summarize")
+    _add_case_selection(summarize)
+    summarize.add_argument("--qa-model", choices=QA_MODELS, required=True)
+    _add_input(summarize)
+    _add_thinking_effort(summarize)
+    summarize.set_defaults(func=command_summarize)
     return parser
-
-
-def _repeated(flag: str, values: list[str] | None) -> list[str]:
-    return [item for value in values or [] for item in (flag, value)]
-
-
-def command_all(args: argparse.Namespace) -> int:
-    """Run author, questions, generate, QA, and judge in isolated processes."""
-    entry = Path(__file__).resolve().parent.parent / "pipeline.py"
-    cases = _repeated("--case-id", args.case_id)
-    efforts = _repeated("--thinking-effort", args.thinking_effort)
-    group = ["--group", args.group] if args.group else []
-    request_limits = [
-        "--case-workers",
-        str(args.case_workers),
-        "--openrouter-workers",
-        str(args.openrouter_workers),
-        "--openrouter-rpm",
-        str(args.openrouter_rpm),
-    ]
-    stages = (
-        (
-            "author",
-            [
-                "author",
-                "--source-dir",
-                str(args.source_dir),
-                "--output-dir",
-                str(args.dataset_dir),
-                *cases,
-                *group,
-                *request_limits,
-            ],
-        ),
-        (
-            "questions",
-            [
-                "questions",
-                "--dataset-dir",
-                str(args.dataset_dir),
-                *cases,
-                *group,
-                *request_limits,
-            ],
-        ),
-        (
-            "generate",
-            [
-                "generate",
-                "--dataset-dir",
-                str(args.dataset_dir),
-                *cases,
-                *group,
-                "--case-workers",
-                str(args.case_workers),
-                "--seedance-workers",
-                str(args.seedance_workers),
-                "--seedance-total-workers",
-                str(args.seedance_total_workers),
-            ],
-        ),
-        (
-            "qa",
-            [
-                "qa",
-                "--dataset-dir",
-                str(args.dataset_dir),
-                *cases,
-                *group,
-                *request_limits,
-                "--qa-workers",
-                str(args.qa_workers),
-                "--qa-model",
-                args.qa_model,
-                *efforts,
-            ],
-        ),
-        (
-            "judge",
-            [
-                "judge",
-                "--dataset-dir",
-                str(args.dataset_dir),
-                *cases,
-                *group,
-                *request_limits,
-                "--qa-model",
-                args.qa_model,
-                "--input-mode",
-                "video",
-                *efforts,
-            ],
-        ),
-    )
-    for name, stage_args in stages:
-        print(f"\n===== {name} =====", flush=True)
-        completed = subprocess.run(
-            [sys.executable, str(entry), *stage_args],
-            cwd=PROJECT_ROOT,
-            check=False,
-        )
-        if completed.returncode:
-            print(
-                f"Stage {name} failed with exit code {completed.returncode}.",
-                file=sys.stderr,
-            )
-            return completed.returncode
-    return 0
 
 
 def _validate(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:

@@ -1,4 +1,4 @@
-﻿"""Case authoring, question generation, and answer judging."""
+﻿"""Case authoring and question generation."""
 
 from __future__ import annotations
 
@@ -11,8 +11,6 @@ from pathlib import Path
 from typing import Any
 
 from .core import *
-from .core import qa_result_input_mode
-from .qa import selected_thinking_efforts
 from .settings import *
 from .transport import *
 
@@ -232,8 +230,8 @@ three questions.
 Every question must explicitly include the supplied work_title and naturally
 frame the question within that work, for example "In the fairy tale
 Cinderella, ...?" or "In the film The Matrix, ...?" Require exactly one neutral
-question per semantic target. Do not create an alternate explicit-prior form,
-and reject normally, usually, typically, should, expected to, and supposed to.
+question per semantic target. Reject normally, usually, typically, should,
+expected to, and supposed to.
 
 Each question must stand alone without mentioning or alluding to video or
 visual evidence. Its normal reference must be the canonical answer from the
@@ -405,32 +403,6 @@ def question_prompts_for_group(group: str | None) -> tuple[str, str]:
         ) from exc
 
 
-JUDGE_SYSTEM_PROMPT = """Evaluate a question-answering response against the
-supplied context references. Extract the shortest answer that preserves the
-response's meaning.
-
-For video_role=conflict:
-- video_grounded means the response reports the conflict-context fact.
-- knowledge_trapped means it substitutes the normal-control answer for the
-  conflict-context fact.
-- ambiguous_or_unjudgeable covers missing, irrelevant, unresolved, mixed, or
-  otherwise unclassifiable answers.
-
-For video_role=control:
-- video_grounded means the response reports the normal-control fact.
-- never use knowledge_trapped; an answer matching the conflict reference or
-  neither reference is ambiguous_or_unjudgeable.
-
-If a response mentions both the normal-control outcome and the conflict-context
-outcome, do not classify it solely because either outcome appears in the text.
-Determine which outcome the response presents as its main answer to the
-question. For a conflict item, a main conflict-context answer is video_grounded
-and a main normal-control answer is knowledge_trapped.
-If the response does not make one outcome its main answer, classify it as ambiguous_or_unjudgeable.
-
-Evidence must be concise and use only the supplied answer and references.
-Return only the requested structured result."""
-
 def verify_draft(
     draft: dict[str, Any],
     *,
@@ -590,17 +562,17 @@ def authored_questions_to_questions(
 ) -> list[dict[str, Any]]:
     if (
         not isinstance(authored_questions, list)
-        or not 1 <= len(authored_questions) <= QUESTION_PAIR_LIMIT
+        or not 1 <= len(authored_questions) <= QUESTION_LIMIT
     ):
         raise PipelineError(
-            f"questions must contain 1-{QUESTION_PAIR_LIMIT} entries."
+            f"questions must contain 1-{QUESTION_LIMIT} entries."
         )
     questions: list[dict[str, Any]] = []
     for index, item in enumerate(authored_questions, start=1):
         prefix = f"questions[{index - 1}]"
         if not isinstance(item, dict):
             raise PipelineError(f"{prefix} must be an object.")
-        pair_id = f"q{index:03d}"
+        question_id = f"q{index:03d}"
         question_text = require_nonempty_string(
             item.get("question_en"),
             f"{prefix}.question_en",
@@ -615,9 +587,7 @@ def authored_questions_to_questions(
         )
         questions.append(
             {
-                "question_id": f"{pair_id}_implicit",
-                "question_pair_id": pair_id,
-                "question_type": "implicit_prior",
+                "question_id": question_id,
                 "text_en": question_text,
                 "conflict_video_reference_en": conflict_reference,
                 "normal_control_reference_en": normal_reference,
@@ -782,142 +752,4 @@ def command_questions(args: argparse.Namespace) -> int:
         print(
             "Derived outputs are now stale; rerun qa, judge, summary, and report."
         )
-    return 1 if failures else 0
-
-def find_question(case: dict[str, Any], question_id: str) -> dict[str, Any]:
-    for question in case["questions"]:
-        if question["question_id"] == question_id:
-            return question
-    raise PipelineError(
-        f"Question {question_id} was not found in case {case['case_id']}."
-    )
-
-
-def command_judge(args: argparse.Namespace) -> int:
-    api_key = require_openrouter_api_key()
-    request_limiter = make_openrouter_limiter(args)
-    selected_videos = set(args.video_id or [])
-    selected_questions = set(args.question_id or [])
-    selected_models = set(args.qa_model or [])
-    selected_efforts = selected_thinking_efforts(args.thinking_effort)
-    dataset_dir = grouped_dir(args.dataset_dir, args.group)
-    case_paths = iter_case_paths(dataset_dir, args.case_id)
-    completed = 0
-    failures = 0
-
-    def result_selected(video: dict[str, Any], qa_result: dict[str, Any]) -> bool:
-        return not (
-            (selected_videos and video["video_id"] not in selected_videos)
-            or (
-                selected_questions
-                and qa_result["question_id"] not in selected_questions
-            )
-            or (selected_models and qa_result.get("model") not in selected_models)
-            or (
-                args.input_mode != "all"
-                and qa_result_input_mode(qa_result) != args.input_mode
-            )
-            or (
-                selected_efforts is not None
-                and qa_result.get("thinking_effort") not in selected_efforts
-            )
-        )
-
-    if args.force:
-        cleared = 0
-        for case_path in case_paths:
-            case = load_case(case_path)
-            case_cleared = 0
-            for video in case["videos"]:
-                for qa_result in video["qa_results"]:
-                    if not result_selected(video, qa_result):
-                        continue
-                    if qa_result.get("judgment") is None:
-                        continue
-                    qa_result["judgment"] = None
-                    case_cleared += 1
-            if case_cleared:
-                atomic_write_json(case_path, case)
-                cleared += case_cleared
-        print(f"Cleared {cleared} existing judgment(s) before forced re-judging.")
-
-    def run_case(case_path: Path) -> int:
-        case = load_case(case_path)
-        case_completed = 0
-        for video in case["videos"]:
-            for qa_result in video["qa_results"]:
-                if not result_selected(video, qa_result):
-                    continue
-                if qa_result.get("judgment") is not None:
-                    continue
-                question = find_question(case, qa_result["question_id"])
-                judge_input = {
-                    "video_role": video["role"],
-                    "question": question["text_en"],
-                    "raw_answer": qa_result["raw_answer"],
-                    "normal_fact": case["conflict_spec"]["normal_fact_en"],
-                    "intended_video_fact": case["conflict_spec"][
-                        "intended_video_fact_en"
-                    ],
-                    "conflict_video_reference": question[
-                        "conflict_video_reference_en"
-                    ],
-                    "normal_control_reference": question[
-                        "normal_control_reference_en"
-                    ],
-                }
-                result, response = openrouter_json(
-                    messages=[
-                        {"role": "system", "content": JUDGE_SYSTEM_PROMPT},
-                        {
-                            "role": "user",
-                            "content": json.dumps(judge_input, ensure_ascii=False),
-                        },
-                    ],
-                    model=AUTHOR_JUDGE_MODEL,
-                    schema_name="knowledge_conflict_judgment",
-                    schema=JUDGMENT_SCHEMA,
-                    api_key=api_key,
-                    timeout=args.timeout,
-                    max_retries=args.max_retries,
-                    request_limiter=request_limiter,
-                )
-                if video["role"] == "control" and result.get(
-                    "verdict"
-                ) == "knowledge_trapped":
-                    raise PipelineError(
-                        "Luna Pro returned knowledge_trapped for a control video."
-                    )
-                qa_result["judgment"] = {
-                    "timestamp": utc_now(),
-                    "extracted_answer": require_nonempty_string(
-                        result.get("extracted_answer"), "extracted_answer"
-                    ),
-                    "verdict": result["verdict"],
-                    "confidence": float(result["confidence"]),
-                    "evidence": require_nonempty_string(
-                        result.get("evidence"), "evidence"
-                    ),
-                    "judge_model": AUTHOR_JUDGE_MODEL,
-                    "judge_request_id": response.get("id"),
-                }
-                atomic_write_json(case_path, case)
-                case_completed += 1
-                print(
-                    f"Judged {case['case_id']}/{video['video_id']}/"
-                    f"{question['question_id']}: {result['verdict']}"
-                )
-        return case_completed
-
-    workers = min(args.case_workers, len(case_paths))
-    with ThreadPoolExecutor(max_workers=workers) as executor:
-        futures = {executor.submit(run_case, path): path for path in case_paths}
-        for future in as_completed(futures):
-            case_path = futures[future]
-            try:
-                completed += future.result()
-            except PipelineError as exc:
-                failures += 1
-                print(f"Error judging case {case_path.stem}: {exc}", file=sys.stderr)
-    print(f"Wrote {completed} judgment(s) into case JSON files.")
     return 1 if failures else 0

@@ -1,43 +1,40 @@
-"""Generate aggregate JSON summaries and presentation-friendly Markdown reports."""
+"""Generate effort-specific JSON summaries and a combined Markdown report."""
 
 from __future__ import annotations
 
 import argparse
-import uuid
 from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any, Iterable
 
 from .core import (
     atomic_write_json,
+    atomic_write_text,
+    canonical_verdict,
     grouped_dir,
     iter_case_paths,
     load_case,
-    qa_result_context_sha256,
     qa_result_input_mode,
     utc_now,
 )
-from .qa import selected_thinking_efforts
+from .qa import (
+    expand_thinking_efforts,
+    get_backend,
+    qa_result_thinking_effort,
+)
 from .settings import (
-    DEFAULT_MARKDOWN_OUTPUT,
-    DEFAULT_SUMMARY_OUTPUT,
-    DESCRIPTION_COMPARISON_OUTPUT,
-    DESCRIPTION_MARKDOWN_OUTPUT,
-    DESCRIPTION_SUMMARY_OUTPUT,
-    GEMINI_MARKDOWN_OUTPUT,
-    GEMINI_QA_MODEL,
-    GEMINI_SUMMARY_OUTPUT,
     PROJECT_ROOT,
-    QUESTION_TYPES,
+    QA_MODEL_SLUGS,
+    RESULTS_DIR,
     VERDICTS,
 )
 
 
 def aggregate_video_verdict(verdicts: Iterable[str]) -> str:
-    observed = set(verdicts)
-    if "video_grounded" in observed and "knowledge_trapped" not in observed:
-        return "video_grounded"
-    if "knowledge_trapped" in observed and "video_grounded" not in observed:
+    observed = {canonical_verdict(verdict) for verdict in verdicts}
+    if "context_grounded" in observed and "knowledge_trapped" not in observed:
+        return "context_grounded"
+    if "knowledge_trapped" in observed and "context_grounded" not in observed:
         return "knowledge_trapped"
     return "ambiguous_or_unjudgeable"
 
@@ -46,16 +43,16 @@ def _safe_rate(numerator: int, denominator: int) -> float | None:
     return round(numerator / denominator, 6) if denominator else None
 
 
-def _summarize(
+def _summarize_counts(
     answers: dict[str, Counter[str]],
     videos: dict[str, Counter[str]],
 ) -> dict[str, Any]:
     conflict_answer_base = (
-        answers["conflict"]["video_grounded"]
+        answers["conflict"]["context_grounded"]
         + answers["conflict"]["knowledge_trapped"]
     )
     conflict_video_base = (
-        videos["conflict"]["video_grounded"]
+        videos["conflict"]["context_grounded"]
         + videos["conflict"]["knowledge_trapped"]
     )
     control_answers = sum(answers["control"].values())
@@ -78,7 +75,7 @@ def _summarize(
                     label: answers["control"][label] for label in sorted(VERDICTS)
                 },
                 "grounded_answer_rate": _safe_rate(
-                    answers["control"]["video_grounded"], control_answers
+                    answers["control"]["context_grounded"], control_answers
                 ),
             },
         },
@@ -98,107 +95,96 @@ def _summarize(
                     label: videos["control"][label] for label in sorted(VERDICTS)
                 },
                 "grounded_video_rate": _safe_rate(
-                    videos["control"]["video_grounded"], control_videos
+                    videos["control"]["context_grounded"], control_videos
                 ),
             },
         },
     }
 
 
-def default_summary_output(
-    qa_models: Iterable[str] | None,
-    group: str | None = None,
-    input_mode: str = "video",
-) -> Path:
-    if input_mode == "description":
-        output = DESCRIPTION_SUMMARY_OUTPUT
-    else:
-        output = (
-            GEMINI_SUMMARY_OUTPUT
-            if set(qa_models or []) == {GEMINI_QA_MODEL}
-            else DEFAULT_SUMMARY_OUTPUT
-        )
-    return grouped_dir(output.parent, group) / output.name
+def _effort_name(effort: str | None) -> str:
+    return "none" if effort is None else effort
 
 
-def command_summary(args: argparse.Namespace) -> int:
-    selected_models = set(args.qa_model or [])
-    selected_efforts = selected_thinking_efforts(args.thinking_effort)
-    latest: dict[tuple[Any, ...], tuple[str, str, dict[str, Any]]] = {}
-    dataset_dir = grouped_dir(args.dataset_dir, args.group)
-    for case_path in iter_case_paths(dataset_dir, args.case_id):
+def _result_matches(
+    result: dict[str, Any],
+    *,
+    qa_model: str,
+    input_mode: str,
+    efforts: set[str | None],
+) -> bool:
+    return (
+        result.get("model") == qa_model
+        and qa_result_input_mode(result) == input_mode
+        and qa_result_thinking_effort(result) in efforts
+    )
+
+
+def _newer(candidate: dict[str, Any], current: dict[str, Any] | None) -> bool:
+    if current is None:
+        return True
+    return (
+        str(candidate.get("timestamp", "")),
+        str(candidate.get("run_id", "")),
+    ) >= (
+        str(current.get("timestamp", "")),
+        str(current.get("run_id", "")),
+    )
+
+
+def build_summary(
+    case_paths: list[Path],
+    *,
+    qa_model: str,
+    input_mode: str,
+    effort: str | None,
+) -> dict[str, Any]:
+    latest: dict[tuple[str, str, str], tuple[str, dict[str, Any]]] = {}
+    for case_path in case_paths:
         case = load_case(case_path)
-        questions = {item["question_id"]: item for item in case["questions"]}
         for video in case["videos"]:
             for result in video["qa_results"]:
-                if qa_result_input_mode(result) != args.input_mode:
+                if not _result_matches(
+                    result,
+                    qa_model=qa_model,
+                    input_mode=input_mode,
+                    efforts={effort},
+                ) or not isinstance(result.get("judgment"), dict):
                     continue
-                if selected_models and result.get("model") not in selected_models:
+                key = (case["case_id"], video["video_id"], result["question_id"])
+                previous = latest.get(key)
+                if previous is not None and not _newer(result, previous[2]):
                     continue
-                if (
-                    selected_efforts is not None
-                    and result.get("thinking_effort") not in selected_efforts
-                ):
-                    continue
-                judgment = result.get("judgment")
-                if not isinstance(judgment, dict):
-                    continue
-                question = questions[result["question_id"]]
-                key = (
-                    case["case_id"],
-                    video["video_id"],
-                    qa_result_context_sha256(result),
-                    result["question_id"],
-                    result["model"],
-                    result.get("thinking_effort"),
+                judgment = dict(result["judgment"])
+                judgment["verdict"] = canonical_verdict(judgment["verdict"])
+                latest[key] = (
+                    video["role"],
+                    {**result, "judgment": judgment},
                 )
-                latest[key] = (video["role"], question["question_type"], judgment)
 
     answer_counts = {"conflict": Counter(), "control": Counter()}
-    typed_answers: dict[str, dict[str, Counter[str]]] = defaultdict(
-        lambda: {"conflict": Counter(), "control": Counter()}
-    )
-    grouped_videos: dict[tuple[Any, ...], list[str]] = defaultdict(list)
-    typed_grouped_videos: dict[tuple[Any, ...], list[str]] = defaultdict(list)
-    for key, (role, question_type, judgment) in latest.items():
-        verdict = judgment["verdict"]
+    grouped_videos: dict[tuple[str, str, str], list[str]] = defaultdict(list)
+    for key, (role, result) in latest.items():
+        verdict = result["judgment"]["verdict"]
         answer_counts[role][verdict] += 1
-        typed_answers[question_type][role][verdict] += 1
-        grouped_videos[(key[0], key[1], key[2], key[4], key[5], role)].append(
-            verdict
-        )
-        typed_grouped_videos[
-            (question_type, key[0], key[1], key[2], key[4], key[5], role)
-        ].append(verdict)
+        grouped_videos[(key[0], key[1], role)].append(verdict)
 
     video_counts = {"conflict": Counter(), "control": Counter()}
-    typed_videos: dict[str, dict[str, Counter[str]]] = defaultdict(
-        lambda: {"conflict": Counter(), "control": Counter()}
-    )
     case_counts: dict[str, dict[str, Counter[str]]] = defaultdict(
         lambda: {"conflict": Counter(), "control": Counter()}
     )
-    for key, verdicts in grouped_videos.items():
+    for (case_id, _, role), verdicts in grouped_videos.items():
         verdict = aggregate_video_verdict(verdicts)
-        case_id, role = key[0], key[-1]
         video_counts[role][verdict] += 1
         case_counts[case_id][role][verdict] += 1
-    for key, verdicts in typed_grouped_videos.items():
-        typed_videos[key[0]][key[-1]][aggregate_video_verdict(verdicts)] += 1
-
-    overall = _summarize(answer_counts, video_counts)
-    report = {
+    overall = _summarize_counts(answer_counts, video_counts)
+    return {
         "generated_at": utc_now(),
-        "input_mode": args.input_mode,
+        "qa_model": qa_model,
+        "input": input_mode,
+        "thinking_effort": _effort_name(effort),
         "answers": overall["answers"],
         "videos": overall["videos"],
-        "question_types": {
-            question_type: _summarize(
-                typed_answers[question_type], typed_videos[question_type]
-            )
-            for question_type in QUESTION_TYPES
-            if question_type in typed_answers
-        },
         "cases": {
             case_id: {
                 role: {
@@ -212,12 +198,6 @@ def command_summary(args: argparse.Namespace) -> int:
             for case_id, counts in sorted(case_counts.items())
         },
     }
-    output = args.output or default_summary_output(
-        args.qa_model, args.group, args.input_mode
-    )
-    atomic_write_json(output, report)
-    print(f"Wrote summary: {output}")
-    return 0
 
 
 def _text(value: Any) -> str:
@@ -241,322 +221,173 @@ def _local_video_link(local_path: Any) -> str:
     return f"[{label}]({target})"
 
 
-def _result_selected(
-    result: dict[str, Any],
-    models: set[str] | None,
-    efforts: set[str | None] | None,
-    input_mode: str,
-) -> bool:
-    return (
-        qa_result_input_mode(result) == input_mode
-        and (models is None or result.get("model") in models)
-        and (efforts is None or result.get("thinking_effort") in efforts)
-    )
-
-
-def _case_markdown(
-    case: dict[str, Any],
-    *,
-    models: set[str] | None,
-    efforts: set[str | None] | None,
-    input_mode: str,
-) -> list[str]:
-    title = _markdown_value(case["title"]).replace("#", r"\#")
-    lines = [f"## {title}", ""]
-    for index, question in enumerate(case["questions"], start=1):
-        lines.extend(
-            [
-                f"### Question {index}",
-                "",
-                f"**Question pair:** {_markdown_value(question['question_pair_id'])}",
-                "",
-                f"**Question type:** {_markdown_value(question['question_type'])}",
-                "",
-                f"**Question:** {_markdown_value(question['text_en'])}",
-                "",
-            ]
-        )
-        for video in case["videos"]:
-            results = [
-                result
-                for result in video["qa_results"]
-                if result.get("question_id") == question["question_id"]
-                and _result_selected(result, models, efforts, input_mode)
-            ]
-            if input_mode == "description" and not results:
-                continue
-            lines.extend(
-                [
-                    f"#### Video `{_markdown_value(video['video_id'])}`",
-                    "",
-                ]
-            )
-            if input_mode == "description":
-                lines.extend(
-                    [
-                        "**Context:** "
-                        f"{_markdown_value(results[-1].get('context_text_en'))}",
-                        "",
-                    ]
-                )
-            else:
-                lines.extend(
-                    [
-                        f"**Local file:** {_local_video_link(video['local_path'])}",
-                        "",
-                    ]
-                )
-            results = results or [{}]
-            for result_index, result in enumerate(results, start=1):
-                judgment = result.get("judgment")
-                judgment = judgment if isinstance(judgment, dict) else {}
-                lines.extend(
-                    [
-                        f"##### QA result {result_index}",
-                        "",
-                        f"- **QA model:** {_markdown_value(result.get('model'))}",
-                        "- **Thinking effort:** "
-                        f"{_markdown_value(result.get('thinking_effort'))}",
-                    ]
-                )
-                if result.get("effective_reasoning_effort") is not None:
-                    lines.append(
-                        "- **Effective reasoning effort:** "
-                        f"{_markdown_value(result['effective_reasoning_effort'])}"
-                    )
-                lines.extend(
-                    [
-                        f"- **Answer:** {_markdown_value(result.get('raw_answer'))}",
-                        f"- **Verdict:** {_markdown_value(judgment.get('verdict'))}",
-                        f"- **Confidence:** {_markdown_value(judgment.get('confidence'))}",
-                        "",
-                    ]
-                )
-    return lines
+def _latest_results(
+    results: Iterable[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    latest: dict[str | None, dict[str, Any]] = {}
+    for result in results:
+        effort = qa_result_thinking_effort(result)
+        if _newer(result, latest.get(effort)):
+            latest[effort] = result
+    return [latest[key] for key in sorted(latest, key=lambda value: str(value))]
 
 
 def build_markdown(
     case_paths: list[Path],
     *,
-    qa_models: set[str] | None = None,
-    thinking_efforts: set[str | None] | None = None,
-    input_mode: str = "video",
+    qa_model: str,
+    input_mode: str,
+    efforts: set[str | None],
 ) -> str:
-    lines = [f"# {input_mode.title()} Knowledge Conflict Results", ""]
+    effort_names = ", ".join(
+        _effort_name(item) for item in sorted(efforts, key=str)
+    )
+    lines = [
+        f"# {input_mode.title()} Knowledge Conflict Results",
+        "",
+        f"**QA model:** {_markdown_value(qa_model)}",
+        "",
+        f"**Thinking efforts:** {effort_names}",
+        "",
+    ]
     for path in case_paths:
-        lines.extend(
-            _case_markdown(
-                load_case(path),
-                models=qa_models,
-                efforts=thinking_efforts,
-                input_mode=input_mode,
+        case = load_case(path)
+        title = _markdown_value(case["title"]).replace("#", r"\#")
+        lines.extend([f"## {title}", ""])
+        for index, question in enumerate(case["questions"], start=1):
+            lines.extend(
+                [
+                    f"### Question {index}",
+                    "",
+                    f"**Question:** {_markdown_value(question['text_en'])}",
+                    "",
+                ]
             )
-        )
+            for video in case["videos"]:
+                matching = _latest_results(
+                    result
+                    for result in video["qa_results"]
+                    if result.get("question_id") == question["question_id"]
+                    and _result_matches(
+                        result,
+                        qa_model=qa_model,
+                        input_mode=input_mode,
+                        efforts=efforts,
+                    )
+                )
+                if input_mode == "description" and not matching:
+                    continue
+                lines.extend([f"#### Video `{video['video_id']}`", ""])
+                if input_mode == "description":
+                    lines.extend(
+                        [
+                            "**Context:** "
+                            f"{_markdown_value(matching[-1].get('context_text_en'))}",
+                            "",
+                        ]
+                    )
+                else:
+                    lines.extend(
+                        [f"**Local file:** {_local_video_link(video['local_path'])}", ""]
+                    )
+                for result_index, result in enumerate(matching or [{}], start=1):
+                    judgment = result.get("judgment")
+                    judgment = judgment if isinstance(judgment, dict) else {}
+                    verdict = canonical_verdict(judgment.get("verdict", ""))
+                    effort_display = (
+                        _effort_name(qa_result_thinking_effort(result))
+                        if result
+                        else ""
+                    )
+                    lines.extend(
+                        [
+                            f"##### QA result {result_index}",
+                            "",
+                            f"- **QA model:** {_markdown_value(result.get('model'))}",
+                            f"- **Thinking effort:** {effort_display}",
+                        ]
+                    )
+                    if result.get("effective_reasoning_effort") is not None:
+                        lines.append(
+                            "- **Effective reasoning effort:** "
+                            f"{_markdown_value(result['effective_reasoning_effort'])}"
+                        )
+                    lines.extend(
+                        [
+                            f"- **Answer:** {_markdown_value(result.get('raw_answer'))}",
+                            f"- **Verdict:** {_markdown_value(verdict)}",
+                            f"- **Confidence:** {_markdown_value(judgment.get('confidence'))}",
+                            "",
+                        ]
+                    )
     return "\n".join(lines).rstrip() + "\n"
 
 
-def _atomic_write_text(path: Path, content: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
-    try:
-        temporary.write_text(content, encoding="utf-8", newline="\n")
-        temporary.replace(path)
-    finally:
-        temporary.unlink(missing_ok=True)
+def _discover_efforts(
+    case_paths: list[Path],
+    *,
+    qa_model: str,
+    input_mode: str,
+) -> tuple[str | None, ...]:
+    backend = get_backend(qa_model)
+    observed: set[str | None] = set()
+    for path in case_paths:
+        case = load_case(path)
+        for video in case["videos"]:
+            for result in video["qa_results"]:
+                effort = qa_result_thinking_effort(result)
+                if (
+                    result.get("model") == qa_model
+                    and qa_result_input_mode(result) == input_mode
+                    and isinstance(result.get("judgment"), dict)
+                    and effort in backend.thinking_efforts
+                ):
+                    observed.add(effort)
+    selected = tuple(
+        effort for effort in backend.thinking_efforts if effort in observed
+    )
+    return selected or (backend.default_thinking_effort,)
 
 
-def default_markdown_output(
-    qa_models: Iterable[str] | None,
-    group: str | None = None,
-    input_mode: str = "video",
-) -> Path:
-    if input_mode == "description":
-        output = DESCRIPTION_MARKDOWN_OUTPUT
-    else:
-        output = (
-            GEMINI_MARKDOWN_OUTPUT
-            if set(qa_models or []) == {GEMINI_QA_MODEL}
-            else DEFAULT_MARKDOWN_OUTPUT
-        )
-    return grouped_dir(output.parent, group) / output.name
-
-
-def command_report(args: argparse.Namespace) -> int:
+def command_summarize(args: argparse.Namespace) -> int:
     dataset_dir = grouped_dir(args.dataset_dir, args.group)
     paths = iter_case_paths(dataset_dir, args.case_id)
-    selected_models = set(args.qa_model) if args.qa_model else None
-    selected_efforts = selected_thinking_efforts(args.thinking_effort)
-    output = args.output or default_markdown_output(
-        args.qa_model, args.group, args.input_mode
+    requested = list(args.thinking_effort or [])
+    efforts = (
+        expand_thinking_efforts(requested, args.qa_model)
+        if requested and "all" not in requested
+        else _discover_efforts(
+            paths,
+            qa_model=args.qa_model,
+            input_mode=args.input,
+        )
     )
-    _atomic_write_text(
-        output,
+    result_dir = grouped_dir(RESULTS_DIR, args.group)
+    model_slug = QA_MODEL_SLUGS[args.qa_model]
+    for effort in efforts:
+        output = result_dir / (
+            f"{model_slug}_{args.input}_{_effort_name(effort)}_summary.json"
+        )
+        atomic_write_json(
+            output,
+            build_summary(
+                paths,
+                qa_model=args.qa_model,
+                input_mode=args.input,
+                effort=effort,
+            ),
+        )
+        print(f"Wrote summary: {output}")
+
+    report_output = result_dir / f"{model_slug}_{args.input}_report.md"
+    atomic_write_text(
+        report_output,
         build_markdown(
             paths,
-            qa_models=selected_models,
-            thinking_efforts=selected_efforts,
-            input_mode=args.input_mode,
+            qa_model=args.qa_model,
+            input_mode=args.input,
+            efforts=set(efforts),
         ),
     )
-    print(f"Wrote Markdown: {output}")
-    return 0
-
-
-def _comparison_condition(result: dict[str, Any]) -> dict[str, Any]:
-    judgment = result["judgment"]
-    return {
-        "run_id": result["run_id"],
-        "timestamp": result.get("timestamp"),
-        "context_sha256": qa_result_context_sha256(result),
-        "verdict": judgment["verdict"],
-    }
-
-
-def _comparison_metrics(records: list[dict[str, Any]]) -> dict[str, Any]:
-    paired = [
-        record
-        for record in records
-        if record.get("video") is not None and record.get("description") is not None
-    ]
-    video_counts: Counter[str] = Counter()
-    description_counts: Counter[str] = Counter()
-    transitions = {
-        source: {target: 0 for target in sorted(VERDICTS)}
-        for source in sorted(VERDICTS)
-    }
-    for record in paired:
-        video_verdict = record["video"]["verdict"]
-        description_verdict = record["description"]["verdict"]
-        video_counts[video_verdict] += 1
-        description_counts[description_verdict] += 1
-        transitions[video_verdict][description_verdict] += 1
-
-    def condition_metrics(counts: Counter[str]) -> dict[str, Any]:
-        classifiable = counts["video_grounded"] + counts["knowledge_trapped"]
-        total = sum(counts.values())
-        return {
-            "labels": {label: counts[label] for label in sorted(VERDICTS)},
-            "ambiguous_rate": _safe_rate(
-                counts["ambiguous_or_unjudgeable"], total
-            ),
-            "trapped_rate": _safe_rate(
-                counts["knowledge_trapped"], classifiable
-            ),
-        }
-
-    video_metrics = condition_metrics(video_counts)
-    description_metrics = condition_metrics(description_counts)
-    video_rate = video_metrics["trapped_rate"]
-    description_rate = description_metrics["trapped_rate"]
-    difference = (
-        round(description_rate - video_rate, 6)
-        if video_rate is not None and description_rate is not None
-        else None
-    )
-    return {
-        "paired": len(paired),
-        "video_only": sum(
-            record.get("video") is not None and record.get("description") is None
-            for record in records
-        ),
-        "description_only": sum(
-            record.get("video") is None and record.get("description") is not None
-            for record in records
-        ),
-        "video": video_metrics,
-        "description": description_metrics,
-        "description_minus_video_trapped_rate": difference,
-        "verdict_transitions": transitions,
-    }
-
-
-def default_comparison_output(group: str | None = None) -> Path:
-    return grouped_dir(
-        DESCRIPTION_COMPARISON_OUTPUT.parent, group
-    ) / DESCRIPTION_COMPARISON_OUTPUT.name
-
-
-def command_compare(args: argparse.Namespace) -> int:
-    selected_models = set(args.qa_model or [])
-    selected_efforts = selected_thinking_efforts(args.thinking_effort)
-    dataset_dir = grouped_dir(args.dataset_dir, args.group)
-    latest: dict[tuple[Any, ...], dict[str, dict[str, Any]]] = defaultdict(dict)
-
-    for case_path in iter_case_paths(dataset_dir, args.case_id):
-        case = load_case(case_path)
-        for video in case["videos"]:
-            if video["role"] != "conflict":
-                continue
-            for result in video["qa_results"]:
-                mode = qa_result_input_mode(result)
-                if mode not in ("video", "description"):
-                    continue
-                if selected_models and result.get("model") not in selected_models:
-                    continue
-                if (
-                    selected_efforts is not None
-                    and result.get("thinking_effort") not in selected_efforts
-                ):
-                    continue
-                if not isinstance(result.get("judgment"), dict):
-                    continue
-                key = (
-                    case["case_id"],
-                    video["video_id"],
-                    result["question_id"],
-                    result["model"],
-                    result.get("thinking_effort"),
-                )
-                previous = latest[key].get(mode)
-                if previous is None or str(result.get("timestamp", "")) >= str(
-                    previous.get("timestamp", "")
-                ):
-                    latest[key][mode] = result
-
-    records: list[dict[str, Any]] = []
-    paired_items: list[dict[str, Any]] = []
-    for key, modes in sorted(latest.items(), key=lambda item: tuple(map(str, item[0]))):
-        case_id, video_id, question_id, model, effort = key
-        record = {
-            "case_id": case_id,
-            "video_id": video_id,
-            "question_id": question_id,
-            "model": model,
-            "thinking_effort": effort,
-            "video": (
-                _comparison_condition(modes["video"])
-                if "video" in modes
-                else None
-            ),
-            "description": (
-                _comparison_condition(modes["description"])
-                if "description" in modes
-                else None
-            ),
-        }
-        records.append(record)
-        if record["video"] is not None and record["description"] is not None:
-            paired_items.append(record)
-
-    grouped_records: dict[tuple[str, Any], list[dict[str, Any]]] = defaultdict(list)
-    for record in records:
-        grouped_records[(record["model"], record["thinking_effort"])].append(record)
-    report = {
-        "generated_at": utc_now(),
-        "overall": _comparison_metrics(records),
-        "by_model_effort": [
-            {
-                "model": model,
-                "thinking_effort": effort,
-                **_comparison_metrics(items),
-            }
-            for (model, effort), items in sorted(
-                grouped_records.items(), key=lambda item: tuple(map(str, item[0]))
-            )
-        ],
-        "pairs": paired_items,
-    }
-    output = args.output or default_comparison_output(args.group)
-    atomic_write_json(output, report)
-    print(f"Wrote comparison: {output}")
+    print(f"Wrote report: {report_output}")
     return 0

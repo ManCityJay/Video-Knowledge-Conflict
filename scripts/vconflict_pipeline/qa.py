@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import base64
-import hashlib
 import os
 import sys
+import threading
 import uuid
 from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -20,7 +20,6 @@ from .core import (
     grouped_dir,
     iter_case_paths,
     load_case,
-    qa_result_context_sha256,
     qa_result_input_mode,
     resolve_video_path,
     sha256_text,
@@ -287,12 +286,12 @@ def _gemini_payload(
     video_data_url: str,
     thinking_effort: str | None,
 ) -> dict[str, Any]:
-    if thinking_effort not in ("low", "medium", "high"):
-        raise PipelineError("Gemini thinking effort must be low, medium, or high.")
+    if thinking_effort != "default":
+        raise PipelineError("Gemini thinking effort must be default.")
     return {
         "model": GEMINI_QA_MODEL,
         "temperature": 0.0,
-        "reasoning": {"effort": thinking_effort},
+        "reasoning": {"effort": "medium"},
         "stream": False,
         "messages": [
             {
@@ -340,12 +339,12 @@ def _gemini_description_payload(
     prompt_text: str,
     thinking_effort: str | None,
 ) -> dict[str, Any]:
-    if thinking_effort not in ("low", "medium", "high"):
-        raise PipelineError("Gemini thinking effort must be low, medium, or high.")
+    if thinking_effort != "default":
+        raise PipelineError("Gemini thinking effort must be default.")
     return {
         "model": GEMINI_QA_MODEL,
         "temperature": 0.0,
-        "reasoning": {"effort": thinking_effort},
+        "reasoning": {"effort": "medium"},
         "stream": False,
         "messages": [{"role": "user", "content": prompt_text}],
     }
@@ -368,13 +367,14 @@ def _kimi_description_payload(
 
 GEMINI_BACKEND = QABackend(
     model=GEMINI_QA_MODEL,
-    thinking_efforts=("low", "medium", "high"),
-    default_thinking_effort="medium",
+    thinking_efforts=("default",),
+    default_thinking_effort="default",
     temperature=0.0,
     api_key_variable="OPENROUTER_API_KEY",
     service="OpenRouter",
     endpoint=lambda: OPENROUTER_URL,
     build_payload=_gemini_payload,
+    effective_reasoning_effort="medium",
 )
 QWEN_BACKEND = QABackend(
     model=QWEN_QA_MODEL,
@@ -443,41 +443,31 @@ def expand_thinking_efforts(
     return tuple(effort for effort in backend.thinking_efforts if effort in selected)
 
 
-def selected_thinking_efforts(
-    values: Iterable[str] | None,
-) -> set[str | None] | None:
-    requested = list(values or [])
-    if not requested or "all" in requested:
-        return None
-    return {normalize_thinking_effort(value) for value in requested}
+def canonical_thinking_effort(model: Any, value: Any) -> Any:
+    """Treat legacy Gemini medium results as the new default effort."""
+    if model == GEMINI_QA_MODEL and value == "medium":
+        return "default"
+    return value
 
 
-def sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    try:
-        with path.open("rb") as source:
-            for chunk in iter(lambda: source.read(1024 * 1024), b""):
-                digest.update(chunk)
-    except OSError as exc:
-        raise PipelineError(f"Could not hash video file {path}: {exc}") from exc
-    return digest.hexdigest()
+def qa_result_thinking_effort(result: dict[str, Any]) -> Any:
+    return canonical_thinking_effort(
+        result.get("model"), result.get("thinking_effort")
+    )
 
 
 def qa_result_key(result: dict[str, Any]) -> tuple[Any, ...]:
     return (
         qa_result_input_mode(result),
-        qa_result_context_sha256(result),
         result.get("question_id"),
-        result.get("question"),
         result.get("model"),
-        result.get("thinking_effort"),
+        qa_result_thinking_effort(result),
     )
 
 
 def run_qa_batch(
     *,
     input_mode: str,
-    context_hash: str,
     video_path: Path | None,
     context_text: str | None,
     question_runs: list[tuple[dict[str, Any], str | None]],
@@ -543,7 +533,6 @@ def run_qa_batch(
             "run_id": uuid.uuid4().hex,
             "timestamp": utc_now(),
             "input_mode": input_mode,
-            "context_sha256": context_hash,
             "question_id": question["question_id"],
             "question": question["text_en"],
             "raw_answer": backend.extract_answer(response),
@@ -553,9 +542,7 @@ def run_qa_batch(
             "request_id": response.get("id"),
             "judgment": None,
         }
-        if input_mode == "video":
-            result["video_sha256"] = context_hash
-        else:
+        if input_mode == "description":
             result["context_text_en"] = context_text
         if backend.effective_reasoning_effort is not None:
             result["effective_reasoning_effort"] = backend.effective_reasoning_effort
@@ -563,6 +550,14 @@ def run_qa_batch(
             result["usage"] = response["usage"]
         results.append(result)
     return results
+
+
+def preflight_qa_backend(args: Any) -> None:
+    backend = get_backend(args.qa_model)
+    expand_thinking_efforts(args.thinking_effort, args.qa_model)
+    if args.qa_model == QWEN_QA_MODEL:
+        _require_dashscope_sdk()
+    backend.require_api_key()
 
 
 def command_qa(args: Any) -> int:
@@ -600,7 +595,7 @@ def command_qa(args: Any) -> int:
             )
 
         jobs: list[dict[str, Any]] = []
-        if args.input_mode == "description" and selected_videos:
+        if args.input == "description" and selected_videos:
             conflict_ids = {
                 video["video_id"]
                 for video in case["videos"]
@@ -617,39 +612,34 @@ def command_qa(args: Any) -> int:
                 continue
             path: Path | None = None
             context_text: str | None = None
-            if args.input_mode == "description":
+            if args.input == "description":
                 if video["role"] != "conflict":
                     continue
                 description = video.get("description")
                 if not isinstance(description, dict):
                     raise PipelineError(
                         f"Context is missing for {case['case_id']}/{video['video_id']}. "
-                        "Run describe first."
+                        "Run description first."
                     )
                 source_hash = sha256_text(video["seedance_prompt_en"])
                 if description.get("source_sha256") != source_hash:
                     raise PipelineError(
                         f"Context is stale for {case['case_id']}/{video['video_id']}. "
-                        "Run describe again."
+                        "Run description again."
                     )
                 context_text = description["context_en"]
-                context_hash = sha256_text(context_text)
             else:
                 if video["status"] != "ready":
                     continue
                 path = resolve_video_path(video["local_path"], must_exist=True)
-                context_hash = sha256_file(path)
             existing = {qa_result_key(result) for result in video["qa_results"]}
             pending = [
                 (question, effort)
                 for effort in efforts
                 for question in questions
-                if args.force
-                or (
-                    args.input_mode,
-                    context_hash,
+                if (
+                    args.input,
                     question["question_id"],
-                    question["text_en"],
                     args.qa_model,
                     effort,
                 )
@@ -660,7 +650,6 @@ def command_qa(args: Any) -> int:
                     {
                         "video": video,
                         "path": path,
-                        "context_hash": context_hash,
                         "context_text": context_text,
                         "pending": pending,
                     }
@@ -671,8 +660,7 @@ def command_qa(args: Any) -> int:
 
         def run(job: dict[str, Any]) -> list[dict[str, Any]]:
             return run_qa_batch(
-                input_mode=args.input_mode,
-                context_hash=job["context_hash"],
+                input_mode=args.input,
                 video_path=job["path"],
                 context_text=job["context_text"],
                 question_runs=job["pending"],
@@ -685,6 +673,7 @@ def command_qa(args: Any) -> int:
 
         case_completed = 0
         case_failures = 0
+        write_lock = threading.Lock()
         with ThreadPoolExecutor(max_workers=min(args.qa_workers, len(jobs))) as executor:
             futures = {executor.submit(run, job): job["video"] for job in jobs}
             for future in as_completed(futures):
@@ -698,11 +687,12 @@ def command_qa(args: Any) -> int:
                         file=sys.stderr,
                     )
                     continue
-                video["qa_results"].extend(results)
-                atomic_write_json(case_path, case)
+                with write_lock:
+                    video["qa_results"].extend(results)
+                    atomic_write_json(case_path, case)
                 case_completed += len(results)
                 print(
-                    f"QA {args.input_mode} {case['case_id']}/{video['video_id']}: "
+                    f"QA {args.input} {case['case_id']}/{video['video_id']}: "
                     f"wrote {len(results)} result(s)"
                 )
         return case_completed, case_failures

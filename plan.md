@@ -2,14 +2,17 @@
 
 ## 目标
 
-实验用于测量视频问答模型在“画面事实与经典作品知识冲突”时是否会忽略视频证据、退回作品中的经典答案。每个 case 包含 1–5 个 conflict 视频和 1 个匹配的正常 control 视频，并为每个独立语义目标生成一个 `implicit_prior` 问题。问题必须明确包含对应童话、小说或影视作品名，例如 `In the fairy tale Cinderella, ...?`，但不使用 normally、usually、should 等显式 prior 提示词。
+实验用于测量视频问答模型在“画面事实与经典知识冲突”时，是否忽略当前输入
+证据并退回经典答案。每个 case 包含 1–5 个 conflict 视频和 1 个匹配的正常
+control 视频，并为每个独立语义目标生成一个中性问题。
 
-Luna Pro 负责 case authoring、问题生成、文字 context 生成与答案判定；Seedance 负责生成视频；Gemini、Qwen 或 Kimi 负责视频或文字 context QA。
+Luna Pro 负责 case authoring、问题生成、文字 context 生成和答案判定；
+Seedance 负责生成视频；Gemini、Qwen 或 Kimi 负责视频或文字 context QA。
 
 ## 数据结构
 
 正式 case 默认位于 `dataset/cases/<case_id>.json`；使用 `--group` 时位于
-`dataset/cases/<group>/<case_id>.json`。只支持 schema `4.0`。核心结构如下：
+`dataset/cases/<group>/<case_id>.json`。只支持 schema `4.0`。
 
 ```json
 {
@@ -22,9 +25,7 @@ Luna Pro 负责 case authoring、问题生成、文字 context 生成与答案�
   },
   "questions": [
     {
-      "question_id": "q001_implicit",
-      "question_pair_id": "q001",
-      "question_type": "implicit_prior",
+      "question_id": "q001",
       "text_en": "In Alice in Wonderland, what happens to Alice after she eats the cake?",
       "conflict_video_reference_en": "She shrinks.",
       "normal_control_reference_en": "She grows."
@@ -54,97 +55,109 @@ Luna Pro 负责 case authoring、问题生成、文字 context 生成与答案�
 }
 ```
 
-每个问题对共享 mutually exclusive 的 conflict/control reference。视频状态、任务 ID、文字 context、QA 原始回答、usage 与 judgment 都直接写回 case JSON，写入采用临时文件替换，避免半写状态。`description` 是 schema 4.0 的可选扩展，旧 case 无需迁移。
+case JSON 是运行状态的唯一持久化单元。视频状态、任务 ID、description、QA
+原始回答、usage 与 judgment 均直接写回，写入使用临时文件替换。
+`description` 是仅用于 conflict 视频的可选扩展。
+
+新 QA 记录不再包含 `context_sha256` 或 `video_sha256`。旧记录中的这些字段
+继续兼容读取，但不参与去重或统计。
+
+新生成的问题直接使用连续 ID `q001`–`q003`，不包含
+`question_pair_id`、`question_type` 或 implicit/explicit 后缀。旧 case 的问题格式
+仅为读取现有数据而兼容，不再生成，也不再进入分组指标。
 
 ## 模型配置
 
 - Author / Questions / Judge：`openai/gpt-5.6-luna-pro`，通过 OpenRouter。
-- Gemini QA：`google/gemini-3.1-pro-preview`，`temperature=0`；默认 reasoning effort 为 `medium`，可用 `low/medium/high/all`。
-- Qwen QA：`qwen3.8-max`，通过 DashScope Python SDK 直接上传本地视频，`temperature=0`；`none` 发送 `enable_thinking=false`，`default` 发送 `enable_thinking=true`，固定以 `fps=2` 取帧，不传 completion token 上限。
-- Kimi QA：`kimi-k3`，始终开启 thinking。请求不传 `reasoning_effort`、`temperature` 或 completion token 上限；服务默认 reasoning effort 为 `max`，有效温度为 `1.0`。结果记录 `thinking_effort: "default"` 和 `effective_reasoning_effort: "max"`。
+- Gemini QA：`google/gemini-3.1-pro-preview`，CLI effort 为 `default`，实际
+  reasoning effort 为 `medium`，`temperature=0`。
+- Qwen QA：`qwen3.8-max`，通过 DashScope SDK 上传本地视频；支持 `none` 和
+  `default`，固定 `fps=2`，`temperature=0`。
+- Kimi QA：`kimi-k3`，CLI effort 为 `default`，实际 reasoning effort 为
+  `max`，有效温度为 `1.0`。
 
-Gemini 与 Kimi 把本地视频编码为 Base64 Data URL。Qwen 使用中国大陆 DashScope endpoint `https://dashscope.aliyuncs.com/api/v1`，把本地绝对路径转换为 `file:///...` URI 交给 SDK 上传；本地视频最大 100 MiB，更大的文件需要改用公开 URL 或 OSS。Kimi 在发送前检查完整 JSON 请求体不超过 100 MB。
-
-Qwen QA 运行环境需要 `dashscope>=1.24.6` 和 `DASHSCOPE_API_KEY`。可用 `DASHSCOPE_BASE_HTTP_API_URL` 覆盖原生 endpoint；历史 `QWEN_BASE_URL` 仍兼容，且其 `/compatible-mode/v1` 后缀会自动转换为 `/api/v1`。
+Gemini 和 Kimi 把本地视频编码为 Base64 Data URL。Qwen 使用中国大陆
+DashScope endpoint，并把本地绝对路径转换为 `file:///...` URI 交给 SDK。
+Qwen 本地视频最大 100 MiB；Kimi 请求体最大 100 MB。
 
 ## 判断与指标
 
-Judge 只读取问题、QA 原始回答、视频角色、冲突事实和两类 reference：
+Judge 只读取问题、QA 原始回答、输入角色、冲突事实和两类 reference：
 
-- conflict 视频回答 conflict reference：`video_grounded`
-- conflict 视频回答 normal reference：`knowledge_trapped`
-- control 视频回答 normal reference：`video_grounded`
+- conflict 输入回答 conflict reference：`context_grounded`
+- conflict 输入回答 normal reference：`knowledge_trapped`
+- control 输入回答 normal reference：`context_grounded`
 - 缺失、混合、无关或无法可靠归类：`ambiguous_or_unjudgeable`
 
-description 输入继续复用上述 verdict；其中 `video_grounded` 表示回答遵循所提供的 context evidence，即 context-grounded。
+Description 输入复用相同 verdict，其中 `context_grounded` 表示回答遵循所提供的
+文字 context。旧 JSON 的 `video_grounded` 在加载和汇总时映射为
+`context_grounded`，原文件不迁移。
 
-报告分别统计 answer-level 和 video-level 指标。新生成的问题均为 `implicit_prior`；读取旧 case 时仍兼容历史 `explicit_prior` 问题。video-level verdict 聚合一个视频的多个问题结果；grounded 与 trapped 同时出现时归为 ambiguous。
+报告分别统计 answer-level 和 video-level 指标。同一视频的多个问题同时出现
+grounded 与 trapped 时，video-level verdict 为 ambiguous。
 
 ## 执行流程
 
-统一入口为 `scripts/pipeline.py`：
+统一入口为 `scripts/pipeline.py`。视频实验显式运行：
 
 ```bash
-python scripts/pipeline.py split-source --source-md SOURCE.md
-python scripts/pipeline.py author
-python scripts/pipeline.py questions
-python scripts/pipeline.py describe
-python scripts/pipeline.py generate
-python scripts/pipeline.py qa --input-mode video --qa-model google/gemini-3.1-pro-preview
-python scripts/pipeline.py judge
-python scripts/pipeline.py summary
-python scripts/pipeline.py report
+python scripts/pipeline.py author --group <group>
+python scripts/pipeline.py questions --group <group>
+python scripts/pipeline.py generate --group <group>
+python scripts/pipeline.py qa-judge --group <group> \
+  --input video --qa-model qwen3.8-max --thinking-effort all
+python scripts/pipeline.py summarize --group <group> \
+  --input video --qa-model qwen3.8-max --thinking-effort all
 ```
 
-文字描述实验只为 conflict 变体生成 context，不依赖本地视频，也不生成 control context：
+文字描述实验：
 
 ```bash
-python scripts/pipeline.py describe --group classic_fairy_tale_film_conflicts
-python scripts/pipeline.py qa --group classic_fairy_tale_film_conflicts \
-  --input-mode description --qa-model qwen3.8-max
-python scripts/pipeline.py judge --group classic_fairy_tale_film_conflicts \
-  --input-mode description
-python scripts/pipeline.py summary --group classic_fairy_tale_film_conflicts \
-  --input-mode description
-python scripts/pipeline.py compare --group classic_fairy_tale_film_conflicts \
-  --qa-model qwen3.8-max
+python scripts/pipeline.py description --group <group>
+python scripts/pipeline.py qa-judge --group <group> \
+  --input description --qa-model qwen3.8-max --thinking-effort all
+python scripts/pipeline.py summarize --group <group> \
+  --input description --qa-model qwen3.8-max --thinking-effort all
 ```
 
-QA 收到的纯文本格式为 `{context}\n\nQuestion:\n{question}`，不会添加 `Context:` 标签。童话、小说和影视 case 的 context 以原作品名自然开头；物理化学 case 仅在存在公认实验或现象名时增加对应开头。
+不提供 `split-source`、自动串联全部阶段的 `all` 命令，也不提供
+video/description 配对 `compare`。Source cases 必须预先按每个 case 一个 Markdown
+文件准备，各阶段显式执行。文字 context stage 名称为 `description`。
 
-完整流程入口只执行 `author → questions → generate → video qa → video judge`，不自动执行 describe、description QA、人工 review、summary、report 或 compare：
-
-```bash
-python scripts/pipeline.py all --qa-model kimi-k3
-```
-
-可以用单层 `--group` 只运行一个 source case 子目录：
-
-```bash
-python scripts/pipeline.py all \
-  --group classic_fairy_tale_film_conflicts \
-  --qa-model kimi-k3
-```
-
-该参数将 source、case、视频和默认报告目录分别映射到：
+`qa-judge` 使用 case 层与输入层两级并发，所有请求共享 limiter、RPM pacing 和
+retry 策略。QA 在当前 video 对象中按以下键去重：
 
 ```text
-dataset/source_cases/<group>/
-dataset/cases/<group>/
-videos/seedance/<group>/<case_id>/
-results/<group>/
+input + question_id + qa_model + thinking_effort
 ```
 
-不传 `--group` 时继续使用原有平铺目录；已有数据不会自动迁移。
+视频文件不会为去重而计算 SHA-256。通过 pipeline 重新生成视频、description
+或 questions 时会清除相应 QA；手工替换同路径视频后必须使用 `--force-qa`。
 
-并行分成 case 层与 case 内输入层。所有 QA 请求共享全局并发 limiter、RPM pacing 和 retry 策略。QA 用 input mode、context hash、问题、模型与 thinking effort 去重；旧结果缺少 `input_mode` 时按 `video` 解释。QA 的 `--force` 会追加新一轮结果。Judge 的 `--force` 会先按当前筛选范围清空已有 judgment，再开始重新判定；若运行中断，尚未成功重判的条目保持为 `null`。
+`--force-qa` 和 `--force-judge` 互斥。前者删除匹配的全部 QA 和 judgment，
+后者只清空 judgment。Force 会先预检全部选中 case 和依赖，再统一清理并写回
+所有 case；全部清理成功前禁止调用模型，避免不同 case 中新旧结果混合。
+
+命令结束打印 QA 和 Judge 各自的完成数/总数。部分 QA 失败时仍判定其他已完成
+回答，最终以非零状态退出。
+
+`summarize` 为每个实际 effort 生成：
+
+```text
+results/<group>/<qwen|kimi|gemini>_<video|description>_<none|default>_summary.json
+```
+
+同一模型和 input 的不同 effort 合并到：
+
+```text
+results/<group>/<qwen|kimi|gemini>_<video|description>_report.md
+```
 
 ## 运行时代码
 
 ```text
 scripts/
 ├── pipeline.py
-├── seed21_pro_video_qa.py
 └── vconflict_pipeline/
     ├── cli.py
     ├── settings.py
@@ -154,7 +167,9 @@ scripts/
     ├── descriptions.py
     ├── generation.py
     ├── qa.py
+    ├── evaluation.py
     └── reporting.py
 ```
 
-`seed21_pro_video_qa.py` 是保留的独立 Seed 2.1 Pro Files API / Responses API 调用，不属于主 pipeline 的三种 QA backend。
+`scripts/seed/seed21_pro_video_qa.py` 和 `scripts/videohallu/` 下的独立脚本不属于
+主 pipeline。
