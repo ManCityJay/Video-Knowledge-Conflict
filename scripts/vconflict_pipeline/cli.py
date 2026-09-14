@@ -9,7 +9,8 @@ from pathlib import Path
 from typing import Any
 
 from .authoring import command_author, command_questions
-from .core import PipelineError, validate_group
+from .core import PipelineError, validate_group, validate_id
+from .deletion import command_delete
 from .descriptions import command_description
 from .evaluation import command_qa_judge
 from .generation import command_generate, command_review
@@ -38,6 +39,13 @@ def _stage(subparsers: Any, name: str) -> argparse.ArgumentParser:
 def _group_name(value: str) -> str:
     try:
         return validate_group(value)
+    except PipelineError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
+
+
+def _entity_id(value: str) -> str:
+    try:
+        return validate_id(value, "ID")
     except PipelineError as exc:
         raise argparse.ArgumentTypeError(str(exc)) from exc
 
@@ -154,6 +162,15 @@ def build_parser() -> argparse.ArgumentParser:
     _add_group(review)
     review.set_defaults(func=command_review)
 
+    delete = _stage(subparsers, "delete")
+    delete.add_argument("--dataset-dir", type=Path, default=DEFAULT_CASE_DIR)
+    delete.add_argument("--case-id", action="append", type=_entity_id, required=True)
+    delete.add_argument("--video-id", action="append", type=_entity_id)
+    delete.add_argument("--question-id", action="append", type=_entity_id)
+    delete.add_argument("--all", action="store_true", dest="delete_all")
+    _add_group(delete)
+    delete.set_defaults(func=command_delete)
+
     qa_judge = _stage(subparsers, "qa-judge")
     _add_case_selection(qa_judge)
     qa_judge.add_argument("--video-id", action="append")
@@ -190,6 +207,19 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _validate(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
+    if args.command == "delete":
+        has_selected_items = bool(args.video_id or args.question_id)
+        if args.delete_all and has_selected_items:
+            parser.error(
+                "delete --all cannot be combined with --video-id or --question-id"
+            )
+        if not args.delete_all:
+            if len(args.case_id) != 1:
+                parser.error(
+                    "deleting videos or questions requires --case-id exactly once"
+                )
+            if not has_selected_items:
+                parser.error("delete requires --video-id, --question-id, or --all")
     for field in (
         "case_workers",
         "openrouter_workers",

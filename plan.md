@@ -64,8 +64,9 @@ case JSON 是运行状态的唯一持久化单元。视频状态、任务 ID、d
 继续兼容读取，但不参与去重或统计。
 
 新生成的问题直接使用连续 ID `q001`–`q003`，不包含
-`question_pair_id`、`question_type` 或 implicit/explicit 后缀。旧 case 的问题格式
-仅为读取现有数据而兼容，不再生成，也不再进入分组指标。
+`question_pair_id`、`question_type` 或 implicit/explicit 后缀。删除问题后允许 ID
+出现缺口，其他问题不会重编号。旧 case 的问题格式仅为读取现有数据而兼容，不再
+生成，也不再进入分组指标。
 
 ## 模型配置
 
@@ -138,6 +139,11 @@ python scripts/pipeline.py summarize --group <group> \
   --input description --qa-model qwen3.8-max --thinking-effort all
 ```
 
+数据清理使用 `delete`。删除视频或问题时一次命令只操作一个 case，可同时指定
+多个 `--video-id` 和 `--question-id`；`--all` 可同时删除同一 group 下多个完整
+case 的 JSON 和视频目录。单独删除视频仅允许 conflict，并且必须至少保留一个
+conflict。删除问题会同时清除其全部 QA/Judge 历史。
+
 不提供 `split-source`、自动串联全部阶段的 `all` 命令，也不提供
 video/description 配对 `compare`。Source cases 必须预先按每个 case 一个 Markdown
 文件准备，各阶段显式执行。文字 context stage 名称为 `description`。
@@ -197,6 +203,7 @@ scripts/
     ├── authoring.py
     ├── descriptions.py
     ├── generation.py
+    ├── deletion.py
     ├── qa.py
     ├── evaluation.py
     └── reporting.py

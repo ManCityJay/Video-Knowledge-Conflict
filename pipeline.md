@@ -14,6 +14,7 @@ questions
 description
 generate
 review
+delete
 qa-judge
 summarize
 ```
@@ -42,8 +43,9 @@ videos/seedance/<group>/<case_id>/
 results/<group>/
 ```
 
-不传 `--group` 时使用平铺目录。`--case-id`、`--video-id` 和
-`--question-id` 均可重复传入以缩小运行范围。
+不传 `--group` 时使用平铺目录。通常 `--case-id`、`--video-id` 和
+`--question-id` 均可重复传入以缩小运行范围。删除视频或问题时只接受一个
+`--case-id`；使用 `delete --all` 时可重复传入同一 group 下的多个 case ID。
 
 ## 环境变量
 
@@ -95,7 +97,9 @@ python scripts/pipeline.py questions \
 
 `questions --force` 会替换问题并清除选中 case 的全部 QA 和 judgment。
 新问题 ID 直接使用 `q001`、`q002`、`q003`，不再保存
-`question_pair_id` 或 `question_type`。
+`question_pair_id` 或 `question_type`。使用删除功能后问题 ID 可以不连续；其他问题
+不会被重编号。旧 JSON 中已有的旧式问题 ID 仅做兼容读取，pipeline 不会生成或
+恢复旧问题字段。
 
 为 conflict prompts 生成文字 context：
 
@@ -138,6 +142,43 @@ python scripts/pipeline.py review \
   --video-id v001 \
   --decision verified
 ```
+
+## 删除 case 内容
+
+删除视频或问题时，`delete` 只接受一个 `--case-id`，但可以在该 case 内同时删除
+多个 conflict 视频和多个问题：
+
+```bash
+python scripts/pipeline.py delete \
+  --group classic_fairy_tale_film_conflicts \
+  --case-id alice_drink_makes_her_grow \
+  --video-id v001 \
+  --video-id v002 \
+  --question-id q001
+```
+
+删除视频会从 JSON 中移除完整 video 对象，并删除其本地视频、description、QA、
+judgment 和其他历史。只能单独删除 conflict 视频，且删除后必须至少保留一个
+conflict；control 或最后一个 conflict 只能通过删除整个 case 处理。本地视频已经
+缺失时仍会清理 JSON。删除问题会清除所有视频中该 question ID 对应的全部 QA 和
+judgment。任一指定 ID 不存在时不会执行任何删除。
+
+删除整个 case：
+
+```bash
+python scripts/pipeline.py delete \
+  --group classic_fairy_tale_film_conflicts \
+  --case-id alice_drink_makes_her_grow \
+  --case-id alice_eat_cake_makes_her_shrink \
+  --all
+```
+
+`--all` 不能与 `--video-id` 或 `--question-id` 混用，但允许重复传入同一 group 下
+的多个 `--case-id`。所有 case JSON 都会先完成存在性、schema 和路径预检；任一
+case 预检失败时不会删除其中任何一个。预检成功后，它会删除每个 case JSON，并
+递归删除 JSON 中各视频 `local_path` 所在的目录，包括目录内未记录的文件；缺失的
+视频目录不影响 JSON 删除。Source Markdown、远端 Seedance task 和 `results/`
+不会被删除。任何删除都会使已有 summary/report 过期。
 
 ## QA 与 Judge
 

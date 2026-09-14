@@ -399,12 +399,12 @@ def validate_questions(
             raise PipelineError(
                 f"questions must contain at most {QUESTION_LIMIT} entries."
             )
-        expected_ids = {
-            f"q{index:03d}" for index in range(1, len(questions) + 1)
+        allowed_ids = {
+            f"q{index:03d}" for index in range(1, QUESTION_LIMIT + 1)
         }
-        if simple_ids != expected_ids:
+        if not simple_ids <= allowed_ids:
             raise PipelineError(
-                "Question IDs must be contiguous and start at q001."
+                f"Question IDs must be between q001 and q{QUESTION_LIMIT:03d}."
             )
         return questions
 
@@ -417,18 +417,16 @@ def validate_questions(
                 f"Question pair {pair_id} contains duplicate {question_type} entries."
             )
         pairs[pair_id][question_type] = question
-    expected_pair_ids = {f"q{index:03d}" for index in range(1, len(pairs) + 1)}
-    if set(pairs) != expected_pair_ids or len(pairs) > QUESTION_LIMIT:
-        raise PipelineError("Legacy question pairs must be contiguous from q001.")
-    allowed_shapes = (
-        frozenset({"implicit_prior"}),
-        frozenset({"implicit_prior", "explicit_prior"}),
-    )
-    member_shapes = {frozenset(members) for members in pairs.values()}
-    if len(member_shapes) != 1 or next(iter(member_shapes)) not in allowed_shapes:
-        raise PipelineError("Legacy question pairs have inconsistent members.")
-    if member_shapes == {allowed_shapes[1]}:
-        for pair_id, members in pairs.items():
+    allowed_pair_ids = {
+        f"q{index:03d}" for index in range(1, QUESTION_LIMIT + 1)
+    }
+    if not set(pairs) <= allowed_pair_ids or len(pairs) > QUESTION_LIMIT:
+        raise PipelineError(
+            f"Legacy question pair IDs must be between q001 and "
+            f"q{QUESTION_LIMIT:03d}."
+        )
+    for pair_id, members in pairs.items():
+        if {"implicit_prior", "explicit_prior"} <= set(members):
             for reference_field in (
                 "conflict_video_reference_en",
                 "normal_control_reference_en",
