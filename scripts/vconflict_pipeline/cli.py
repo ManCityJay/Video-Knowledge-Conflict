@@ -113,6 +113,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_case_workers(generate)
     generate.add_argument("--video-id", action="append")
     generate.add_argument("--retry-failed", action="store_true")
+    generate.add_argument("--regenerate", action="store_true")
     generate.add_argument("--seedance-workers", type=int, default=3)
     generate.add_argument(
         "--seedance-total-workers", type=int, default=DEFAULT_SEEDANCE_TOTAL_WORKERS
@@ -307,6 +308,8 @@ def command_all(args: argparse.Namespace) -> int:
 
 
 def _validate(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
+    if getattr(args, "regenerate", False) and (not args.case_id or not args.video_id):
+        parser.error("--regenerate requires explicit --case-id and --video-id selections")
     for field in (
         "case_workers",
         "openrouter_workers",

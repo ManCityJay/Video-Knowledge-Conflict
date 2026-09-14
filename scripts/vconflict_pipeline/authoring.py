@@ -58,7 +58,9 @@ state-transition system. Optimize for literal visual legibility, not cinematic
 realism. Generate exactly one conflict prompt. Present it as a clean, flat,
 high-contrast educational motion graphic on a plain background with a locked
 orthographic camera. The viewer must be able to identify the relevant objects,
-initial state, single operation, and final state from the pixels alone.
+initial state, source-defined operation or bounded execution trace, and final
+state from the pixels alone. For a temporal conflict, the ordered events are
+the evidence; the final frame may be identical to the control.
 
 Use shape, size, color, position, simple frames, and a few large, stable labels
 as the visual language. Preserve the source's exact short algorithm title,
@@ -71,34 +73,69 @@ and one large result digit, but should be treated as an OCR-dependent baseline.
 
 Start from the source's complete preloaded state. Do not add loading sequences
 to a stack with a specified top or a queue with a specified front. Show one
-operation, optionally triggered by a single cursor click, then one outcome.
-Move at most one data object or one selection frame; one swap may move exactly
-two objects. A button press or completion indicator shared by conflict and
+operation, optionally triggered by a single cursor click, then one outcome by
+default. When the source explicitly defines a bounded algorithm trace, preserve
+its comparisons, swaps, visits, calls, returns, and required history in order;
+do not collapse the trace into a single action or a static result. Move at most
+one data object or one selection frame at a time by default; one swap may move exactly
+two objects by default. When the supplied source explicitly specifies a small
+distribution, loop, or paper-folding demonstration, preserve its bounded
+sequence and source-defined object or hole counts instead of reducing it to
+an unrelated single-object operation. A button press or completion indicator shared by conflict and
 control is permitted. Avoid hands, characters, decorative scenery,
-photorealistic machinery, object morphing, object creation, camera motion,
+photorealistic machinery, unrelated object morphing or creation, camera motion,
 cuts, split screens, and simultaneous unrelated actions.
+Simple source-specified hands or a schematic tool are permitted only when
+needed for a physical demonstration such as punching and unfolding paper.
 
 Structure every prompt as one continuous shot with three beats: hold the
 complete initial state still and unobstructed; perform one slow, unambiguous
-state-changing action; then hold the complete final state still and
+state-changing action or the source-defined bounded sequence; then hold the
+complete final state still and
 unobstructed. Keep removed objects visible beside the data structure; do not
 send them offscreen or let them disappear. Preserve holes after removal in a
 schematic diagram instead of adding gravity or automatic compaction. Require
 every object to retain its exact shape, color, size, and identity throughout.
 Preserve concrete source timing, initial values, labels, geometry, and final
-state. Do not redesign a supplied matched pair or add demonstrations of the
-correct rule to a conflict clip. An intentional output digit can change, but
+state. Do not redesign a supplied matched pair or add unrelated demonstrations
+of the correct rule to a conflict clip. Preserve legal prerequisite steps when
+they establish the history required to observe the one intended violation. An intentional output digit or character can change, but
 unrelated labels and numerical values must remain fixed.
 
 Alter exactly one formal rule, comparison, update, or output. Keep object
-identity, total visible object count, and all non-target state fixed. State the precise
+identity and all non-target state fixed. Preserve visible object counts except
+for explicitly source-defined output marks or holes. State the precise
 algorithm variant and exclude undefined ties or implementation-dependent
 behavior. The control must repair only the target formal violation, without
 introducing an unrelated physical impossibility or a merely inefficient but
 legal choice. The control must reuse the same art direction, framing, objects,
-initial-state hold, action timing, and final-state hold, changing only the
-selected object, destination, or final target state required by the normal
-rule."""
+initial-state hold, overall duration, and final-state hold. Change only the
+selected object, destination, state, or source-defined execution sequence
+required to repair the one formal violation. Individual step counts and event
+timings may differ when the source explicitly makes them the conflict; do not
+force a correct control to use the same illegal swap or visitation sequence. Output marks or holes may be created only when they are the explicit
+source-defined target; preserve all other objects and geometry.
+
+Preserve a supplied completion cue exactly. For a completed allocation,
+replacement, chart construction, or bounded loop, show one short neutral cue
+such as DONE only after the final state is established, then hold it with that
+state until the end (normally seconds 3-5 of a 5-second clip). Use the same cue,
+position, and timing in conflict and control for the overall demonstration.
+Exception: when the source explicitly targets a premature task-level completion
+such as a recursive parent reporting DONE before a required child returns,
+preserve that early task-level DONE only in the conflict and repair its timing
+in the control. Keep it distinct from the source's shared final FINISHED cue.
+The child may keep running after the parent's premature DONE; all motion must
+stop before the shared overall completion hold. DONE means execution has ended,
+not that the answer is correct: never replace it with CORRECT, ERROR, a score,
+or a correctness-colored badge. A prematurely terminated loop must still
+display DONE and remain stopped; do not repair its output during the final hold.
+
+For a source-defined reported measurement or statistical chart, the reported
+value or mapping from input counts to bar heights may be the intended target.
+Keep the correct input geometry or source counts visible even when they expose
+the wrong output. Do not rewrite such a source into a different geometry or
+operation merely to make the output label consistent."""
 
 
 MATHEMATICS_ALGORITHM_AUTHOR_VERIFY_SYSTEM_PROMPT = (
@@ -111,17 +148,40 @@ that the evidence does not depend on code or small text; and that exactly
 one rule is violated. Require exactly one conflict prompt. Keep short, large
 algorithm names, operation labels, object IDs, and necessary numbers. A short
 calculator expression/result is allowed as an OCR-dependent baseline; reject
-other label-only substitutions when their unchanged geometry gives the normal
-answer. Verify fixed numerical order on a number line, explicit retained-region
+arbitrary label-only substitutions unless the source explicitly defines a
+reported measurement or chart mapping as its target. In those cases keep the
+unchanged input geometry and counts, and verify the exact requested output.
+Verify fixed numerical order on a number line, explicit retained-region
 semantics in binary search, and a completion cue for a final sorting result.
-Reject photorealistic machinery, multiple data operations, hidden final
-evidence, ambiguous variants, changed total visible object counts, unstated
-tie-breaking, strategy-only differences, shrinking disks, and controls that
+Reject photorealistic machinery, unrelated multiple data operations, hidden final
+evidence, ambiguous variants, unexplained changes in non-target object counts, unstated
+tie-breaking, differences between equally legal strategies under the stated
+algorithm, shrinking disks, and controls that
 change more than the target transition. One cursor click and a shared button
 or completion cue do not count as additional data operations. A schematic
 removal may leave a fixed empty slot. For cellular automata, freezing neighbors
 is valid only for an explicitly local query, never for a whole-grid update.
-Match composition, labels, initial state, and timing across the pair."""
+Match composition, labels, initial state, overall duration, and final hold
+across the pair. For an explicitly specified temporal conflict, verify the
+whole bounded trace against the named algorithm: nonadjacent swaps in bubble
+sort, reversed equal-key order in stable sort, merging an unsorted subarray,
+and leaving an unfinished DFS branch violate their specified rules even when
+a final result is sorted or every node is eventually visited. Reject a mere
+legal alternative strategy, but do not reject these as strategy-only changes.
+Individual step counts and event timings may differ only as needed to repair
+the source's one specified violation. Preserve source-required preceding steps."""
+    + """
+Preserve the source's bounded distribution, paper punch/unfold reveal, loop,
+or algorithm execution trace when explicitly supplied; target output dots or holes are allowed to
+differ in count. All other objects must stay accounted for. Require the supplied
+overall DONE/FINISHED/OVER cue to appear after the final outcome and remain with
+a stable final state, with identical overall cue timing and appearance in both
+roles. A source-defined premature task-level DONE is instead the target event:
+verify that it precedes the required child return only in the conflict and
+follows all required returns in the control. Do not repair that intentional
+premature report in the conflict or confuse it with the shared final FINISHED
+cue. Do not interpret completion as proof that the displayed result is correct.
+"""
 )
 
 

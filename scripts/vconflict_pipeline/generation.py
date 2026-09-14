@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import copy
+import hashlib
 import os
+import re
 import sys
 import threading
+import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -17,6 +21,22 @@ from urllib.request import urlretrieve
 from .core import *
 from .settings import *
 from .transport import RequestLimiter
+
+
+def generation_error_detail(exc: Exception) -> str:
+    """Keep transport causes visible without exposing keys or proxy credentials."""
+    parts = []
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        parts.append(f"{type(current).__name__}: {current}")
+        current = current.__cause__ or current.__context__
+    detail = " -> ".join(parts)
+    for name, value in os.environ.items():
+        if value and (name.endswith("API_KEY") or name.endswith("TOKEN")):
+            detail = detail.replace(value, "[REDACTED]")
+    return re.sub(r"(https?://)[^/\s@]+@", r"\1[REDACTED]@", detail)
 
 def to_plain_data(value: Any) -> Any:
     if hasattr(value, "model_dump"):
@@ -88,6 +108,35 @@ def create_ark_client(api_key: str, base_url: str) -> Any:
     return Ark(api_key=api_key, base_url=base_url)
 
 
+def seedance_content(video: dict[str, Any]) -> tuple[list[dict[str, Any]], str | None]:
+    """Send an optional project-local image as the exact first frame."""
+    content: list[dict[str, Any]] = [{"type": "text", "text": video["seedance_prompt_en"]}]
+    relative = video.get("first_frame_path")
+    if relative is None:
+        return content, None
+    if not isinstance(relative, str) or not relative.strip():
+        raise PipelineError("first_frame_path must be a nonempty project-relative path.")
+    path = (PROJECT_ROOT / relative).resolve()
+    if Path(relative).is_absolute() or not path.is_relative_to(PROJECT_ROOT.resolve()):
+        raise PipelineError("first_frame_path must stay inside the project.")
+    try:
+        data = path.read_bytes()
+    except OSError as exc:
+        raise PipelineError(f"Cannot read first frame: {relative}") from exc
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        mime = "image/png"
+    elif data.startswith(b"\xff\xd8\xff"):
+        mime = "image/jpeg"
+    elif data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        mime = "image/webp"
+    else:
+        raise PipelineError("First frame must be a PNG, JPEG, or WebP image.")
+    content.append({"type": "image_url", "role": "first_frame", "image_url": {
+        "url": f"data:{mime};base64,{base64.b64encode(data).decode('ascii')}"
+    }})
+    return content, hashlib.sha256(data).hexdigest()
+
+
 def persist_video_state(
     *,
     case: dict[str, Any],
@@ -112,6 +161,13 @@ def generate_one_video(
 ) -> str:
     output_path = resolve_video_path(video["local_path"])
     status = video["status"]
+
+    if status == "ready" and getattr(args, "regenerate", False):
+        # Validate inputs before changing an existing video's state.
+        seedance_content(video)
+        persist_video_state(case=case, case_path=case_path, video=video, lock=lock,
+                            task_id=None, status="pending", human_review="pending", qa_results=[])
+        status = "pending"
 
     if status == "ready":
         if output_path.exists() and output_path.is_file():
@@ -141,14 +197,16 @@ def generate_one_video(
 
     if status == "pending":
         try:
+            content, first_frame_hash = seedance_content(video)
             created = client.content_generation.tasks.create(
                 model=args.model,
-                content=[{"type": "text", "text": video["seedance_prompt_en"]}],
+                content=content,
                 generate_audio=False,
-                ratio=args.ratio,
                 resolution=args.resolution,
                 duration=args.duration,
                 watermark=False,
+                # First-frame tasks inherit aspect ratio from the image.
+                **({"ratio": args.ratio} if first_frame_hash is None else {}),
             )
         except Exception as exc:
             persist_video_state(
@@ -158,7 +216,9 @@ def generate_one_video(
                 lock=lock,
                 status="failed",
             )
-            raise PipelineError(f"Seedance create request failed: {exc}") from exc
+            raise PipelineError(
+                f"Seedance create request failed: {generation_error_detail(exc)}"
+            ) from exc
         task_id = object_value(created, "id")
         if not isinstance(task_id, str) or not task_id:
             persist_video_state(
@@ -176,6 +236,8 @@ def generate_one_video(
             lock=lock,
             task_id=task_id,
             status="submitted",
+            submitted_prompt_en=video["seedance_prompt_en"],
+            submitted_first_frame_sha256=first_frame_hash,
         )
 
     task_id = video.get("task_id")
@@ -187,7 +249,8 @@ def generate_one_video(
             final_result = client.content_generation.tasks.get(task_id=task_id)
         except Exception as exc:
             raise PipelineError(
-                f"Seedance polling failed; task remains submitted: {task_id}: {exc}"
+                f"Seedance polling failed; task remains submitted: {task_id}: "
+                f"{generation_error_detail(exc)}"
             ) from exc
         task_status = str(object_value(final_result, "status", "unknown")).lower()
         print(
@@ -222,8 +285,12 @@ def generate_one_video(
         )
         raise PipelineError(f"Seedance task returned no video URL: {task_id}")
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    download_path: Path | None = None
     try:
-        urlretrieve(urls[0], output_path)
+        with tempfile.NamedTemporaryFile(dir=output_path.parent, suffix=".part", delete=False) as tmp:
+            download_path = Path(tmp.name)
+        urlretrieve(urls[0], download_path)
+        download_path.replace(output_path)
     except OSError as exc:
         persist_video_state(
             case=case,
@@ -235,6 +302,9 @@ def generate_one_video(
         raise PipelineError(
             f"Could not download generated video; task remains submitted: {exc}"
         ) from exc
+    finally:
+        if download_path is not None and download_path.exists():
+            download_path.unlink()
     persist_video_state(
         case=case,
         case_path=case_path,
@@ -243,6 +313,8 @@ def generate_one_video(
         status="ready",
         human_review="pending",
         qa_results=[],
+        generated_prompt_en=video.get("submitted_prompt_en", video["seedance_prompt_en"]),
+        generated_first_frame_sha256=video.get("submitted_first_frame_sha256"),
     )
     return "generated"
 

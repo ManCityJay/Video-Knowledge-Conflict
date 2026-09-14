@@ -10,6 +10,7 @@ import threading
 import time
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
+from http.client import IncompleteRead
 from typing import Any, Callable, TypeVar
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -99,7 +100,7 @@ def _http_error_message(error: HTTPError, secret: str) -> str:
                 message = detail["message"]
             elif isinstance(detail, str):
                 message = detail
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+    except (OSError, IncompleteRead, UnicodeDecodeError, json.JSONDecodeError):
         pass
     return redact(str(message), secret)
 
@@ -144,6 +145,10 @@ def post_json(
     except URLError as exc:
         raise TransportError(
             f"Could not reach {service}: {redact(str(exc.reason), api_key)}"
+        ) from exc
+    except IncompleteRead as exc:
+        raise TransportError(
+            f"{service} returned an incomplete HTTP response; connection closed before the body was fully received."
         ) from exc
     except TimeoutError as exc:
         raise TransportError(f"{service} request timed out.") from exc
@@ -198,6 +203,7 @@ def _is_retryable(error: Exception) -> bool:
             "timed out",
             "timeout",
             "temporarily unavailable",
+            "incomplete http response",
             "overloaded",
         )
     )

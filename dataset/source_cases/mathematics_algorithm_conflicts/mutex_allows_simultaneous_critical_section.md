@@ -1,0 +1,37 @@
+### Mutex: Two Tasks Execute in the Critical Section Together
+
+**Case label**: M44
+**Candidate number**: 11
+**中文名称**: 互斥算法：锁未释放，第二个任务就进入
+**Status**: User-requested repair of observed video errors; exact first frame prepared; revised prompts authored and verified by Luna; replacement generation and human qualification pending.
+
+- **正常知识与冲突：** 互斥锁保护的临界区同一时刻只能由一个持锁任务执行；冲突版出现两个任务同时执行。
+- **画面：** 使用准确首帧：白底、固定标题MUTEX、一个临界区框(340,220)到(940,550)，蓝色A已在区内(520,400)持有唯一金色锁令牌，橙色B在右侧区外(1110,400)等待。任务卡180×110，字母、颜色和大小不变；右上小圆点表示执行，锁令牌在A卡右下，不遮挡A字母。0–0.5秒保持首帧；0.5秒A的小圆点开始绿色脉动；0.8–1.4秒B完整移入区内(760,400)，令牌仍在A；1.4–2.6秒两卡都完全在区内、两个小圆点同时绿色脉动，A不动不释放锁。2.6秒A停止执行，2.6–3.0秒A带锁移到左侧区外(170,400)；3.0–3.2秒同一令牌移到下方空泊位(640,625)；3.2秒B停止执行，3.2–3.6秒B退出至原右侧区外位置。4秒右上显示DONE，保持空临界区、区外两卡和泊位中唯一令牌至5秒。
+- **正常对照：** 初态与冲突一致：A已在区内持锁，B在区外。0.5–1.0秒A执行；1.0–1.5秒A停止执行并带锁退出到左侧(170,400)；1.5–1.7秒锁移至下方泊位；1.7–1.9秒同一锁交给区外B；1.9–2.5秒B带锁完整进入区内(760,400)，2.5–2.9秒仅B执行；2.9–3.3秒B停止并带锁退出右侧，3.3–3.6秒锁回到下方泊位。4秒DONE，保持至5秒。任何时刻只有一个任务在区内执行。
+- **重点：** MUTEX拼写正确；A永久为蓝卡、B永久为橙卡，不能A/B互换、缺字或被锁遮住。冲突1.4–2.6秒两卡必须完全在同一区域内并同时执行，锁始终归A，不得提前退出、提前交锁或复制锁。只让卡内小圆点脉动，不让整张卡变形。对照必须等A退出并交还锁后B才入区。全片仅一个金色锁，最终锁在下方泊位而非仍粘在A上。4秒DONE，之后静止。
+
+**Video defaults**: 720p, 5 seconds, 16:9. Conflict video ID: `v001`. Normal-control video ID: `control`.
+
+**Presentation**: 简洁高对比度二维算法教学动画，固定正视镜头，连续单镜头。保留上述必要的短标题、操作名、对象身份、初态以及完整有界执行序列；不能将先前操作或访问历史删去，只留下最终图。两版共用初态、物体、布局和视觉风格，只修复目标算法违规。仅使用必要短标签，不添加解释性字幕或正确性评分。
+
+**Completion cue**: 两版均在第 4 秒显示中性 DONE，保持完整最终状态至第 5 秒。所有规定的执行动作在整体 DONE 出现前完成，之后不再补做或纠正；DONE 仅表示执行结束，不代表正确性。
+
+**Normal fact (EN)**: A mutex permits at most one task at a time to execute in its protected critical section.
+**Intended video fact (EN)**: B enters and executes in the protected critical section while A is still executing there and retains the sole lock token.
+
+**Prompt authoring**: 本次修订已由 OpenRouter 配置的 Luna 编写并核验；下方正式提示词及准确首帧路径已定向写入运行案例的 v001 和 control。旧视频和 task_id、status、submitted/generated 提示词等生成记录保持原样。重生成 v001 使用明确 case-id、video-id 及 --regenerate，不使用 author --force。
+
+**Human review**: MUTEX拼写正确；A永久为蓝卡、B永久为橙卡，不能A/B互换、缺字或被锁遮住。冲突1.4–2.6秒两卡必须完全在同一区域内并同时执行，锁始终归A，不得提前退出、提前交锁或复制锁。只让卡内小圆点脉动，不让整张卡变形。对照必须等A退出并交还锁后B才入区。全片仅一个金色锁，最终锁在下方泊位而非仍粘在A上。4秒DONE，之后静止。
+
+
+**First frame**: `dataset/source_assets/mathematics_algorithm_conflicts/mutex_allows_simultaneous_critical_section/first_frame.png` (1280×720; shared by conflict and control). Preserve the supplied layout and object identities.
+
+**Prompt provenance**: openai/gpt-5.6-luna-pro; author request gen-1789311638-HS8qm7Ts18SbyGXqiAPe; final verification request gen-1789311767-6tlKVTVwGgG1hGUq7cjX.
+
+**Video prompt**：
+
+> Create a clean, flat, high-contrast educational motion graphic in a single continuous 5-second shot at 1280x720, using the supplied first-frame image exactly. White background, locked orthographic front camera, no cuts, camera motion, photorealism, or decorative elements. Preserve the fixed black title MUTEX, the single CRITICAL SECTION rectangle spanning x340..940 and y220..550, and the exact identities and geometry: blue task card A initially centered at (520,400), size 180x110, already fully inside the rectangle; orange task card B initially centered at (1110,400), fully outside on the right; black A and B glyphs initially at (495,400) and (1085,400); one small white activity dot on each card at the rigid-card offset (+55,-35); one gold padlock at A's lower-right holder slot (575,425), attached to A at (+55,+25), never covering its letter; and one empty outline dock centered at (640,625). Letters, dots, and the token holder are rigid parts of their cards and move with them. No WORKSPACE, LOCK HOME, extra labels, duplicated token, or changed colors. Hold the complete initial frame unobstructed from 0.0 to 0.5 seconds. Pulse A's small dot green from 0.5 to 2.6 while A remains stationary. Move B as one rigid card, including its letter and dot, from (1110,400) to (760,400) during 0.8-1.4, fully inside the rectangle, without a token; its activity dot moves from (1165,365) to (815,365). From 1.4 to 2.6 hold both cards fully inside and stationary while both activity dots pulse green simultaneously. B's dot must continue pulsing throughout 1.4-3.2, while A's dot stops at 2.6; A retains the sole gold token at (575,425), so B executes while A is still executing and still holds the lock. Move A and its attached token left to (170,400) during 2.6-3.0, fully outside; its letter and token holder move to (145,400) and (225,425). Move the same single token from (225,425) to the dock during 3.0-3.2, with no copy. Stop B's dot at 3.2, then move B right to (1110,400) during 3.2-3.6 without touching the token; its letter and dot return to (1085,400) and (1165,365). Hold the final state, with both cards outside and the one token in the dock, from 3.6 to 4.0. Show only the neutral label DONE in the empty upper-right area at 4.0, then hold completely still through 5.0. Preserve every card's shape, size, color, letter, and identity; only the dots pulse green and the specified rigid translations occur.
+
+**Control prompt**：
+
+> Create a clean, flat, high-contrast educational motion graphic in a single continuous 5-second shot at 1280x720, using the supplied first-frame image exactly. White background, locked orthographic front camera, no cuts, camera motion, photorealism, or decorative elements. Preserve the fixed black title MUTEX, the single CRITICAL SECTION rectangle spanning x340..940 and y220..550, and the exact identities and geometry: blue task card A initially centered at (520,400), size 180x110, already fully inside the rectangle; orange task card B initially centered at (1110,400), fully outside on the right; black A and B glyphs initially at (495,400) and (1085,400); one small white activity dot on each card at the rigid-card offset (+55,-35); one gold padlock at A's lower-right holder slot (575,425), attached to A at (+55,+25), never covering its letter; and one empty outline dock centered at (640,625). Letters, dots, and the token holder are rigid parts of their cards and move with them. No WORKSPACE, LOCK HOME, extra labels, duplicated token, or changed colors. Hold the complete initial frame unobstructed from 0.0 to 0.5 seconds. Pulse only A's small dot green from 0.5 to 1.0 while A remains inside. Stop A's dot, then move A as one rigid card with its attached token from (520,400) to (170,400) during 1.0-1.5, fully outside; its letter and token holder move to (145,400) and (225,425). Move the same single token from (225,425) to the dock during 1.5-1.7, then from the dock to B's outside lower-right holder slot at (1165,425) during 1.7-1.9; never duplicate it or cover B's letter. Move B, now holding the token at (1165,425), left as one rigid card from (1110,400) to (760,400) during 1.9-2.5, fully inside; its letter and token holder move to (735,400) and (815,425). Pulse only B's dot green from 2.5 to 2.9 while B is the sole executing task. Stop B's dot, move B with its token right to (1110,400) during 2.9-3.3, fully outside, then move the same token from (1165,425) back to the dock during 3.3-3.6. At no time may B enter before A exits and gives up the token; never show simultaneous execution inside the rectangle. Hold the final state, with both cards outside and the one token in the dock, from 3.6 to 4.0. Show only the neutral label DONE in the empty upper-right area at 4.0, then hold completely still through 5.0. Preserve every card's shape, size, color, letter, and identity; only the dots pulse green and the specified rigid translations occur.
