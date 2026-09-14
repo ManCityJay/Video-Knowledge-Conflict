@@ -19,6 +19,7 @@ from urllib.parse import urlparse
 from urllib.request import urlretrieve
 
 from .core import *
+from .core import qa_result_input_mode
 from .settings import *
 from .transport import RequestLimiter
 
@@ -312,9 +313,11 @@ def generate_one_video(
         lock=lock,
         status="ready",
         human_review="pending",
-        qa_results=[],
-        generated_prompt_en=video.get("submitted_prompt_en", video["seedance_prompt_en"]),
-        generated_first_frame_sha256=video.get("submitted_first_frame_sha256"),
+        qa_results=[
+            result
+            for result in video["qa_results"]
+            if qa_result_input_mode(result) == "description"
+        ],
     )
     return "generated"
 

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import argparse
+import hashlib
 import json
 import re
 import uuid
@@ -28,23 +28,6 @@ SOURCE_CASE_HEADING = re.compile(
 class PipelineError(Exception):
     """An expected, user-facing pipeline error."""
 
-QUESTION_PAIR_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "additionalProperties": False,
-    "properties": {
-        "implicit_question_en": {"type": "string"},
-        "explicit_question_en": {"type": "string"},
-        "conflict_video_reference_en": {"type": "string"},
-        "normal_control_reference_en": {"type": "string"},
-    },
-    "required": [
-        "implicit_question_en",
-        "explicit_question_en",
-        "conflict_video_reference_en",
-        "normal_control_reference_en",
-    ],
-}
-
 SINGLE_QUESTION_SCHEMA: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
@@ -67,7 +50,7 @@ QUESTION_OUTPUT_SCHEMA: dict[str, Any] = {
         "questions": {
             "type": "array",
             "minItems": 1,
-            "maxItems": QUESTION_PAIR_LIMIT,
+            "maxItems": QUESTION_LIMIT,
             "items": SINGLE_QUESTION_SCHEMA,
         }
     },
@@ -137,7 +120,7 @@ QUESTION_VERIFY_SCHEMA: dict[str, Any] = {
         "questions": {
             "type": "array",
             "minItems": 1,
-            "maxItems": QUESTION_PAIR_LIMIT,
+            "maxItems": QUESTION_LIMIT,
             "items": SINGLE_QUESTION_SCHEMA,
         },
     },
@@ -148,12 +131,10 @@ JUDGMENT_SCHEMA: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
     "properties": {
-        "extracted_answer": {"type": "string"},
         "verdict": {"type": "string", "enum": sorted(VERDICTS)},
         "confidence": {"type": "number", "minimum": 0, "maximum": 1},
-        "evidence": {"type": "string"},
     },
-    "required": ["extracted_answer", "verdict", "confidence", "evidence"],
+    "required": ["verdict", "confidence"],
 }
 
 def utc_now() -> str:
@@ -181,11 +162,19 @@ def normalize_text(value: str) -> str:
     return re.sub(r"\W+", " ", value.lower()).strip()
 
 
-def slugify(value: str) -> str:
-    slug = re.sub(r"[^a-z0-9]+", "_", value.lower()).strip("_")
-    if not slug:
-        raise PipelineError(f"Could not derive an ASCII ID from title: {value}")
-    return slug
+def sha256_text(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def qa_result_input_mode(result: dict[str, Any]) -> str:
+    """Treat pre-description results as video results."""
+    value = result.get("input_mode", "video")
+    return value if isinstance(value, str) else ""
+
+
+def canonical_verdict(value: str) -> str:
+    """Map persisted legacy labels to the current reporting vocabulary."""
+    return "context_grounded" if value == "video_grounded" else value
 
 
 def require_nonempty_string(value: Any, field: str) -> str:
@@ -258,78 +247,6 @@ def read_json(path: Path) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise PipelineError(f"Expected a JSON object in {path}.")
     return value
-
-
-def split_markdown_cases(text: str) -> list[dict[str, str]]:
-    cases: list[dict[str, str]] = []
-    current: dict[str, Any] | None = None
-
-    def finish() -> None:
-        nonlocal current
-        if current is None:
-            return
-        lines = list(current["lines"])
-        while lines and (not lines[-1].strip() or lines[-1].strip() == "---"):
-            lines.pop()
-        content = "\n".join(lines).strip() + "\n"
-        cases.append(
-            {
-                "case_id": current["case_id"],
-                "title": current["title"],
-                "content": content,
-            }
-        )
-        current = None
-
-    for line in text.splitlines():
-        heading = SOURCE_CASE_HEADING.match(line)
-        if heading:
-            finish()
-            title = heading.group("title").strip()
-            case_id = slugify(title)
-            current = {
-                "case_id": case_id,
-                "title": title,
-                # Normalize legacy numbered headings so both the source filename
-                # and the persisted heading use the same number-free identity.
-                "lines": [f"### {title}"],
-            }
-            continue
-        if current is not None and re.match(r"^#{1,2}\s+", line):
-            finish()
-            continue
-        if current is not None:
-            current["lines"].append(line)
-    finish()
-
-    if not cases:
-        raise PipelineError("No level-three case headings were found.")
-    seen: set[str] = set()
-    for item in cases:
-        if item["case_id"] in seen:
-            raise PipelineError(f"Duplicate derived case_id: {item['case_id']}")
-        seen.add(item["case_id"])
-    return cases
-
-
-def command_split_source(args: argparse.Namespace) -> int:
-    try:
-        text = args.source_md.read_text(encoding="utf-8")
-    except OSError as exc:
-        raise PipelineError(f"Could not read {args.source_md}: {exc}") from exc
-    cases = split_markdown_cases(text)
-    output_dir = grouped_dir(args.output_dir, args.group)
-    written = 0
-    for item in cases:
-        output = output_dir / f"{item['case_id']}.md"
-        if output.exists() and not args.force:
-            print(f"Skipping existing source case: {output}")
-            continue
-        atomic_write_text(output, item["content"])
-        written += 1
-        print(f"Wrote source case: {output}")
-    print(f"Found {len(cases)} case(s); wrote {written}.")
-    return 0
 
 
 def parse_source_case(path: Path) -> dict[str, str]:
@@ -410,18 +327,32 @@ def validate_question(
     ):
         raise PipelineError(f"{prefix} reference answers must be different.")
 
-    pair_id = validate_id(question.get("question_pair_id"), f"{prefix}.question_pair_id")
-    if not re.fullmatch(r"q\d{3}", pair_id):
-        raise PipelineError(f"{prefix}.question_pair_id must use the form q001.")
-    question_type = question.get("question_type")
-    if question_type not in QUESTION_TYPE_SET:
-        raise PipelineError(f"{prefix}.question_type is invalid.")
-    suffix = "implicit" if question_type == "implicit_prior" else "explicit"
-    if question_id != f"{pair_id}_{suffix}":
-        raise PipelineError(
-            f"{prefix}.question_id must be {pair_id}_{suffix} for its pair and type."
-        )
     has_prior_cue = EXPLICIT_PRIOR_CUES.search(question_text) is not None
+    if re.fullmatch(r"q\d{3}", question_id):
+        if "question_pair_id" in question or "question_type" in question:
+            raise PipelineError(
+                f"{prefix} must not contain question_pair_id or question_type."
+            )
+        if has_prior_cue:
+            raise PipelineError(
+                f"{prefix}.text_en must not contain an explicit prior cue."
+            )
+        return
+
+    legacy_match = re.fullmatch(r"(q\d{3})_(implicit|explicit)", question_id)
+    if legacy_match is None:
+        raise PipelineError(f"{prefix}.question_id must use the form q001.")
+    pair_id = validate_id(
+        question.get("question_pair_id"), f"{prefix}.question_pair_id"
+    )
+    question_type = question.get("question_type")
+    expected_type = (
+        "implicit_prior" if legacy_match.group(2) == "implicit" else "explicit_prior"
+    )
+    if pair_id != legacy_match.group(1) or question_type != expected_type:
+        raise PipelineError(
+            f"{prefix} has inconsistent legacy question identity fields."
+        )
     if question_type == "implicit_prior" and has_prior_cue:
         raise PipelineError(f"{prefix}.text_en must not contain an explicit prior cue.")
     if question_type == "explicit_prior" and not has_prior_cue:
@@ -433,13 +364,13 @@ def validate_questions(
 ) -> dict[str, dict[str, Any]]:
     if not isinstance(questions_raw, list):
         raise PipelineError("questions must be an array.")
-    if questions_raw and not 1 <= len(questions_raw) <= QUESTION_LIMIT:
+    legacy_limit = QUESTION_LIMIT * 2
+    if questions_raw and not 1 <= len(questions_raw) <= legacy_limit:
         raise PipelineError(
-            f"questions must be empty or contain 1-{QUESTION_LIMIT} entries."
+            f"questions must be empty or contain 1-{legacy_limit} entries."
         )
 
     questions: dict[str, dict[str, Any]] = {}
-    pairs: dict[str, dict[str, dict[str, Any]]] = defaultdict(dict)
     normalized_questions: set[str] = set()
     for index, question in enumerate(questions_raw):
         prefix = f"questions[{index}]"
@@ -452,6 +383,33 @@ def validate_questions(
         if normalized in normalized_questions:
             raise PipelineError("Duplicate questions are not allowed.")
         normalized_questions.add(normalized)
+
+    if not questions_raw:
+        return questions
+
+    simple_ids = {
+        question_id
+        for question_id in questions
+        if re.fullmatch(r"q\d{3}", question_id)
+    }
+    if simple_ids:
+        if len(simple_ids) != len(questions):
+            raise PipelineError("New and legacy question formats must not be mixed.")
+        if len(questions) > QUESTION_LIMIT:
+            raise PipelineError(
+                f"questions must contain at most {QUESTION_LIMIT} entries."
+            )
+        allowed_ids = {
+            f"q{index:03d}" for index in range(1, QUESTION_LIMIT + 1)
+        }
+        if not simple_ids <= allowed_ids:
+            raise PipelineError(
+                f"Question IDs must be between q001 and q{QUESTION_LIMIT:03d}."
+            )
+        return questions
+
+    pairs: dict[str, dict[str, dict[str, Any]]] = defaultdict(dict)
+    for question in questions.values():
         pair_id = question["question_pair_id"]
         question_type = question["question_type"]
         if question_type in pairs[pair_id]:
@@ -459,42 +417,26 @@ def validate_questions(
                 f"Question pair {pair_id} contains duplicate {question_type} entries."
             )
         pairs[pair_id][question_type] = question
-
-    if questions_raw:
-        if not 1 <= len(pairs) <= QUESTION_PAIR_LIMIT:
-            raise PipelineError(
-                f"questions must contain 1-{QUESTION_PAIR_LIMIT} complete pairs."
-            )
-        expected_pair_ids = {f"q{index:03d}" for index in range(1, len(pairs) + 1)}
-        if set(pairs) != expected_pair_ids:
-            raise PipelineError(
-                "Question pair IDs must be contiguous and start at q001."
-            )
-        member_shapes = {frozenset(members) for members in pairs.values()}
-        singleton_shape = frozenset({"implicit_prior"})
-        paired_shape = frozenset(QUESTION_TYPE_SET)
-        if member_shapes not in ({singleton_shape}, {paired_shape}):
-            raise PipelineError(
-                "questions must use either one implicit question per target or "
-                "complete legacy implicit/explicit pairs."
-            )
-        if member_shapes == {singleton_shape}:
-            if len(questions_raw) > QUESTION_PAIR_LIMIT:
-                raise PipelineError(
-                    f"questions must contain at most {QUESTION_PAIR_LIMIT} entries."
-                )
-        else:
-            for pair_id, members in pairs.items():
-                implicit = members["implicit_prior"]
-                explicit = members["explicit_prior"]
-                for reference_field in (
-                    "conflict_video_reference_en",
-                    "normal_control_reference_en",
-                ):
-                    if implicit[reference_field] != explicit[reference_field]:
-                        raise PipelineError(
-                            f"Question pair {pair_id} must share {reference_field}."
-                        )
+    allowed_pair_ids = {
+        f"q{index:03d}" for index in range(1, QUESTION_LIMIT + 1)
+    }
+    if not set(pairs) <= allowed_pair_ids or len(pairs) > QUESTION_LIMIT:
+        raise PipelineError(
+            f"Legacy question pair IDs must be between q001 and "
+            f"q{QUESTION_LIMIT:03d}."
+        )
+    for pair_id, members in pairs.items():
+        if {"implicit_prior", "explicit_prior"} <= set(members):
+            for reference_field in (
+                "conflict_video_reference_en",
+                "normal_control_reference_en",
+            ):
+                if members["implicit_prior"][reference_field] != members[
+                    "explicit_prior"
+                ][reference_field]:
+                    raise PipelineError(
+                        f"Question pair {pair_id} must share {reference_field}."
+                    )
     return questions
 
 
@@ -627,7 +569,38 @@ def validate_qa_result(result: Any, prefix: str, questions: dict[str, dict[str, 
     if result.get("question") != questions[question_id]["text_en"]:
         raise PipelineError(f"{prefix}.question does not match the case question.")
     require_nonempty_string(result.get("raw_answer"), f"{prefix}.raw_answer")
-    require_nonempty_string(result.get("video_sha256"), f"{prefix}.video_sha256")
+    final_answer = result.get("final_answer")
+    if final_answer is not None:
+        require_nonempty_string(final_answer, f"{prefix}.final_answer")
+    input_mode = qa_result_input_mode(result)
+    if input_mode not in INPUT_MODES:
+        raise PipelineError(f"{prefix}.input_mode is invalid.")
+    context_sha256 = result.get("context_sha256")
+    video_sha256 = result.get("video_sha256")
+    if context_sha256 is not None:
+        require_nonempty_string(context_sha256, f"{prefix}.context_sha256")
+    if video_sha256 is not None:
+        require_nonempty_string(video_sha256, f"{prefix}.video_sha256")
+    if (
+        input_mode == "video"
+        and context_sha256 is not None
+        and video_sha256 is not None
+    ):
+        if context_sha256 != video_sha256:
+            raise PipelineError(
+                f"{prefix}.context_sha256 must match video_sha256 for video input."
+            )
+    if input_mode == "description":
+        context_text = require_nonempty_string(
+            result.get("context_text_en"), f"{prefix}.context_text_en"
+        )
+        if (
+            context_sha256 is not None
+            and sha256_text(context_text) != context_sha256
+        ):
+            raise PipelineError(
+                f"{prefix}.context_sha256 does not match context_text_en."
+            )
     require_nonempty_string(result.get("model"), f"{prefix}.model")
     thinking_effort = result.get("thinking_effort")
     if thinking_effort is not None:
@@ -646,15 +619,11 @@ def validate_qa_result(result: Any, prefix: str, questions: dict[str, dict[str, 
         return
     if not isinstance(judgment, dict):
         raise PipelineError(f"{prefix}.judgment must be an object or null.")
-    if judgment.get("verdict") not in VERDICTS:
+    if judgment.get("verdict") not in ACCEPTED_VERDICTS:
         raise PipelineError(f"{prefix}.judgment.verdict is invalid.")
     confidence = judgment.get("confidence")
     if not isinstance(confidence, (int, float)) or not 0 <= confidence <= 1:
         raise PipelineError(f"{prefix}.judgment.confidence is invalid.")
-    require_nonempty_string(
-        judgment.get("extracted_answer"), f"{prefix}.judgment.extracted_answer"
-    )
-    require_nonempty_string(judgment.get("evidence"), f"{prefix}.judgment.evidence")
 
 
 def validate_case(case: Any) -> None:
@@ -722,6 +691,56 @@ def validate_case(case: Any) -> None:
         if normalized_prompt in prompts:
             raise PipelineError("Duplicate Seedance prompts are not allowed.")
         prompts.add(normalized_prompt)
+        description = video.get("description")
+        if description is not None:
+            if video.get("role") != "conflict":
+                raise PipelineError(f"{prefix}.description is only valid for conflict videos.")
+            if not isinstance(description, dict):
+                raise PipelineError(f"{prefix}.description must be an object or null.")
+            context_en = require_nonempty_string(
+                description.get("context_en"), f"{prefix}.description.context_en"
+            )
+            if not is_english_text(context_en):
+                raise PipelineError(f"{prefix}.description.context_en must be English.")
+            context_prefix = description.get("context_prefix_en")
+            if context_prefix is not None:
+                context_prefix = require_nonempty_string(
+                    context_prefix, f"{prefix}.description.context_prefix_en"
+                )
+                if not is_english_text(context_prefix):
+                    raise PipelineError(
+                        f"{prefix}.description.context_prefix_en must be English."
+                    )
+                if not context_en.startswith(context_prefix):
+                    raise PipelineError(
+                        f"{prefix}.description.context_en must start with its prefix."
+                    )
+            if description.get("source") != "seedance_prompt_en":
+                raise PipelineError(
+                    f"{prefix}.description.source must be seedance_prompt_en."
+                )
+            source_sha256 = require_nonempty_string(
+                description.get("source_sha256"),
+                f"{prefix}.description.source_sha256",
+            )
+            if not re.fullmatch(r"[0-9a-f]{64}", source_sha256):
+                raise PipelineError(
+                    f"{prefix}.description.source_sha256 must be a SHA-256 hex digest."
+                )
+            require_nonempty_string(
+                description.get("generator_model"),
+                f"{prefix}.description.generator_model",
+            )
+            require_nonempty_string(
+                description.get("generated_at"),
+                f"{prefix}.description.generated_at",
+            )
+            for request_field in ("generator_request_id", "validator_request_id"):
+                request_id = description.get(request_field)
+                if request_id is not None and not isinstance(request_id, str):
+                    raise PipelineError(
+                        f"{prefix}.description.{request_field} must be a string or null."
+                    )
         if video.get("status") not in VIDEO_STATUSES:
             raise PipelineError(f"{prefix}.status is invalid.")
         if video.get("human_review") not in REVIEW_STATUSES:
@@ -767,6 +786,14 @@ def validate_case(case: Any) -> None:
                 f"{prefix}.qa_results[{result_index}]",
                 questions,
             )
+            if (
+                video["role"] == "control"
+                and qa_result_input_mode(result) == "description"
+            ):
+                raise PipelineError(
+                    f"{prefix}.qa_results[{result_index}] uses description input "
+                    "for a control video."
+                )
 
 
 def load_case(path: Path) -> dict[str, Any]:
