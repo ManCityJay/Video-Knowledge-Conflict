@@ -149,6 +149,11 @@ retry 策略。QA 在当前 video 对象中按以下键去重：
 input + question_id + qa_model + thinking_effort
 ```
 
+视频输入预检会检查本地 `local_path`。本次选中的视频如果文件存在但 `status`
+不是 `ready`，预检会先把状态修正为 `ready` 并写回 case JSON；非 `ready` 且文件
+不存在的视频继续跳过。已经标记为 `ready` 但本地文件不存在时仍视为数据错误，
+整个 `qa-judge` 在调用模型前失败。
+
 视频文件不会为去重而计算 SHA-256。通过 pipeline 重新生成视频、description
 或 questions 时会清除相应 QA；手工替换同路径视频后必须使用 `--force-qa`。
 

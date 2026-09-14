@@ -125,6 +125,25 @@ def _eligible_videos(
     return eligible
 
 
+def _promote_existing_local_videos(
+    case: dict[str, Any],
+    *,
+    selected_video_ids: set[str],
+) -> list[str]:
+    """Mark selected non-ready videos ready when their local files exist."""
+    promoted: list[str] = []
+    for video in case["videos"]:
+        if selected_video_ids and video["video_id"] not in selected_video_ids:
+            continue
+        if video["status"] == "ready":
+            continue
+        video_path = resolve_video_path(video["local_path"])
+        if video_path.exists() and video_path.is_file():
+            video["status"] = "ready"
+            promoted.append(video["video_id"])
+    return promoted
+
+
 def _result_selected(
     video: dict[str, Any],
     result: dict[str, Any],
@@ -149,10 +168,19 @@ def _preflight_cases(
     selected_questions = set(args.question_id or [])
     selected_videos = set(args.video_id or [])
     loaded: list[tuple[Path, dict[str, Any]]] = []
+    promoted_by_case: list[tuple[Path, dict[str, Any], list[str]]] = []
     target_total = 0
     for path in iter_case_paths(dataset_dir, args.case_id):
         case = load_case(path)
         questions = _selected_questions(case, selected_questions)
+        promoted = (
+            _promote_existing_local_videos(
+                case,
+                selected_video_ids=selected_videos,
+            )
+            if args.input == "video"
+            else []
+        )
         videos = _eligible_videos(
             case,
             input_mode=args.input,
@@ -160,6 +188,18 @@ def _preflight_cases(
         )
         target_total += len(questions) * len(videos) * len(efforts)
         loaded.append((path, case))
+        if promoted:
+            promoted_by_case.append((path, case, promoted))
+
+    # Persist status reconciliation only after every selected case passes
+    # preflight, and before any provider request can be made.
+    for path, case, promoted in promoted_by_case:
+        atomic_write_json(path, case)
+        for video_id in promoted:
+            print(
+                f"Preflight marked {case['case_id']}/{video_id} ready because "
+                "its local video file exists."
+            )
     return loaded, target_total
 
 
