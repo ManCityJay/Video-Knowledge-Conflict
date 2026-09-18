@@ -20,6 +20,7 @@ from .core import (
     grouped_dir,
     iter_case_paths,
     load_case,
+    video_case_context,
     qa_result_input_mode,
     resolve_video_path,
     sha256_text,
@@ -616,24 +617,6 @@ def command_qa(args: Any) -> int:
 
     def run_case(case_path: Path) -> tuple[int, int]:
         case = load_case(case_path)
-        if not case["questions"]:
-            raise PipelineError(
-                f"Case {case['case_id']} has no questions. Run questions first."
-            )
-        questions = [
-            question
-            for question in case["questions"]
-            if not selected_questions or question["question_id"] in selected_questions
-        ]
-        missing_questions = selected_questions - {
-            question["question_id"] for question in questions
-        }
-        if missing_questions:
-            raise PipelineError(
-                f"Question IDs not found in {case['case_id']}: "
-                f"{', '.join(sorted(missing_questions))}"
-            )
-
         jobs: list[dict[str, Any]] = []
         if args.input == "description" and selected_videos:
             conflict_ids = {
@@ -672,6 +655,25 @@ def command_qa(args: Any) -> int:
                 if video["status"] != "ready":
                     continue
                 path = resolve_video_path(video["local_path"], must_exist=True)
+            context = video_case_context(case, video)
+            if not context["questions"]:
+                raise PipelineError(
+                    f"Case {case['case_id']} has no questions. Run questions first."
+                )
+            questions = [
+                question
+                for question in context["questions"]
+                if not selected_questions or question["question_id"] in selected_questions
+            ]
+            missing_questions = selected_questions - {
+                question["question_id"] for question in questions
+            }
+            if missing_questions:
+                raise PipelineError(
+                    f"Question IDs not found in {case['case_id']}: "
+                    f"{', '.join(sorted(missing_questions))}"
+                )
+
             existing = {qa_result_key(result) for result in video["qa_results"]}
             pending = [
                 (question, effort)

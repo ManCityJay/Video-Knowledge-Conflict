@@ -14,6 +14,7 @@ from .core import (
     grouped_dir,
     iter_case_paths,
     load_case,
+    video_case_context,
     qa_result_input_mode,
     utc_now,
 )
@@ -254,7 +255,15 @@ def build_markdown(
         case = load_case(path)
         title = _markdown_value(case["title"]).replace("#", r"\#")
         lines.extend([f"## {title}", ""])
-        for index, question in enumerate(case["questions"], start=1):
+        question_groups = []
+        for video in case["videos"]:
+            for question in video_case_context(case, video)["questions"]:
+                group = next((item for item in question_groups if item[0] == question), None)
+                if group is None:
+                    group = (question, [])
+                    question_groups.append(group)
+                group[1].append(video)
+        for index, (question, question_videos) in enumerate(question_groups, start=1):
             lines.extend(
                 [
                     f"### Question {index}",
@@ -263,7 +272,7 @@ def build_markdown(
                     "",
                 ]
             )
-            for video in case["videos"]:
+            for video in question_videos:
                 matching = _latest_results(
                     result
                     for result in video["qa_results"]

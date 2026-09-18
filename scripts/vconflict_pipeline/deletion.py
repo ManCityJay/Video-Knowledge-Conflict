@@ -14,6 +14,7 @@ from .core import (
     atomic_write_json,
     grouped_dir,
     load_case,
+    video_case_context,
     resolve_video_path,
     validate_case,
 )
@@ -49,7 +50,9 @@ def _remove_selected(
         )
 
     questions_by_id = {
-        question["question_id"]: question for question in case["questions"]
+        question["question_id"]: question
+        for context in [case] + [video_case_context(case, video) for video in case["videos"]]
+        for question in context["questions"]
     }
     missing_questions = _missing(question_ids, questions_by_id)
     if missing_questions:
@@ -106,6 +109,11 @@ def _remove_selected(
         if question["question_id"] not in question_ids
     ]
     for video in updated["videos"]:
+        if "variant_context" in video:
+            video["variant_context"]["questions"] = [
+                question for question in video["variant_context"]["questions"]
+                if question["question_id"] not in question_ids
+            ]
         video["qa_results"] = [
             result
             for result in video["qa_results"]

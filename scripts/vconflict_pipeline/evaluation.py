@@ -16,6 +16,7 @@ from .core import (
     grouped_dir,
     iter_case_paths,
     load_case,
+    video_case_context,
     qa_result_input_mode,
     require_nonempty_string,
     resolve_video_path,
@@ -172,7 +173,6 @@ def _preflight_cases(
     target_total = 0
     for path in iter_case_paths(dataset_dir, args.case_id):
         case = load_case(path)
-        questions = _selected_questions(case, selected_questions)
         promoted = (
             _promote_existing_local_videos(
                 case,
@@ -186,7 +186,9 @@ def _preflight_cases(
             input_mode=args.input,
             selected_video_ids=selected_videos,
         )
-        target_total += len(questions) * len(videos) * len(efforts)
+        for video in videos:
+            questions = _selected_questions(video_case_context(case, video), selected_questions)
+            target_total += len(questions) * len(efforts)
         loaded.append((path, case))
         if promoted:
             promoted_by_case.append((path, case, promoted))
@@ -303,7 +305,8 @@ def command_judge(args: argparse.Namespace) -> int:
                 ) or qa_result.get("judgment") is not None:
                     continue
                 try:
-                    question = _find_question(case, qa_result["question_id"])
+                    context = video_case_context(case, video)
+                    question = _find_question(context, qa_result["question_id"])
                     final_answer = require_nonempty_string(
                         qa_result.get("final_answer"), "final_answer"
                     )
@@ -311,8 +314,8 @@ def command_judge(args: argparse.Namespace) -> int:
                         "video_role": video["role"],
                         "question": question["text_en"],
                         "final_answer": final_answer,
-                        "normal_fact": case["conflict_spec"]["normal_fact_en"],
-                        "intended_video_fact": case["conflict_spec"][
+                        "normal_fact": context["conflict_spec"]["normal_fact_en"],
+                        "intended_video_fact": context["conflict_spec"][
                             "intended_video_fact_en"
                         ],
                         "conflict_video_reference": question[
@@ -417,13 +420,13 @@ def _qa_completed_from_loaded(
     selected_videos = set(args.video_id or [])
     completed = 0
     for _, case in loaded:
-        questions = _selected_questions(case, selected_questions)
         videos = _eligible_videos(
             case,
             input_mode=args.input,
             selected_video_ids=selected_videos,
         )
         for video in videos:
+            questions = _selected_questions(video_case_context(case, video), selected_questions)
             existing = {qa_result_key(result) for result in video["qa_results"]}
             completed += sum(
                 (

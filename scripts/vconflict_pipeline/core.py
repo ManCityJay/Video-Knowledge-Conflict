@@ -626,6 +626,14 @@ def validate_qa_result(result: Any, prefix: str, questions: dict[str, dict[str, 
         raise PipelineError(f"{prefix}.judgment.confidence is invalid.")
 
 
+def video_case_context(case: dict[str, Any], video: dict[str, Any]) -> dict[str, Any]:
+    """Return this video's facts/questions while keeping the parent case identity."""
+    context = video.get("variant_context")
+    if context is None:
+        return case
+    return {**case, "questions": context["questions"], "conflict_spec": context["conflict_spec"]}
+
+
 def validate_case(case: Any) -> None:
     if not isinstance(case, dict):
         raise PipelineError("Case must be an object.")
@@ -777,6 +785,21 @@ def validate_case(case: Any) -> None:
             raise PipelineError(
                 f"{prefix}.local_path review bucket must be qualified or unqualified."
             )
+        context = video.get("variant_context")
+        video_questions = questions
+        if context is not None:
+            if not isinstance(context, dict):
+                raise PipelineError(f"{prefix}.variant_context must be an object.")
+            video_questions = validate_questions(context.get("questions"))
+            facts = context.get("conflict_spec")
+            if not isinstance(facts, dict):
+                raise PipelineError(f"{prefix}.variant_context.conflict_spec must be an object.")
+            for field in ("normal_fact_en", "intended_video_fact_en"):
+                value = require_nonempty_string(facts.get(field), f"{prefix}.variant_context.{field}")
+                if not is_english_text(value):
+                    raise PipelineError(f"{prefix}.variant_context.{field} must be English.")
+            if normalize_text(facts["normal_fact_en"]) == normalize_text(facts["intended_video_fact_en"]):
+                raise PipelineError(f"{prefix}.variant_context facts must differ.")
         qa_results = video.get("qa_results")
         if not isinstance(qa_results, list):
             raise PipelineError(f"{prefix}.qa_results must be an array.")
@@ -784,7 +807,7 @@ def validate_case(case: Any) -> None:
             validate_qa_result(
                 result,
                 f"{prefix}.qa_results[{result_index}]",
-                questions,
+                video_questions,
             )
             if (
                 video["role"] == "control"
