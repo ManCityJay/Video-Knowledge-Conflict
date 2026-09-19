@@ -341,6 +341,14 @@ def _question_prompt(question: str) -> str:
     return f"{question}\n\n{FINAL_ANSWER_INSTRUCTION}"
 
 
+# todo
+def _video_question_prompt(work_title: str, question: str) -> str:
+    return _question_prompt(
+        f"This is a video clip from the work {work_title}. "
+        f"{question}"
+    )
+
+
 def _description_prompt(context: str, question: str) -> str:
     return f"{context}\n\nQuestion:\n{_question_prompt(question)}"
 
@@ -501,6 +509,7 @@ def run_qa_batch(
     input_mode: str,
     video_path: Path | None,
     context_text: str | None,
+    work_title: str | None,
     question_runs: list[tuple[dict[str, Any], str | None]],
     qa_model: str,
     api_key: str,
@@ -512,6 +521,8 @@ def run_qa_batch(
     if input_mode == "video":
         if video_path is None:
             raise PipelineError("Video input requires a local video path.")
+        if not work_title:
+            raise PipelineError("Video input requires a work title.")
         video_input = (
             _qwen_video_uri(video_path)
             if qa_model == QWEN_QA_MODEL
@@ -525,7 +536,7 @@ def run_qa_batch(
     failures: list[tuple[str, str | None, str]] = []
     for question, thinking_effort in question_runs:
         prompt_text = (
-            _question_prompt(question["text_en"])
+            _video_question_prompt(work_title, question["text_en"])
             if input_mode == "video"
             else _description_prompt(context_text, question["text_en"])
         )
@@ -707,6 +718,11 @@ def command_qa(args: Any) -> int:
                 input_mode=args.input,
                 video_path=job["path"],
                 context_text=job["context_text"],
+                work_title=(
+                    case["title"].split(":", 1)[0].strip()
+                    if args.input == "video"
+                    else None
+                ),
                 question_runs=job["pending"],
                 qa_model=args.qa_model,
                 api_key=api_key,

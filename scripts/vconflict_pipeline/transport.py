@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 import random
+import sys
 import threading
 import time
 from datetime import datetime, timezone
@@ -204,6 +205,8 @@ def _is_retryable(error: Exception) -> bool:
             "timeout",
             "temporarily unavailable",
             "incomplete http response",
+            "unexpected_eof_while_reading",
+            "eof occurred in violation of protocol",
             "overloaded",
         )
     )
@@ -223,11 +226,22 @@ def send_with_retry(
                 else request_limiter.call(callback)
             )
         except TransportError as exc:
-            if attempt >= max_retries or not _is_retryable(exc):
+            if not _is_retryable(exc):
                 raise
+            if attempt >= max_retries:
+                raise TransportError(
+                    f"{exc} (exhausted {max_retries} retries; {attempt + 1} attempts total)",
+                    retry_after=exc.retry_after,
+                ) from exc
             delay = min(30.0, 2.0**attempt) + random.uniform(0, 0.5)
             if exc.retry_after is not None:
                 delay = max(delay, exc.retry_after)
+            print(
+                f"Retrying transient transport failure ({attempt + 1}/{max_retries}) "
+                f"after {delay:.1f}s",
+                file=sys.stderr,
+                flush=True,
+            )
             time.sleep(delay)
     raise AssertionError("unreachable")
 

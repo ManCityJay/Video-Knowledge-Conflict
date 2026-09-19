@@ -95,7 +95,12 @@ python scripts/pipeline.py questions \
   --group classic_fairy_tale_film_conflicts
 ```
 
-`questions --force` 会替换问题并清除选中 case 的全部 QA 和 judgment。
+`questions` 会分别检查 case 顶层问题和各视频的 `variant_context.questions`，
+默认仅补齐空的问题列表。共享问题只使用继承该问题的 videos 作为生成上下文；
+独立变体只使用该视频的 prompt 和自己的 `conflict_spec`，不会混入其他变体。
+`questions --force` 会重生成选中 case 中所有实际使用的问题上下文。
+每次更新仅清除使用该问题上下文的视频的 QA 和 judgment；
+同一 case 的全部生成和校验成功后才一次性保存。
 新问题 ID 直接使用 `q001`、`q002`、`q003`，不再保存
 `question_pair_id` 或 `question_type`。使用删除功能后问题 ID 可以不连续；其他问题
 不会被重编号。旧 JSON 中已有的旧式问题 ID 仅做兼容读取，pipeline 不会生成或
