@@ -54,7 +54,8 @@ MATHEMATICS_ALGORITHM_AUTHOR_SYSTEM_PROMPT = AUTHOR_SYSTEM_PROMPT + """
 
 This case belongs to mathematics, an algorithm, a data structure, or a formal
 state-transition system. Optimize for literal visual legibility, not cinematic
-realism. Generate exactly one conflict prompt. Present it as a clean, flat,
+realism. Generate one to five meaningful conflict prompts, choosing the count
+based on substantive variations of the same core conflict. Present each as a clean, flat,
 high-contrast educational motion graphic on a plain background with a locked
 orthographic camera. The viewer must be able to identify the relevant objects,
 initial state, source-defined operation or bounded execution trace, and final
@@ -144,7 +145,9 @@ MATHEMATICS_ALGORITHM_AUTHOR_VERIFY_SYSTEM_PROMPT = (
 For a mathematics or algorithm case, also verify that the input state,
 operation, convention, and output state uniquely determine the formal result;
 that the evidence does not depend on code or small text; and that exactly
-one rule is violated. Require exactly one conflict prompt. Keep short, large
+one rule is violated in each video. Require one to five meaningful conflict
+prompts expressing the same core conflict and exactly one matched normal-control
+prompt. Reject background-only variants. Keep short, large
 algorithm names, operation labels, object IDs, and necessary numbers. A short
 calculator expression/result is allowed as an OCR-dependent baseline; reject
 arbitrary label-only substitutions unless the source explicitly defines a
