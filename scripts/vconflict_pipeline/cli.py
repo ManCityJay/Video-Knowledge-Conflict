@@ -28,6 +28,7 @@ from .settings import (
     DEFAULT_REQUEST_WORKERS,
     DEFAULT_SEEDANCE_TOTAL_WORKERS,
     DEFAULT_SOURCE_CASE_DIR,
+    FAIRY_TALE_GROUP,
     SEEDANCE_MODEL,
 )
 
@@ -98,6 +99,10 @@ def _add_thinking_effort(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _add_work_title_prefix(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--with-work-title-prefix", action="store_true")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(add_help=False)
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -150,7 +155,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     generate.add_argument("--ratio", default="adaptive")
     generate.add_argument("--resolution", default="720p")
-    generate.add_argument("--duration", type=int, default=-1)
+    generate.add_argument("--duration", type=int, default=5)
     generate.add_argument("--poll-interval", type=int, default=30)
     generate.add_argument("--max-polls", type=int, default=120)
     generate.set_defaults(func=command_generate)
@@ -186,6 +191,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_case_workers(qa_judge)
     _add_request_limits(qa_judge)
     _add_thinking_effort(qa_judge)
+    _add_work_title_prefix(qa_judge)
     qa_judge.add_argument("--qa-workers", type=int, default=3)
     _add_retries(qa_judge, timeout=REQUEST_TIMEOUT_SECONDS)
     force = qa_judge.add_mutually_exclusive_group()
@@ -203,11 +209,20 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_input(summarize)
     _add_thinking_effort(summarize)
+    _add_work_title_prefix(summarize)
     summarize.set_defaults(func=command_summarize)
     return parser
 
 
 def _validate(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
+    if getattr(args, "with_work_title_prefix", False):
+        if args.group != FAIRY_TALE_GROUP:
+            parser.error(
+                "--with-work-title-prefix requires "
+                f"--group {FAIRY_TALE_GROUP}"
+            )
+        if args.input != "video":
+            parser.error("--with-work-title-prefix requires --input video")
     if args.command == "delete":
         has_selected_items = bool(args.video_id or args.question_id)
         if args.delete_all and has_selected_items:

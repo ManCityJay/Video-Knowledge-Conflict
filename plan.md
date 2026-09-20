@@ -91,6 +91,17 @@ Qwen 本地视频最大 100 MiB；Kimi 请求体最大 100 MB。
 Conclude with exactly one final line in this format: Final answer: <your clear, direct answer in one sentence>.
 ```
 
+视频问题默认直接发送原始 question。仅当 group 为
+`classic_fairy_tale_film_conflicts`、input 为 `video` 且命令显式传入
+`--with-work-title-prefix` 时，问题才包装为：
+
+```text
+This is a video clip from the work <title>. <question>
+```
+
+其中 `<title>` 取 case `title` 第一个冒号前的作品名。其他 group 禁止使用该参数；
+description 输入不使用该包装，也不保存 `work_title_prefix`。
+
 Pipeline 保留完整 `raw_answer`，但只从最后一个非空行的精确
 `Final answer:` 标记提取 `final_answer`。缺少标记或标记后为空时，仅当前
 question/effort 失败且不保存记录，不进行格式重试；其他 QA 和 Judge 继续运行。
@@ -129,6 +140,30 @@ python scripts/pipeline.py summarize --group <group> \
   --input video --qa-model qwen3.8-max --thinking-effort all
 ```
 
+Fairy video 默认运行 `no_prefix` 条件；对照的 `with_prefix` 条件在
+`qa-judge` 和 `summarize` 中同时追加 `--with-work-title-prefix`。两种结果可在同一
+case JSON 中并存。
+
+```bash
+# no_prefix
+python scripts/pipeline.py qa-judge \
+  --group classic_fairy_tale_film_conflicts \
+  --input video --qa-model qwen3.8-max --thinking-effort all
+python scripts/pipeline.py summarize \
+  --group classic_fairy_tale_film_conflicts \
+  --input video --qa-model qwen3.8-max --thinking-effort all
+
+# with_prefix
+python scripts/pipeline.py qa-judge \
+  --group classic_fairy_tale_film_conflicts \
+  --input video --qa-model qwen3.8-max --thinking-effort all \
+  --with-work-title-prefix
+python scripts/pipeline.py summarize \
+  --group classic_fairy_tale_film_conflicts \
+  --input video --qa-model qwen3.8-max --thinking-effort all \
+  --with-work-title-prefix
+```
+
 文字描述实验：
 
 ```bash
@@ -149,11 +184,28 @@ video/description 配对 `compare`。Source cases 必须预先按每个 case 一
 文件准备，各阶段显式执行。文字 context stage 名称为 `description`。
 
 `qa-judge` 使用 case 层与输入层两级并发，所有请求共享 limiter、RPM pacing 和
-retry 策略。QA 在当前 video 对象中按以下键去重：
+retry 策略。Description QA 在当前 video 对象中按以下键去重：
 
 ```text
 input + question_id + qa_model + thinking_effort
 ```
+
+Video QA 额外记录布尔字段 `work_title_prefix`，并按以下键去重：
+
+```json
+"work_title_prefix": false
+```
+
+对照条件则为 `true`。Description QA 不得包含该字段。
+
+```text
+input + question_id + qa_model + thinking_effort + work_title_prefix
+```
+
+旧 video QA 若缺少该字段，普通 `qa-judge`、`--force-judge` 和 `summarize` 都会
+要求先按真实运行条件补为 `true` 或 `false`。也可以使用 `--force-qa` 删除当前
+筛选范围内的未分类旧结果并按当前 prefix 条件重跑；另一种已明确标记的 prefix
+结果和全部 description 结果不会被清除。
 
 视频输入预检会检查本地 `local_path`。本次选中的视频如果文件存在但 `status`
 不是 `ready`，预检会先把状态修正为 `ready` 并写回 case JSON；非 `ready` 且文件
@@ -163,7 +215,8 @@ input + question_id + qa_model + thinking_effort
 视频文件不会为去重而计算 SHA-256。通过 pipeline 重新生成视频、description
 或 questions 时会清除相应 QA；手工替换同路径视频后必须使用 `--force-qa`。
 
-QA 去重键保持不变，不为最终回答协议增加版本。旧记录允许加载和被
+Description 去重键保持不变；除上述 video prefix 条件外，不为最终回答
+协议增加版本。旧记录允许加载和被
 `--force-qa` 清除，但不会猜测或迁移 `final_answer`；普通运行或
 `--force-judge` 选中旧格式记录时，会在任何模型请求前要求先执行
 `--force-qa`。
@@ -181,11 +234,21 @@ QA 去重键保持不变，不为最终回答协议增加版本。旧记录允�
 results/<group>/<qwen|kimi|gemini>_<video|description>_<none|default>_summary.json
 ```
 
+Fairy video 使用显式条件名，分别生成：
+
+```text
+results/classic_fairy_tale_film_conflicts/<model>_video_no_prefix_<effort>_summary.json
+results/classic_fairy_tale_film_conflicts/<model>_video_with_prefix_<effort>_summary.json
+```
+
 同一模型和 input 的不同 effort 合并到：
 
 ```text
 results/<group>/<qwen|kimi|gemini>_<video|description>_report.md
 ```
+
+Fairy video report 同样分别使用 `_video_no_prefix_report.md` 和
+`_video_with_prefix_report.md`；其他 group 和 description 的文件名保持不变。
 
 Report 同时展示 QA 的完整 `raw_answer`、Judge 实际使用的 `final_answer`、verdict
 和 confidence。

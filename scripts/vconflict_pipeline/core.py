@@ -575,6 +575,13 @@ def validate_qa_result(result: Any, prefix: str, questions: dict[str, dict[str, 
     input_mode = qa_result_input_mode(result)
     if input_mode not in INPUT_MODES:
         raise PipelineError(f"{prefix}.input_mode is invalid.")
+    if input_mode == "description" and "work_title_prefix" in result:
+        raise PipelineError(
+            f"{prefix}.work_title_prefix is only valid for video input."
+        )
+    if input_mode == "video" and "work_title_prefix" in result:
+        if not isinstance(result["work_title_prefix"], bool):
+            raise PipelineError(f"{prefix}.work_title_prefix must be a boolean.")
     context_sha256 = result.get("context_sha256")
     video_sha256 = result.get("video_sha256")
     if context_sha256 is not None:

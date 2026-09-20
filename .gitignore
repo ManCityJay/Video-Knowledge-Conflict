@@ -1,15 +1,12 @@
 # Generated media, runtime cases, and results
 /videos/
 /results/
-/dataset/cases/
+/dataset/
 
 # Local working files and experiment backups
 /backups/
 /artifacts/
-/dataset/archive/reviewed_cases/
-# Keep already tracked retired cases; ignore the remaining historical snapshots.
-/dataset/archive/source_cases/2026-09-07_math_v1/
-/dataset/source_assets
+/docs/
 
 # Local configuration and credentials
 /.vscode/

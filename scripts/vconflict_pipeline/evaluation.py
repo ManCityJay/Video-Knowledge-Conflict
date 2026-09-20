@@ -29,6 +29,8 @@ from .qa import (
     preflight_qa_backend,
     qa_result_key,
     qa_result_thinking_effort,
+    qa_result_work_title_prefix,
+    qa_run_key,
 )
 from .settings import AUTHOR_JUDGE_MODEL
 from .transport import (
@@ -145,7 +147,7 @@ def _promote_existing_local_videos(
     return promoted
 
 
-def _result_selected(
+def _result_base_selected(
     video: dict[str, Any],
     result: dict[str, Any],
     *,
@@ -158,6 +160,34 @@ def _result_selected(
         or result.get("model") != args.qa_model
         or qa_result_input_mode(result) != args.input
         or qa_result_thinking_effort(result) not in efforts
+    )
+
+
+def _result_selected(
+    video: dict[str, Any],
+    result: dict[str, Any],
+    *,
+    args: argparse.Namespace,
+    efforts: set[str | None],
+) -> bool:
+    if not _result_base_selected(video, result, args=args, efforts=efforts):
+        return False
+    return args.input != "video" or qa_result_work_title_prefix(result) is bool(
+        args.with_work_title_prefix
+    )
+
+
+def _legacy_video_result_selected(
+    video: dict[str, Any],
+    result: dict[str, Any],
+    *,
+    args: argparse.Namespace,
+    efforts: set[str | None],
+) -> bool:
+    return (
+        args.input == "video"
+        and _result_base_selected(video, result, args=args, efforts=efforts)
+        and qa_result_work_title_prefix(result) is None
     )
 
 
@@ -228,6 +258,29 @@ def _require_selected_final_answers(
                 )
 
 
+def _require_selected_prefix_metadata(
+    loaded: list[tuple[Path, dict[str, Any]]],
+    *,
+    args: argparse.Namespace,
+    efforts: set[str | None],
+) -> None:
+    if args.input != "video":
+        return
+    for path, case in loaded:
+        for video in case["videos"]:
+            for result in video["qa_results"]:
+                if not _legacy_video_result_selected(
+                    video, result, args=args, efforts=efforts
+                ):
+                    continue
+                raise PipelineError(
+                    f"Selected QA result {case['case_id']}/{video['video_id']}/"
+                    f"{result['question_id']} in {path} has no "
+                    "work_title_prefix. Backfill it with true or false, or run "
+                    "qa-judge with --force-qa to replace the unclassified result."
+                )
+
+
 def _preclear_force(
     loaded: list[tuple[Path, dict[str, Any]]],
     *,
@@ -244,7 +297,11 @@ def _preclear_force(
             if args.force_qa:
                 kept: list[dict[str, Any]] = []
                 for result in video["qa_results"]:
-                    if _result_selected(video, result, args=args, efforts=efforts):
+                    if _result_selected(
+                        video, result, args=args, efforts=efforts
+                    ) or _legacy_video_result_selected(
+                        video, result, args=args, efforts=efforts
+                    ):
                         qa_cleared += 1
                         case_changed = True
                     else:
@@ -429,11 +486,12 @@ def _qa_completed_from_loaded(
             questions = _selected_questions(video_case_context(case, video), selected_questions)
             existing = {qa_result_key(result) for result in video["qa_results"]}
             completed += sum(
-                (
+                qa_run_key(
                     args.input,
                     question["question_id"],
                     args.qa_model,
                     effort,
+                    work_title_prefix=args.with_work_title_prefix,
                 )
                 in existing
                 for effort in efforts
@@ -448,6 +506,11 @@ def command_qa_judge(args: argparse.Namespace) -> int:
     efforts = expand_thinking_efforts(args.thinking_effort, args.qa_model)
     loaded, qa_total = _preflight_cases(args, efforts)
     if not args.force_qa:
+        _require_selected_prefix_metadata(
+            loaded,
+            args=args,
+            efforts=set(efforts),
+        )
         _require_selected_final_answers(
             loaded,
             args=args,

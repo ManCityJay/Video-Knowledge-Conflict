@@ -25,6 +25,7 @@ QA_MODEL_SLUGS = {
     KIMI_QA_MODEL: "kimi",
 }
 CLI_THINKING_EFFORTS = ("none", "default")
+FAIRY_TALE_GROUP = "classic_fairy_tale_film_conflicts"
 
 SEEDANCE_MODEL = "doubao-seedance-2-5-260628"
 ARK_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3"

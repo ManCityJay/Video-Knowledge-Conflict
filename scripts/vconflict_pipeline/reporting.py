@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from .core import (
+    PipelineError,
     atomic_write_json,
     atomic_write_text,
     canonical_verdict,
@@ -22,8 +23,10 @@ from .qa import (
     expand_thinking_efforts,
     get_backend,
     qa_result_thinking_effort,
+    qa_result_work_title_prefix,
 )
 from .settings import (
+    FAIRY_TALE_GROUP,
     PROJECT_ROOT,
     QA_MODEL_SLUGS,
     RESULTS_DIR,
@@ -113,12 +116,16 @@ def _result_matches(
     qa_model: str,
     input_mode: str,
     efforts: set[str | None],
+    work_title_prefix: bool | None,
 ) -> bool:
-    return (
+    matches = (
         result.get("model") == qa_model
         and qa_result_input_mode(result) == input_mode
         and qa_result_thinking_effort(result) in efforts
     )
+    if not matches or input_mode != "video":
+        return matches
+    return qa_result_work_title_prefix(result) is work_title_prefix
 
 
 def _newer(candidate: dict[str, Any], current: dict[str, Any] | None) -> bool:
@@ -139,6 +146,7 @@ def build_summary(
     qa_model: str,
     input_mode: str,
     effort: str | None,
+    work_title_prefix: bool | None,
 ) -> dict[str, Any]:
     latest: dict[tuple[str, str, str], tuple[str, dict[str, Any]]] = {}
     for case_path in case_paths:
@@ -150,6 +158,7 @@ def build_summary(
                     qa_model=qa_model,
                     input_mode=input_mode,
                     efforts={effort},
+                    work_title_prefix=work_title_prefix,
                 ) or not isinstance(result.get("judgment"), dict):
                     continue
                 key = (case["case_id"], video["video_id"], result["question_id"])
@@ -179,7 +188,7 @@ def build_summary(
         video_counts[role][verdict] += 1
         case_counts[case_id][role][verdict] += 1
     overall = _summarize_counts(answer_counts, video_counts)
-    return {
+    summary = {
         "generated_at": utc_now(),
         "qa_model": qa_model,
         "input": input_mode,
@@ -199,6 +208,9 @@ def build_summary(
             for case_id, counts in sorted(case_counts.items())
         },
     }
+    if input_mode == "video":
+        summary["work_title_prefix"] = work_title_prefix
+    return summary
 
 
 def _text(value: Any) -> str:
@@ -239,6 +251,7 @@ def build_markdown(
     qa_model: str,
     input_mode: str,
     efforts: set[str | None],
+    work_title_prefix: bool | None,
 ) -> str:
     effort_names = ", ".join(
         _effort_name(item) for item in sorted(efforts, key=str)
@@ -251,6 +264,9 @@ def build_markdown(
         f"**Thinking efforts:** {effort_names}",
         "",
     ]
+    if input_mode == "video":
+        prefix_name = "with_prefix" if work_title_prefix else "no_prefix"
+        lines.extend([f"**Work-title prefix:** {prefix_name}", ""])
     for path in case_paths:
         case = load_case(path)
         title = _markdown_value(case["title"]).replace("#", r"\#")
@@ -282,6 +298,7 @@ def build_markdown(
                         qa_model=qa_model,
                         input_mode=input_mode,
                         efforts=efforts,
+                        work_title_prefix=work_title_prefix,
                     )
                 )
                 if input_mode == "description" and not matching:
@@ -339,6 +356,7 @@ def _discover_efforts(
     *,
     qa_model: str,
     input_mode: str,
+    work_title_prefix: bool | None,
 ) -> tuple[str | None, ...]:
     backend = get_backend(qa_model)
     observed: set[str | None] = set()
@@ -348,8 +366,13 @@ def _discover_efforts(
             for result in video["qa_results"]:
                 effort = qa_result_thinking_effort(result)
                 if (
-                    result.get("model") == qa_model
-                    and qa_result_input_mode(result) == input_mode
+                    _result_matches(
+                        result,
+                        qa_model=qa_model,
+                        input_mode=input_mode,
+                        efforts=set(backend.thinking_efforts),
+                        work_title_prefix=work_title_prefix,
+                    )
                     and isinstance(result.get("judgment"), dict)
                     and effort in backend.thinking_efforts
                 ):
@@ -360,9 +383,42 @@ def _discover_efforts(
     return selected or (backend.default_thinking_effort,)
 
 
+def _require_video_prefix_metadata(
+    case_paths: list[Path],
+    *,
+    qa_model: str,
+) -> None:
+    for path in case_paths:
+        case = load_case(path)
+        for video in case["videos"]:
+            for result in video["qa_results"]:
+                if (
+                    result.get("model") == qa_model
+                    and qa_result_input_mode(result) == "video"
+                    and qa_result_work_title_prefix(result) is None
+                ):
+                    raise PipelineError(
+                        f"QA result {case['case_id']}/{video['video_id']}/"
+                        f"{result['question_id']} in {path} has no "
+                        "work_title_prefix. Backfill it with true or false before "
+                        "summarizing video results."
+                    )
+
+
+def _fairy_video_prefix_name(args: argparse.Namespace) -> str | None:
+    if args.input != "video" or args.group != FAIRY_TALE_GROUP:
+        return None
+    return "with_prefix" if args.with_work_title_prefix else "no_prefix"
+
+
 def command_summarize(args: argparse.Namespace) -> int:
     dataset_dir = grouped_dir(args.dataset_dir, args.group)
     paths = iter_case_paths(dataset_dir, args.case_id)
+    work_title_prefix = (
+        bool(args.with_work_title_prefix) if args.input == "video" else None
+    )
+    if args.input == "video":
+        _require_video_prefix_metadata(paths, qa_model=args.qa_model)
     requested = list(args.thinking_effort or [])
     efforts = (
         expand_thinking_efforts(requested, args.qa_model)
@@ -371,14 +427,18 @@ def command_summarize(args: argparse.Namespace) -> int:
             paths,
             qa_model=args.qa_model,
             input_mode=args.input,
+            work_title_prefix=work_title_prefix,
         )
     )
     result_dir = grouped_dir(RESULTS_DIR, args.group)
     model_slug = QA_MODEL_SLUGS[args.qa_model]
+    prefix_name = _fairy_video_prefix_name(args)
     for effort in efforts:
-        output = result_dir / (
-            f"{model_slug}_{args.input}_{_effort_name(effort)}_summary.json"
-        )
+        output_parts = [model_slug, args.input]
+        if prefix_name is not None:
+            output_parts.append(prefix_name)
+        output_parts.extend([_effort_name(effort), "summary"])
+        output = result_dir / ("_".join(output_parts) + ".json")
         atomic_write_json(
             output,
             build_summary(
@@ -386,11 +446,15 @@ def command_summarize(args: argparse.Namespace) -> int:
                 qa_model=args.qa_model,
                 input_mode=args.input,
                 effort=effort,
+                work_title_prefix=work_title_prefix,
             ),
         )
         print(f"Wrote summary: {output}")
 
-    report_output = result_dir / f"{model_slug}_{args.input}_report.md"
+    report_parts = [model_slug, args.input]
+    if prefix_name is not None:
+        report_parts.append(prefix_name)
+    report_output = result_dir / ("_".join(report_parts) + "_report.md")
     atomic_write_text(
         report_output,
         build_markdown(
@@ -398,6 +462,7 @@ def command_summarize(args: argparse.Namespace) -> int:
             qa_model=args.qa_model,
             input_mode=args.input,
             efforts=set(efforts),
+            work_title_prefix=work_title_prefix,
         ),
     )
     print(f"Wrote report: {report_output}")

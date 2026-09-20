@@ -341,11 +341,18 @@ def _question_prompt(question: str) -> str:
     return f"{question}\n\n{FINAL_ANSWER_INSTRUCTION}"
 
 
-# todo
-def _video_question_prompt(work_title: str, question: str) -> str:
+def _video_question_prompt(
+    question: str,
+    *,
+    work_title: str | None,
+    work_title_prefix: bool,
+) -> str:
+    if not work_title_prefix:
+        return _question_prompt(question)
+    if not work_title:
+        raise PipelineError("A work title is required when its prefix is enabled.")
     return _question_prompt(
-        f"This is a video clip from the work {work_title}. "
-        f"{question}"
+        f"This is a video clip from the work {work_title}. {question}"
     )
 
 
@@ -495,13 +502,36 @@ def qa_result_thinking_effort(result: dict[str, Any]) -> Any:
     )
 
 
+def qa_result_work_title_prefix(result: dict[str, Any]) -> bool | None:
+    if qa_result_input_mode(result) != "video":
+        return None
+    value = result.get("work_title_prefix")
+    return value if isinstance(value, bool) else None
+
+
+def qa_run_key(
+    input_mode: str,
+    question_id: Any,
+    model: Any,
+    thinking_effort: Any,
+    *,
+    work_title_prefix: bool = False,
+) -> tuple[Any, ...]:
+    key = (input_mode, question_id, model, thinking_effort)
+    return (*key, work_title_prefix) if input_mode == "video" else key
+
+
 def qa_result_key(result: dict[str, Any]) -> tuple[Any, ...]:
-    return (
-        qa_result_input_mode(result),
+    input_mode = qa_result_input_mode(result)
+    key = (
+        input_mode,
         result.get("question_id"),
         result.get("model"),
         qa_result_thinking_effort(result),
     )
+    if input_mode == "video":
+        return (*key, qa_result_work_title_prefix(result))
+    return key
 
 
 def run_qa_batch(
@@ -510,6 +540,7 @@ def run_qa_batch(
     video_path: Path | None,
     context_text: str | None,
     work_title: str | None,
+    work_title_prefix: bool,
     question_runs: list[tuple[dict[str, Any], str | None]],
     qa_model: str,
     api_key: str,
@@ -521,8 +552,10 @@ def run_qa_batch(
     if input_mode == "video":
         if video_path is None:
             raise PipelineError("Video input requires a local video path.")
-        if not work_title:
-            raise PipelineError("Video input requires a work title.")
+        if work_title_prefix and not work_title:
+            raise PipelineError(
+                "Video input requires a work title when its prefix is enabled."
+            )
         video_input = (
             _qwen_video_uri(video_path)
             if qa_model == QWEN_QA_MODEL
@@ -536,7 +569,11 @@ def run_qa_batch(
     failures: list[tuple[str, str | None, str]] = []
     for question, thinking_effort in question_runs:
         prompt_text = (
-            _video_question_prompt(work_title, question["text_en"])
+            _video_question_prompt(
+                question["text_en"],
+                work_title=work_title,
+                work_title_prefix=work_title_prefix,
+            )
             if input_mode == "video"
             else _description_prompt(context_text, question["text_en"])
         )
@@ -596,6 +633,8 @@ def run_qa_batch(
         }
         if input_mode == "description":
             result["context_text_en"] = context_text
+        else:
+            result["work_title_prefix"] = work_title_prefix
         if backend.effective_reasoning_effort is not None:
             result["effective_reasoning_effort"] = backend.effective_reasoning_effort
         if isinstance(response.get("usage"), dict):
@@ -690,11 +729,12 @@ def command_qa(args: Any) -> int:
                 (question, effort)
                 for effort in efforts
                 for question in questions
-                if (
+                if qa_run_key(
                     args.input,
                     question["question_id"],
                     args.qa_model,
                     effort,
+                    work_title_prefix=args.with_work_title_prefix,
                 )
                 not in existing
             ]
@@ -720,9 +760,10 @@ def command_qa(args: Any) -> int:
                 context_text=job["context_text"],
                 work_title=(
                     case["title"].split(":", 1)[0].strip()
-                    if args.input == "video"
+                    if args.input == "video" and args.with_work_title_prefix
                     else None
                 ),
+                work_title_prefix=args.with_work_title_prefix,
                 question_runs=job["pending"],
                 qa_model=args.qa_model,
                 api_key=api_key,

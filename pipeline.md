@@ -197,6 +197,27 @@ python scripts/pipeline.py qa-judge \
   --thinking-effort all
 ```
 
+上述命令运行 Fairy video 的默认 `no_prefix` 条件。只有 Fairy video 可以选择加入
+作品名前缀；对照条件显式执行：
+
+```bash
+python scripts/pipeline.py qa-judge \
+  --group classic_fairy_tale_film_conflicts \
+  --input video \
+  --qa-model qwen3.8-max \
+  --thinking-effort all \
+  --with-work-title-prefix
+```
+
+此时每个问题发送为：
+
+```text
+This is a video clip from the work <title>. <question>
+```
+
+`<title>` 取 case `title` 第一个冒号前的作品名。其他 group 或 description 使用
+`--with-work-title-prefix` 会在任何模型请求前报错。
+
 纯文字实验：
 
 ```bash
@@ -218,10 +239,23 @@ python scripts/pipeline.py qa-judge \
   `google/gemini-3.1-pro-preview`；仅支持 `default`，实际 reasoning effort 为
   `medium`。
 
-QA 在每个 video 对象内部按以下字段去重：
+Description QA 在每个 video 对象内部按以下字段去重：
 
 ```text
 input + question_id + qa_model + thinking_effort
+```
+
+Video QA 写入布尔字段 `work_title_prefix`，并按以下字段去重，因此 Fairy 的两种
+条件可以并存：
+
+```json
+"work_title_prefix": false
+```
+
+`with_prefix` 条件写入 `true`。Description QA 不得包含该字段。
+
+```text
+input + question_id + qa_model + thinking_effort + work_title_prefix
 ```
 
 所有 QA backend 都会把以下要求放在 user prompt 的最后；视频输入中，这段文字
@@ -243,6 +277,11 @@ QA 记录、不额外重试；同批其他 QA 和已有成功回答的 Judge 继
 旧 QA 没有 `final_answer`。Pipeline 不猜测或迁移旧回答；普通运行或
 `--force-judge` 选中这类记录时，会在任何模型请求前报错。使用 `--force-qa`
 统一清除并重新生成即可。
+
+旧 video QA 若没有 `work_title_prefix`，也不会被猜测为任一条件。可以按当时真实
+prompt 手工补充 `true` 或 `false`；使用 `--force-qa` 时，pipeline 会清除当前筛选
+范围内缺少该字段的旧 video 结果并按当前条件重跑，同时保留另一种已明确标记的
+prefix 结果和全部 description 结果。Description QA 不保存该字段。
 
 强制运行有两个互斥选项：
 
@@ -302,7 +341,33 @@ results/classic_fairy_tale_film_conflicts/qwen_description_default_summary.json
 results/classic_fairy_tale_film_conflicts/qwen_description_report.md
 ```
 
+Fairy video 的两种条件分别汇总：
+
+```bash
+# no_prefix
+python scripts/pipeline.py summarize \
+  --group classic_fairy_tale_film_conflicts \
+  --input video --qa-model qwen3.8-max --thinking-effort all
+
+# with_prefix
+python scripts/pipeline.py summarize \
+  --group classic_fairy_tale_film_conflicts \
+  --input video --qa-model qwen3.8-max --thinking-effort all \
+  --with-work-title-prefix
+```
+
+它们分别生成 `qwen_video_no_prefix_<effort>_summary.json` 和
+`qwen_video_with_prefix_<effort>_summary.json`，以及各自的
+`qwen_video_no_prefix_report.md` 和 `qwen_video_with_prefix_report.md`。Summary
+JSON 包含布尔字段 `work_title_prefix`，report 显示 `no_prefix` 或
+`with_prefix`。其他 group 的 video 和所有 description 保持原文件名。
+
 不指定 `--thinking-effort` 或使用 `all` 时，只为现有已判定结果中实际存在的
 effort 分别生成 summary；若没有结果，则生成模型默认 effort 的空 summary。
 不同 effort 的最新结果放在同一份 report 中，report 同时展示完整
 `raw_answer` 和实际送审的 `final_answer`。不再支持手工指定 `--output`。
+
+
+## Video generation preference (2026-09-20)
+
+New and regenerated videos use 5 seconds and 720p. The generate CLI now defaults to --duration 5 --resolution 720p; pass those values explicitly in batch commands as well. Source-specific requests to omit labels override the earlier general reagent-label guidance.
