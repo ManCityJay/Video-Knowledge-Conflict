@@ -12,7 +12,6 @@
 /.vscode/
 .env
 .env.*
-.gitignore
 
 # Python caches
 __pycache__/

@@ -31,6 +31,7 @@ from .qa import (
     qa_result_thinking_effort,
     qa_result_work_title_prefix,
     qa_run_key,
+    work_title_prefix_condition,
 )
 from .settings import AUTHOR_JUDGE_MODEL
 from .transport import (
@@ -172,8 +173,14 @@ def _result_selected(
 ) -> bool:
     if not _result_base_selected(video, result, args=args, efforts=efforts):
         return False
-    return args.input != "video" or qa_result_work_title_prefix(result) is bool(
-        args.with_work_title_prefix
+    prefix_condition = work_title_prefix_condition(
+        args.group,
+        args.input,
+        args.with_work_title_prefix,
+    )
+    return (
+        prefix_condition is None
+        or qa_result_work_title_prefix(result) is prefix_condition
     )
 
 
@@ -184,8 +191,13 @@ def _legacy_video_result_selected(
     args: argparse.Namespace,
     efforts: set[str | None],
 ) -> bool:
+    prefix_condition = work_title_prefix_condition(
+        args.group,
+        args.input,
+        args.with_work_title_prefix,
+    )
     return (
-        args.input == "video"
+        prefix_condition is not None
         and _result_base_selected(video, result, args=args, efforts=efforts)
         and qa_result_work_title_prefix(result) is None
     )
@@ -264,7 +276,11 @@ def _require_selected_prefix_metadata(
     args: argparse.Namespace,
     efforts: set[str | None],
 ) -> None:
-    if args.input != "video":
+    if work_title_prefix_condition(
+        args.group,
+        args.input,
+        args.with_work_title_prefix,
+    ) is None:
         return
     for path, case in loaded:
         for video in case["videos"]:
@@ -475,6 +491,11 @@ def _qa_completed_from_loaded(
 ) -> int:
     selected_questions = set(args.question_id or [])
     selected_videos = set(args.video_id or [])
+    prefix_condition = work_title_prefix_condition(
+        args.group,
+        args.input,
+        args.with_work_title_prefix,
+    )
     completed = 0
     for _, case in loaded:
         videos = _eligible_videos(
@@ -484,14 +505,20 @@ def _qa_completed_from_loaded(
         )
         for video in videos:
             questions = _selected_questions(video_case_context(case, video), selected_questions)
-            existing = {qa_result_key(result) for result in video["qa_results"]}
+            existing = {
+                qa_result_key(
+                    result,
+                    include_work_title_prefix=prefix_condition is not None,
+                )
+                for result in video["qa_results"]
+            }
             completed += sum(
                 qa_run_key(
                     args.input,
                     question["question_id"],
                     args.qa_model,
                     effort,
-                    work_title_prefix=args.with_work_title_prefix,
+                    work_title_prefix=prefix_condition,
                 )
                 in existing
                 for effort in efforts

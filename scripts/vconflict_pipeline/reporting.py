@@ -24,6 +24,7 @@ from .qa import (
     get_backend,
     qa_result_thinking_effort,
     qa_result_work_title_prefix,
+    work_title_prefix_condition,
 )
 from .settings import (
     FAIRY_TALE_GROUP,
@@ -51,26 +52,20 @@ def _summarize_counts(
     answers: dict[str, Counter[str]],
     videos: dict[str, Counter[str]],
 ) -> dict[str, Any]:
-    conflict_answer_base = (
-        answers["conflict"]["context_grounded"]
-        + answers["conflict"]["knowledge_trapped"]
-    )
-    conflict_video_base = (
-        videos["conflict"]["context_grounded"]
-        + videos["conflict"]["knowledge_trapped"]
-    )
+    conflict_answers = sum(answers["conflict"].values())
+    conflict_videos = sum(videos["conflict"].values())
     control_answers = sum(answers["control"].values())
     control_videos = sum(videos["control"].values())
     return {
         "answers": {
             "conflict": {
-                "total": sum(answers["conflict"].values()),
+                "total": conflict_answers,
                 "labels": {
                     label: answers["conflict"][label] for label in sorted(VERDICTS)
                 },
                 "trapped_answer_rate": _safe_rate(
                     answers["conflict"]["knowledge_trapped"],
-                    conflict_answer_base,
+                    conflict_answers,
                 ),
             },
             "control": {
@@ -85,12 +80,12 @@ def _summarize_counts(
         },
         "videos": {
             "conflict": {
-                "total": sum(videos["conflict"].values()),
+                "total": conflict_videos,
                 "labels": {
                     label: videos["conflict"][label] for label in sorted(VERDICTS)
                 },
                 "trapped_video_rate": _safe_rate(
-                    videos["conflict"]["knowledge_trapped"], conflict_video_base
+                    videos["conflict"]["knowledge_trapped"], conflict_videos
                 ),
             },
             "control": {
@@ -123,7 +118,7 @@ def _result_matches(
         and qa_result_input_mode(result) == input_mode
         and qa_result_thinking_effort(result) in efforts
     )
-    if not matches or input_mode != "video":
+    if not matches or input_mode != "video" or work_title_prefix is None:
         return matches
     return qa_result_work_title_prefix(result) is work_title_prefix
 
@@ -163,7 +158,7 @@ def build_summary(
                     continue
                 key = (case["case_id"], video["video_id"], result["question_id"])
                 previous = latest.get(key)
-                if previous is not None and not _newer(result, previous[2]):
+                if previous is not None and not _newer(result, previous[1]):
                     continue
                 judgment = dict(result["judgment"])
                 judgment["verdict"] = canonical_verdict(judgment["verdict"])
@@ -208,7 +203,7 @@ def build_summary(
             for case_id, counts in sorted(case_counts.items())
         },
     }
-    if input_mode == "video":
+    if work_title_prefix is not None:
         summary["work_title_prefix"] = work_title_prefix
     return summary
 
@@ -264,7 +259,7 @@ def build_markdown(
         f"**Thinking efforts:** {effort_names}",
         "",
     ]
-    if input_mode == "video":
+    if work_title_prefix is not None:
         prefix_name = "with_prefix" if work_title_prefix else "no_prefix"
         lines.extend([f"**Work-title prefix:** {prefix_name}", ""])
     for path in case_paths:
@@ -414,10 +409,12 @@ def _fairy_video_prefix_name(args: argparse.Namespace) -> str | None:
 def command_summarize(args: argparse.Namespace) -> int:
     dataset_dir = grouped_dir(args.dataset_dir, args.group)
     paths = iter_case_paths(dataset_dir, args.case_id)
-    work_title_prefix = (
-        bool(args.with_work_title_prefix) if args.input == "video" else None
+    work_title_prefix = work_title_prefix_condition(
+        args.group,
+        args.input,
+        args.with_work_title_prefix,
     )
-    if args.input == "video":
+    if work_title_prefix is not None:
         _require_video_prefix_metadata(paths, qa_model=args.qa_model)
     requested = list(args.thinking_effort or [])
     efforts = (

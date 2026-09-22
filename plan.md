@@ -50,6 +50,16 @@ Seedance 负责生成视频；Gemini、Qwen 或 Kimi 负责视频或文字 conte
         "generator_request_id": "..."
       },
       "qa_results": []
+    },
+    {
+      "video_id": "control",
+      "role": "control",
+      "seedance_prompt_en": "...",
+      "task_id": null,
+      "status": "pending",
+      "local_path": "videos/seedance/alice_eat_cake_makes_her_shrink/control.mp4",
+      "human_review": "pending",
+      "qa_results": []
     }
   ]
 }
@@ -65,8 +75,9 @@ case JSON 是运行状态的唯一持久化单元。视频状态、任务 ID、d
 
 新生成的问题直接使用连续 ID `q001`–`q003`，不包含
 `question_pair_id`、`question_type` 或 implicit/explicit 后缀。删除问题后允许 ID
-出现缺口，其他问题不会重编号。旧 case 的问题格式仅为读取现有数据而兼容，不再
-生成，也不再进入分组指标。
+出现缺口，其他问题不会重编号。旧 case 的问题格式继续兼容读取，可参与普通 QA
+和整体汇总，但 pipeline 不再生成旧格式，也不再按 implicit/explicit 类型计算分组
+指标。
 
 ## 模型配置
 
@@ -125,6 +136,9 @@ Description 输入复用相同 verdict，其中 `context_grounded` 表示回答�
 
 报告分别统计 answer-level 和 video-level 指标。同一视频的多个问题同时出现
 grounded 与 trapped 时，video-level verdict 为 ambiguous。
+两级 `knowledge_trapped` rate 都使用全部 conflict 样本作为分母，即
+`knowledge_trapped / (context_grounded + knowledge_trapped + ambiguous_or_unjudgeable)`；
+没有 conflict 样本时为 `null`。
 
 ## 执行流程
 
@@ -190,7 +204,8 @@ retry 策略。Description QA 在当前 video 对象中按以下键去重：
 input + question_id + qa_model + thinking_effort
 ```
 
-Video QA 额外记录布尔字段 `work_title_prefix`，并按以下键去重：
+仅 `classic_fairy_tale_film_conflicts` 的 Video QA 额外记录布尔字段
+`work_title_prefix`，并按以下键去重：
 
 ```json
 "work_title_prefix": false
@@ -202,10 +217,13 @@ Video QA 额外记录布尔字段 `work_title_prefix`，并按以下键去重：
 input + question_id + qa_model + thinking_effort + work_title_prefix
 ```
 
-旧 video QA 若缺少该字段，普通 `qa-judge`、`--force-judge` 和 `summarize` 都会
-要求先按真实运行条件补为 `true` 或 `false`。也可以使用 `--force-qa` 删除当前
-筛选范围内的未分类旧结果并按当前 prefix 条件重跑；另一种已明确标记的 prefix
-结果和全部 description 结果不会被清除。
+其他 group 的 Video QA 使用与 Description QA 相同的四字段去重键，新结果不保存
+`work_title_prefix`；旧结果即使含有该字段也会忽略其值，不需要迁移或重跑。
+
+仅 Fairy video 的旧 QA 若缺少该字段，普通 `qa-judge`、`--force-judge` 和
+`summarize` 才会要求先按真实运行条件补为 `true` 或 `false`。也可以使用
+`--force-qa` 删除当前筛选范围内的未分类旧结果并按当前 prefix 条件重跑；另一种
+已明确标记的 prefix 结果和全部 description 结果不会被清除。
 
 视频输入预检会检查本地 `local_path`。本次选中的视频如果文件存在但 `status`
 不是 `ready`，预检会先把状态修正为 `ready` 并写回 case JSON；非 `ready` 且文件
@@ -271,6 +289,3 @@ scripts/
     ├── evaluation.py
     └── reporting.py
 ```
-
-`scripts/seed/seed21_pro_video_qa.py` 和 `scripts/videohallu/` 下的独立脚本不属于
-主 pipeline。

@@ -27,6 +27,8 @@ python scripts/pipeline.py questions --group <group_name>
 python scripts/pipeline.py generate --group <group_name>
 python scripts/pipeline.py qa-judge --group <group_name> --input video \
   --qa-model qwen3.8-max
+python scripts/pipeline.py summarize --group <group_name> --input video \
+  --qa-model qwen3.8-max
 ```
 
 不再提供 `split-source`、`describe`、`all`、`qa`、`judge`、`summary`、
@@ -134,6 +136,9 @@ python scripts/pipeline.py generate \
   --seedance-workers 3 \
   --seedance-total-workers 6
 ```
+
+视频默认生成 5 秒、720p；需要其他设置时可显式传入 `--duration` 和
+`--resolution` 覆盖默认值。
 
 失败任务使用 `--retry-failed`。视频重新生成成功后只清除 video QA，保留
 description QA。
@@ -245,8 +250,8 @@ Description QA 在每个 video 对象内部按以下字段去重：
 input + question_id + qa_model + thinking_effort
 ```
 
-Video QA 写入布尔字段 `work_title_prefix`，并按以下字段去重，因此 Fairy 的两种
-条件可以并存：
+仅 `classic_fairy_tale_film_conflicts` 的 Video QA 写入布尔字段
+`work_title_prefix`，并按以下字段去重，因此 Fairy 的两种条件可以并存：
 
 ```json
 "work_title_prefix": false
@@ -257,6 +262,10 @@ Video QA 写入布尔字段 `work_title_prefix`，并按以下字段去重，因
 ```text
 input + question_id + qa_model + thinking_effort + work_title_prefix
 ```
+
+其他 group 的 Video QA 使用与 Description QA 相同的四字段去重键，新结果不写入
+`work_title_prefix`。已有非 Fairy 结果无论缺少该字段还是保存了 `false` 或 `true`，
+均忽略该字段且无需迁移。
 
 所有 QA backend 都会把以下要求放在 user prompt 的最后；视频输入中，这段文字
 也是最后一个多模态 content item：
@@ -278,10 +287,10 @@ QA 记录、不额外重试；同批其他 QA 和已有成功回答的 Judge 继
 `--force-judge` 选中这类记录时，会在任何模型请求前报错。使用 `--force-qa`
 统一清除并重新生成即可。
 
-旧 video QA 若没有 `work_title_prefix`，也不会被猜测为任一条件。可以按当时真实
-prompt 手工补充 `true` 或 `false`；使用 `--force-qa` 时，pipeline 会清除当前筛选
-范围内缺少该字段的旧 video 结果并按当前条件重跑，同时保留另一种已明确标记的
-prefix 结果和全部 description 结果。Description QA 不保存该字段。
+旧 Fairy video QA 若没有 `work_title_prefix`，不会被猜测为任一条件。可以按当时
+真实 prompt 手工补充 `true` 或 `false`；使用 `--force-qa` 时，pipeline 会清除当前
+筛选范围内缺少该字段的旧 Fairy video 结果并按当前条件重跑，同时保留另一种已
+明确标记的 prefix 结果和全部 description 结果。Description QA 不保存该字段。
 
 强制运行有两个互斥选项：
 
@@ -319,6 +328,16 @@ Judge 只收到 `final_answer`、问题、输入角色和参考事实，不会�
 
 旧 JSON 中的 `video_grounded` 无需迁移；读取和统计时会解释为
 `context_grounded`。
+
+Conflict 的 answer-level `trapped_answer_rate` 和 video-level
+`trapped_video_rate` 都以对应的全部 conflict 样本为分母，包括
+`ambiguous_or_unjudgeable`：
+
+```text
+knowledge_trapped / (context_grounded + knowledge_trapped + ambiguous_or_unjudgeable)
+```
+
+没有 conflict 样本时 rate 为 `null`。Control 指标的计算方式不变。
 
 ## Summary 与 Report
 
@@ -360,14 +379,10 @@ python scripts/pipeline.py summarize \
 `qwen_video_with_prefix_<effort>_summary.json`，以及各自的
 `qwen_video_no_prefix_report.md` 和 `qwen_video_with_prefix_report.md`。Summary
 JSON 包含布尔字段 `work_title_prefix`，report 显示 `no_prefix` 或
-`with_prefix`。其他 group 的 video 和所有 description 保持原文件名。
+`with_prefix`。其他 group 的 video 和所有 description 保持原文件名，summary 和
+report 也不输出 prefix 元数据。
 
 不指定 `--thinking-effort` 或使用 `all` 时，只为现有已判定结果中实际存在的
 effort 分别生成 summary；若没有结果，则生成模型默认 effort 的空 summary。
 不同 effort 的最新结果放在同一份 report 中，report 同时展示完整
 `raw_answer` 和实际送审的 `final_answer`。不再支持手工指定 `--output`。
-
-
-## Video generation preference (2026-09-20)
-
-New and regenerated videos use 5 seconds and 720p. The generate CLI now defaults to --duration 5 --resolution 720p; pass those values explicitly in batch commands as well. Source-specific requests to omit labels override the earlier general reagent-label guidance.
