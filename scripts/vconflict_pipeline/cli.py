@@ -88,7 +88,11 @@ def _add_retries(parser: argparse.ArgumentParser, *, timeout: int = 900) -> None
 
 
 def _add_input(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--input", choices=("video", "description"), default="video")
+    parser.add_argument(
+        "--input",
+        choices=("video", "description", "question_only"),
+        default="video",
+    )
 
 
 def _add_thinking_effort(parser: argparse.ArgumentParser) -> None:
@@ -215,6 +219,12 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _validate(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
+    if (
+        args.command == "qa-judge"
+        and args.input == "question_only"
+        and args.video_id
+    ):
+        parser.error("--video-id cannot be combined with --input question_only")
     if getattr(args, "with_work_title_prefix", False):
         if args.group != FAIRY_TALE_GROUP:
             parser.error(

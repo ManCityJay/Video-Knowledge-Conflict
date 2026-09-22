@@ -101,7 +101,8 @@ python scripts/pipeline.py questions \
 默认仅补齐空的问题列表。共享问题只使用继承该问题的 videos 作为生成上下文；
 独立变体只使用该视频的 prompt 和自己的 `conflict_spec`，不会混入其他变体。
 `questions --force` 会重生成选中 case 中所有实际使用的问题上下文。
-每次更新仅清除使用该问题上下文的视频的 QA 和 judgment；
+每次更新会清除使用该问题上下文的视频 QA/judgment，并同步清除被替换顶层问题的
+question-only 历史；
 同一 case 的全部生成和校验成功后才一次性保存。
 新问题 ID 直接使用 `q001`、`q002`、`q003`，不再保存
 `question_pair_id` 或 `question_type`。使用删除功能后问题 ID 可以不连续；其他问题
@@ -187,7 +188,8 @@ python scripts/pipeline.py delete \
 的多个 `--case-id`。所有 case JSON 都会先完成存在性、schema 和路径预检；任一
 case 预检失败时不会删除其中任何一个。预检成功后，它会删除每个 case JSON，并
 递归删除 JSON 中各视频 `local_path` 所在的目录，包括目录内未记录的文件；缺失的
-视频目录不影响 JSON 删除。Source Markdown、远端 Seedance task 和 `results/`
+视频目录不影响 JSON 删除。删除问题也会删除其 `question_only_results` 并计入清理
+数量。Source Markdown、远端 Seedance task 和 `results/`
 不会被删除。任何删除都会使已有 summary/report 过期。
 
 ## QA 与 Judge
@@ -220,8 +222,8 @@ python scripts/pipeline.py qa-judge \
 This is a video clip from the work <title>. <question>
 ```
 
-`<title>` 取 case `title` 第一个冒号前的作品名。其他 group 或 description 使用
-`--with-work-title-prefix` 会在任何模型请求前报错。
+`<title>` 取 case `title` 第一个冒号前的作品名。其他 group、description 或
+question-only 使用 `--with-work-title-prefix` 会在任何模型请求前报错。
 
 纯文字实验：
 
@@ -233,7 +235,28 @@ python scripts/pipeline.py qa-judge \
   --thinking-effort all
 ```
 
-`--input` 只接受 `video` 或 `description`，默认 `video`。不再支持
+不带视频或 description 的 question-only control：
+
+```bash
+python scripts/pipeline.py qa-judge \
+  --group classic_fairy_tale_film_conflicts \
+  --input question_only \
+  --qa-model qwen3.8-max \
+  --thinking-effort all
+```
+
+该模式只把 case 顶层原始 question 和 `Final answer:` 格式要求发给模型。结果存入
+question 的可选 `question_only_results` 数组，按
+`input + question_id + qa_model + thinking_effort` 去重，且不写
+`context_text_en` 或 `work_title_prefix`。Gemini、Kimi 使用纯文本 payload；Qwen
+发送不含 video URI 的文本请求。运行不读取视频文件，也不检查视频 status、
+description 或 human review。
+
+首版不支持 `variant_context.questions`：选中 case 只要含私有 question scope，
+就会在 provider 请求和 force 清理前失败。`--video-id` 与
+`--with-work-title-prefix` 均不能用于 question-only。Math group 暂不纳入这一模式。
+
+`--input` 接受 `video`、`description` 或 `question_only`，默认 `video`。不再支持
 `--input-mode`。
 
 模型与 effort：
@@ -302,6 +325,8 @@ python scripts/pipeline.py qa-judge ... --force-judge
 - `--force-qa` 删除筛选范围内全部 QA 记录及其中的 judgment，再重新执行。
 - `--force-judge` 保留 QA 回答，只清空全部匹配 judgment，再重新判定。
 
+Question-only 的 force 只作用于匹配的 `question_only_results`；不会清理视频 QA。
+
 Force 会先加载和验证全部选中 case、依赖、凭据、视频或 description，然后统一
 计算并写回所有清理。只有全部 case 清理完成后才会发出第一个模型请求。不会执行
 一个 case 后再清理下一个 case。若清理失败，本次运行不发出任何新请求。
@@ -325,6 +350,10 @@ Judge 只收到 `final_answer`、问题、输入角色和参考事实，不会�
 `ambiguous_or_unjudgeable`，不再通过“main answer”推断结论。新 judgment 只保存
 `verdict`、`confidence`、时间、Judge 模型和请求 ID，不再生成
 `extracted_answer` 或 `evidence`。
+
+Question-only 固定以 control 角色判定：normal reference 为 `context_grounded`；
+conflict reference、混合或其他无法确认的回答为 `ambiguous_or_unjudgeable`，不会
+产生 `knowledge_trapped`。
 
 旧 JSON 中的 `video_grounded` 无需迁移；读取和统计时会解释为
 `context_grounded`。
@@ -386,3 +415,16 @@ report 也不输出 prefix 元数据。
 effort 分别生成 summary；若没有结果，则生成模型默认 effort 的空 summary。
 不同 effort 的最新结果放在同一份 report 中，report 同时展示完整
 `raw_answer` 和实际送审的 `final_answer`。不再支持手工指定 `--output`。
+
+Question-only 汇总生成：
+
+```text
+results/<group>/<model>_question_only_<effort>_summary.json
+results/<group>/<model>_question_only_report.md
+```
+
+JSON 只包含 `answers.control` 和各 case 的 `control.answers`/`labels`，不包含
+`videos`。`grounded_answer_rate` 的分母是全部 question-only 回答，包括
+`ambiguous_or_unjudgeable`。同一 question/model/effort 有重复历史时按
+`(timestamp, run_id)` 选择最新记录。Markdown 按 case/question 展示 raw answer、
+final answer、verdict 与 confidence，不显示 video ID、文件链接或 context。

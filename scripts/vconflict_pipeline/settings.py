@@ -44,5 +44,5 @@ REVIEW_STATUSES = {"pending", "verified", "rejected"}
 VERDICTS = {"context_grounded", "knowledge_trapped", "ambiguous_or_unjudgeable"}
 LEGACY_VERDICTS = {"video_grounded"}
 ACCEPTED_VERDICTS = VERDICTS | LEGACY_VERDICTS
-INPUT_MODES = ("video", "description")
+INPUT_MODES = ("video", "description", "question_only")
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".m4v", ".webm"}

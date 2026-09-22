@@ -1,4 +1,4 @@
-"""Video QA backends and bounded parallel execution."""
+"""QA backends and bounded parallel execution."""
 
 from __future__ import annotations
 
@@ -20,11 +20,12 @@ from .core import (
     grouped_dir,
     iter_case_paths,
     load_case,
-    video_case_context,
     qa_result_input_mode,
+    require_question_only_compatible,
     resolve_video_path,
     sha256_text,
     utc_now,
+    video_case_context,
 )
 from .settings import (
     FAIRY_TALE_GROUP,
@@ -581,22 +582,31 @@ def run_qa_batch(
             if qa_model == QWEN_QA_MODEL
             else backend.encode_video(video_path)
         )
-    else:
+    elif input_mode == "description":
         if context_text is None:
             raise PipelineError("Description input requires context text.")
         video_input = None
+    elif input_mode == "question_only":
+        if work_title_prefix is not None:
+            raise PipelineError(
+                "Question-only input does not support a work-title prefix."
+            )
+        video_input = None
+    else:
+        raise PipelineError(f"Unsupported QA input mode: {input_mode}")
     results: list[dict[str, Any]] = []
     failures: list[tuple[str, str | None, str]] = []
     for question, thinking_effort in question_runs:
-        prompt_text = (
-            _video_question_prompt(
+        if input_mode == "video":
+            prompt_text = _video_question_prompt(
                 question["text_en"],
                 work_title=work_title,
                 work_title_prefix=work_title_prefix is True,
             )
-            if input_mode == "video"
-            else _description_prompt(context_text, question["text_en"])
-        )
+        elif input_mode == "description":
+            prompt_text = _description_prompt(context_text, question["text_en"])
+        else:
+            prompt_text = _question_prompt(question["text_en"])
         try:
             if qa_model == QWEN_QA_MODEL:
                 response = send_with_retry(
@@ -611,9 +621,9 @@ def run_qa_batch(
                     max_retries=max_retries,
                 )
             else:
-                if input_mode == "description" and qa_model == GEMINI_QA_MODEL:
+                if input_mode != "video" and qa_model == GEMINI_QA_MODEL:
                     payload = _gemini_description_payload(prompt_text, thinking_effort)
-                elif input_mode == "description" and qa_model == KIMI_QA_MODEL:
+                elif input_mode != "video" and qa_model == KIMI_QA_MODEL:
                     payload = _kimi_description_payload(prompt_text, thinking_effort)
                 elif backend.build_payload is None or video_input is None:
                     raise PipelineError(
@@ -692,6 +702,105 @@ def command_qa(args: Any) -> int:
 
     def run_case(case_path: Path) -> tuple[int, int]:
         case = load_case(case_path)
+        if args.input == "question_only":
+            questions = require_question_only_compatible(case)
+            selected = [
+                question
+                for question in questions
+                if not selected_questions
+                or question["question_id"] in selected_questions
+            ]
+            missing_questions = selected_questions - {
+                question["question_id"] for question in selected
+            }
+            if missing_questions:
+                raise PipelineError(
+                    f"Question IDs not found in {case['case_id']}: "
+                    f"{', '.join(sorted(missing_questions))}"
+                )
+            jobs: list[tuple[dict[str, Any], list[tuple[dict[str, Any], str | None]]]] = []
+            for question in selected:
+                existing = {
+                    qa_result_key(result)
+                    for result in question.get("question_only_results", [])
+                }
+                pending = [
+                    (question, effort)
+                    for effort in efforts
+                    if qa_run_key(
+                        "question_only",
+                        question["question_id"],
+                        args.qa_model,
+                        effort,
+                    )
+                    not in existing
+                ]
+                if pending:
+                    jobs.append((question, pending))
+
+            if not jobs:
+                return 0, 0
+
+            def run_question(
+                pending: list[tuple[dict[str, Any], str | None]],
+            ) -> tuple[list[dict[str, Any]], list[tuple[str, str | None, str]]]:
+                return run_qa_batch(
+                    input_mode="question_only",
+                    video_path=None,
+                    context_text=None,
+                    work_title=None,
+                    work_title_prefix=None,
+                    question_runs=pending,
+                    qa_model=args.qa_model,
+                    api_key=api_key,
+                    timeout=args.timeout,
+                    max_retries=args.max_retries,
+                    request_limiter=request_limiter,
+                )
+
+            case_completed = 0
+            case_failures = 0
+            write_lock = threading.Lock()
+            with ThreadPoolExecutor(
+                max_workers=min(args.qa_workers, len(jobs))
+            ) as executor:
+                futures = {
+                    executor.submit(run_question, pending): question
+                    for question, pending in jobs
+                }
+                for future in as_completed(futures):
+                    question = futures[future]
+                    try:
+                        results, run_failures = future.result()
+                    except PipelineError as exc:
+                        case_failures += 1
+                        print(
+                            f"Error in QA {case['case_id']}/"
+                            f"{question['question_id']}: {exc}",
+                            file=sys.stderr,
+                        )
+                        continue
+                    for question_id, effort, error in run_failures:
+                        effort_name = "none" if effort is None else effort
+                        print(
+                            f"Error in QA {case['case_id']}/{question_id}/"
+                            f"{effort_name}: {error}",
+                            file=sys.stderr,
+                        )
+                    case_failures += len(run_failures)
+                    if results:
+                        with write_lock:
+                            question.setdefault("question_only_results", []).extend(
+                                results
+                            )
+                            atomic_write_json(case_path, case)
+                    case_completed += len(results)
+                    print(
+                        f"QA question_only {case['case_id']}/"
+                        f"{question['question_id']}: wrote {len(results)} result(s)"
+                    )
+            return case_completed, case_failures
+
         jobs: list[dict[str, Any]] = []
         if args.input == "description" and selected_videos:
             conflict_ids = {

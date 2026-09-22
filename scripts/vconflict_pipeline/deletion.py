@@ -92,6 +92,12 @@ def _remove_selected(
         if video["video_id"] in video_ids
         or result["question_id"] in question_ids
     ]
+    removed_results.extend(
+        result
+        for question in case["questions"]
+        if question["question_id"] in question_ids
+        for result in question.get("question_only_results", [])
+    )
     removed_judgments = sum(
         isinstance(result.get("judgment"), dict) for result in removed_results
     )

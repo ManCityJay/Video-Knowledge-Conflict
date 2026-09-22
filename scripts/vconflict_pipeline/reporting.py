@@ -15,9 +15,10 @@ from .core import (
     grouped_dir,
     iter_case_paths,
     load_case,
-    video_case_context,
     qa_result_input_mode,
+    require_question_only_compatible,
     utc_now,
+    video_case_context,
 )
 from .qa import (
     expand_thinking_efforts,
@@ -143,6 +144,70 @@ def build_summary(
     effort: str | None,
     work_title_prefix: bool | None,
 ) -> dict[str, Any]:
+    if input_mode == "question_only":
+        latest_questions: dict[tuple[str, str], dict[str, Any]] = {}
+        for case_path in case_paths:
+            case = load_case(case_path)
+            for question in require_question_only_compatible(case):
+                for result in question.get("question_only_results", []):
+                    if (
+                        result.get("question_id") != question["question_id"]
+                        or not _result_matches(
+                            result,
+                            qa_model=qa_model,
+                            input_mode="question_only",
+                            efforts={effort},
+                            work_title_prefix=None,
+                        )
+                        or not isinstance(result.get("judgment"), dict)
+                    ):
+                        continue
+                    key = (case["case_id"], question["question_id"])
+                    previous = latest_questions.get(key)
+                    if not _newer(result, previous):
+                        continue
+                    judgment = dict(result["judgment"])
+                    judgment["verdict"] = canonical_verdict(
+                        judgment["verdict"]
+                    )
+                    latest_questions[key] = {**result, "judgment": judgment}
+
+        answer_counts: Counter[str] = Counter()
+        case_counts: dict[str, Counter[str]] = defaultdict(Counter)
+        for (case_id, _), result in latest_questions.items():
+            verdict = result["judgment"]["verdict"]
+            answer_counts[verdict] += 1
+            case_counts[case_id][verdict] += 1
+        total = sum(answer_counts.values())
+        return {
+            "generated_at": utc_now(),
+            "qa_model": qa_model,
+            "input": "question_only",
+            "thinking_effort": _effort_name(effort),
+            "answers": {
+                "control": {
+                    "total": total,
+                    "labels": {
+                        label: answer_counts[label] for label in sorted(VERDICTS)
+                    },
+                    "grounded_answer_rate": _safe_rate(
+                        answer_counts["context_grounded"], total
+                    ),
+                }
+            },
+            "cases": {
+                case_id: {
+                    "control": {
+                        "answers": sum(counts.values()),
+                        "labels": {
+                            label: counts[label] for label in sorted(VERDICTS)
+                        },
+                    }
+                }
+                for case_id, counts in sorted(case_counts.items())
+            },
+        }
+
     latest: dict[tuple[str, str, str], tuple[str, dict[str, Any]]] = {}
     for case_path in case_paths:
         case = load_case(case_path)
@@ -252,7 +317,11 @@ def build_markdown(
         _effort_name(item) for item in sorted(efforts, key=str)
     )
     lines = [
-        f"# {input_mode.title()} Knowledge Conflict Results",
+        (
+            "# Question Only Control Results"
+            if input_mode == "question_only"
+            else f"# {input_mode.title()} Knowledge Conflict Results"
+        ),
         "",
         f"**QA model:** {_markdown_value(qa_model)}",
         "",
@@ -266,6 +335,60 @@ def build_markdown(
         case = load_case(path)
         title = _markdown_value(case["title"]).replace("#", r"\#")
         lines.extend([f"## {title}", ""])
+        if input_mode == "question_only":
+            for question in require_question_only_compatible(case):
+                matching = _latest_results(
+                    result
+                    for result in question.get("question_only_results", [])
+                    if result.get("question_id") == question["question_id"]
+                    and _result_matches(
+                        result,
+                        qa_model=qa_model,
+                        input_mode="question_only",
+                        efforts=efforts,
+                        work_title_prefix=None,
+                    )
+                )
+                if not matching:
+                    continue
+                lines.extend(
+                    [
+                        f"### Question `{question['question_id']}`",
+                        "",
+                        f"**Question:** {_markdown_value(question['text_en'])}",
+                        "",
+                    ]
+                )
+                for result_index, result in enumerate(matching, start=1):
+                    judgment = result.get("judgment")
+                    judgment = judgment if isinstance(judgment, dict) else {}
+                    verdict = canonical_verdict(judgment.get("verdict", ""))
+                    lines.extend(
+                        [
+                            f"#### QA result {result_index}",
+                            "",
+                            f"- **QA model:** {_markdown_value(result.get('model'))}",
+                            "- **Thinking effort:** "
+                            f"{_effort_name(qa_result_thinking_effort(result))}",
+                        ]
+                    )
+                    if result.get("effective_reasoning_effort") is not None:
+                        lines.append(
+                            "- **Effective reasoning effort:** "
+                            f"{_markdown_value(result['effective_reasoning_effort'])}"
+                        )
+                    lines.extend(
+                        [
+                            f"- **Raw answer:** {_markdown_value(result.get('raw_answer'))}",
+                            "- **Final answer (judged):** "
+                            f"{_markdown_value(result.get('final_answer'))}",
+                            f"- **Verdict:** {_markdown_value(verdict)}",
+                            "- **Confidence:** "
+                            f"{_markdown_value(judgment.get('confidence'))}",
+                            "",
+                        ]
+                    )
+            continue
         question_groups = []
         for video in case["videos"]:
             for question in video_case_context(case, video)["questions"]:
@@ -357,6 +480,24 @@ def _discover_efforts(
     observed: set[str | None] = set()
     for path in case_paths:
         case = load_case(path)
+        if input_mode == "question_only":
+            for question in require_question_only_compatible(case):
+                for result in question.get("question_only_results", []):
+                    effort = qa_result_thinking_effort(result)
+                    if (
+                        result.get("question_id") == question["question_id"]
+                        and _result_matches(
+                            result,
+                            qa_model=qa_model,
+                            input_mode="question_only",
+                            efforts=set(backend.thinking_efforts),
+                            work_title_prefix=None,
+                        )
+                        and isinstance(result.get("judgment"), dict)
+                        and effort in backend.thinking_efforts
+                    ):
+                        observed.add(effort)
+            continue
         for video in case["videos"]:
             for result in video["qa_results"]:
                 effort = qa_result_thinking_effort(result)
@@ -409,6 +550,9 @@ def _fairy_video_prefix_name(args: argparse.Namespace) -> str | None:
 def command_summarize(args: argparse.Namespace) -> int:
     dataset_dir = grouped_dir(args.dataset_dir, args.group)
     paths = iter_case_paths(dataset_dir, args.case_id)
+    if args.input == "question_only":
+        for path in paths:
+            require_question_only_compatible(load_case(path))
     work_title_prefix = work_title_prefix_condition(
         args.group,
         args.input,

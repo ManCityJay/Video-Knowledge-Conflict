@@ -915,6 +915,10 @@ def command_questions(args: argparse.Namespace) -> int:
                 request_limiter=request_limiter,
             )
             questions = authored_questions_to_questions(verified_questions)
+            cleared += sum(
+                len(question.get("question_only_results", []))
+                for question in owner["questions"]
+            )
             owner["questions"] = questions
             for video in affected_videos:
                 cleared += len(video["qa_results"])

@@ -18,6 +18,7 @@ from .core import (
     load_case,
     video_case_context,
     qa_result_input_mode,
+    require_question_only_compatible,
     require_nonempty_string,
     resolve_video_path,
     sha256_text,
@@ -203,6 +204,22 @@ def _legacy_video_result_selected(
     )
 
 
+def _question_result_selected(
+    question: dict[str, Any],
+    result: dict[str, Any],
+    *,
+    args: argparse.Namespace,
+    efforts: set[str | None],
+) -> bool:
+    return not (
+        (args.question_id and question["question_id"] not in set(args.question_id))
+        or result.get("question_id") != question["question_id"]
+        or result.get("model") != args.qa_model
+        or qa_result_input_mode(result) != "question_only"
+        or qa_result_thinking_effort(result) not in efforts
+    )
+
+
 def _preflight_cases(
     args: argparse.Namespace,
     efforts: tuple[str | None, ...],
@@ -215,6 +232,14 @@ def _preflight_cases(
     target_total = 0
     for path in iter_case_paths(dataset_dir, args.case_id):
         case = load_case(path)
+        if args.input == "question_only":
+            questions = _selected_questions(
+                {**case, "questions": require_question_only_compatible(case)},
+                selected_questions,
+            )
+            target_total += len(questions) * len(efforts)
+            loaded.append((path, case))
+            continue
         promoted = (
             _promote_existing_local_videos(
                 case,
@@ -254,6 +279,23 @@ def _require_selected_final_answers(
     efforts: set[str | None],
 ) -> None:
     for path, case in loaded:
+        if args.input == "question_only":
+            for question in require_question_only_compatible(case):
+                for result in question.get("question_only_results", []):
+                    if not _question_result_selected(
+                        question, result, args=args, efforts=efforts
+                    ):
+                        continue
+                    final_answer = result.get("final_answer")
+                    if isinstance(final_answer, str) and final_answer.strip():
+                        continue
+                    raise PipelineError(
+                        f"Selected QA result {case['case_id']}/"
+                        f"{question['question_id']} in {path} has no final_answer. "
+                        "Run qa-judge with --force-qa to replace old-format QA "
+                        "results."
+                    )
+            continue
         for video in case["videos"]:
             for result in video["qa_results"]:
                 if not _result_selected(
@@ -309,6 +351,35 @@ def _preclear_force(
 
     for path, case in loaded:
         case_changed = False
+        if args.input == "question_only":
+            for question in require_question_only_compatible(case):
+                results = question.get("question_only_results", [])
+                if args.force_qa:
+                    kept = []
+                    for result in results:
+                        if _question_result_selected(
+                            question, result, args=args, efforts=efforts
+                        ):
+                            qa_cleared += 1
+                            case_changed = True
+                        else:
+                            kept.append(result)
+                    if kept:
+                        question["question_only_results"] = kept
+                    else:
+                        question.pop("question_only_results", None)
+                elif args.force_judge:
+                    for result in results:
+                        if not _question_result_selected(
+                            question, result, args=args, efforts=efforts
+                        ) or result.get("judgment") is None:
+                            continue
+                        result["judgment"] = None
+                        judgments_cleared += 1
+                        case_changed = True
+            if case_changed:
+                changed.append((path, case))
+            continue
         for video in case["videos"]:
             if args.force_qa:
                 kept: list[dict[str, Any]] = []
@@ -371,6 +442,77 @@ def command_judge(args: argparse.Namespace) -> int:
         case = load_case(case_path)
         case_completed = 0
         case_failures = 0
+        if args.input == "question_only":
+            for question in require_question_only_compatible(case):
+                for qa_result in question.get("question_only_results", []):
+                    if not _question_result_selected(
+                        question, qa_result, args=args, efforts=efforts
+                    ) or qa_result.get("judgment") is not None:
+                        continue
+                    try:
+                        final_answer = require_nonempty_string(
+                            qa_result.get("final_answer"), "final_answer"
+                        )
+                        judge_input = {
+                            "video_role": "control",
+                            "question": question["text_en"],
+                            "final_answer": final_answer,
+                            "normal_fact": case["conflict_spec"]["normal_fact_en"],
+                            "intended_video_fact": case["conflict_spec"][
+                                "intended_video_fact_en"
+                            ],
+                            "conflict_video_reference": question[
+                                "conflict_video_reference_en"
+                            ],
+                            "normal_control_reference": question[
+                                "normal_control_reference_en"
+                            ],
+                        }
+                        result, response = openrouter_json(
+                            messages=[
+                                {"role": "system", "content": JUDGE_SYSTEM_PROMPT},
+                                {
+                                    "role": "user",
+                                    "content": json.dumps(
+                                        judge_input, ensure_ascii=False
+                                    ),
+                                },
+                            ],
+                            model=AUTHOR_JUDGE_MODEL,
+                            schema_name="knowledge_conflict_judgment",
+                            schema=JUDGMENT_SCHEMA,
+                            api_key=api_key,
+                            timeout=args.timeout,
+                            max_retries=args.max_retries,
+                            request_limiter=request_limiter,
+                        )
+                        if result.get("verdict") == "knowledge_trapped":
+                            raise PipelineError(
+                                "Luna Pro returned knowledge_trapped for a "
+                                "question-only control input."
+                            )
+                        qa_result["judgment"] = {
+                            "timestamp": utc_now(),
+                            "verdict": result["verdict"],
+                            "confidence": float(result["confidence"]),
+                            "judge_model": AUTHOR_JUDGE_MODEL,
+                            "judge_request_id": response.get("id"),
+                        }
+                        atomic_write_json(case_path, case)
+                        case_completed += 1
+                        print(
+                            f"Judged {case['case_id']}/"
+                            f"{question['question_id']}: {result['verdict']}"
+                        )
+                    except PipelineError as exc:
+                        case_failures += 1
+                        print(
+                            f"Error judging {case['case_id']}/"
+                            f"{question['question_id']}: {exc}",
+                            file=sys.stderr,
+                        )
+            return case_completed, case_failures
+
         for video in case["videos"]:
             for qa_result in video["qa_results"]:
                 if not _result_selected(
@@ -472,6 +614,16 @@ def _completion_counts(
     judge_completed = 0
 
     for _, case in loaded:
+        if args.input == "question_only":
+            for question in require_question_only_compatible(case):
+                for result in question.get("question_only_results", []):
+                    if not _question_result_selected(
+                        question, result, args=args, efforts=effort_set
+                    ):
+                        continue
+                    judge_total += 1
+                    judge_completed += isinstance(result.get("judgment"), dict)
+            continue
         for video in case["videos"]:
             for result in video["qa_results"]:
                 if not _result_selected(
@@ -498,6 +650,27 @@ def _qa_completed_from_loaded(
     )
     completed = 0
     for _, case in loaded:
+        if args.input == "question_only":
+            questions = _selected_questions(
+                {**case, "questions": require_question_only_compatible(case)},
+                selected_questions,
+            )
+            for question in questions:
+                existing = {
+                    qa_result_key(result)
+                    for result in question.get("question_only_results", [])
+                }
+                completed += sum(
+                    qa_run_key(
+                        "question_only",
+                        question["question_id"],
+                        args.qa_model,
+                        effort,
+                    )
+                    in existing
+                    for effort in efforts
+                )
+            continue
         videos = _eligible_videos(
             case,
             input_mode=args.input,

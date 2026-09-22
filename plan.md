@@ -7,7 +7,8 @@
 control 视频，并为每个独立语义目标生成一个中性问题。
 
 Luna Pro 负责 case authoring、问题生成、文字 context 生成和答案判定；
-Seedance 负责生成视频；Gemini、Qwen 或 Kimi 负责视频或文字 context QA。
+Seedance 负责生成视频；Gemini、Qwen 或 Kimi 负责视频、文字 context 或
+question-only QA。
 
 ## 数据结构
 
@@ -28,7 +29,8 @@ Seedance 负责生成视频；Gemini、Qwen 或 Kimi 负责视频或文字 conte
       "question_id": "q001",
       "text_en": "In Alice in Wonderland, what happens to Alice after she eats the cake?",
       "conflict_video_reference_en": "She shrinks.",
-      "normal_control_reference_en": "She grows."
+      "normal_control_reference_en": "She grows.",
+      "question_only_results": []
     }
   ],
   "videos": [
@@ -69,6 +71,8 @@ case JSON 是运行状态的唯一持久化单元。视频状态、任务 ID、d
 完整回答 `raw_answer`、明确末行 `final_answer`、usage 与 judgment 均直接写回，
 写入使用临时文件替换。
 `description` 是仅用于 conflict 视频的可选扩展。
+`question_only_results` 是 case 顶层 question 的可选扩展；结果不依附任何视频，
+不包含 `context_text_en` 或 `work_title_prefix`。现有 case 无需迁移。
 
 新 QA 记录不再包含 `context_sha256` 或 `video_sha256`。旧记录中的这些字段
 继续兼容读取，但不参与去重或统计。
@@ -134,6 +138,11 @@ Description 输入复用相同 verdict，其中 `context_grounded` 表示回答�
 文字 context。旧 JSON 的 `video_grounded` 在加载和汇总时映射为
 `context_grounded`，原文件不迁移。
 
+Question-only 输入只发送原始 question 和相同的 `Final answer:` 格式要求，不发送
+视频、description 或作品名前缀。它按 control 角色判定：匹配 normal reference 为
+`context_grounded`；匹配 conflict reference、混合或无法确认的回答均为
+`ambiguous_or_unjudgeable`，不产生 `knowledge_trapped`。
+
 报告分别统计 answer-level 和 video-level 指标。同一视频的多个问题同时出现
 grounded 与 trapped 时，video-level verdict 为 ambiguous。
 两级 `knowledge_trapped` rate 都使用全部 conflict 样本作为分母，即
@@ -188,6 +197,19 @@ python scripts/pipeline.py summarize --group <group> \
   --input description --qa-model qwen3.8-max --thinking-effort all
 ```
 
+Question-only control 实验不依赖视频文件、状态、description 或人工审核：
+
+```bash
+python scripts/pipeline.py qa-judge --group <group> \
+  --input question_only --qa-model qwen3.8-max --thinking-effort all
+python scripts/pipeline.py summarize --group <group> \
+  --input question_only --qa-model qwen3.8-max --thinking-effort all
+```
+
+首版只支持 `case.questions`，不支持含 `variant_context` 私有问题 scope 的 case；
+选中这类 case 会在任何模型请求和 force 清理前报错。`question_only` 禁止与
+`--video-id` 或 `--with-work-title-prefix` 组合，Math group 暂不纳入该实验。
+
 数据清理使用 `delete`。删除视频或问题时一次命令只操作一个 case，可同时指定
 多个 `--video-id` 和 `--question-id`；`--all` 可同时删除同一 group 下多个完整
 case 的 JSON 和视频目录。单独删除视频仅允许 conflict，并且必须至少保留一个
@@ -220,6 +242,16 @@ input + question_id + qa_model + thinking_effort + work_title_prefix
 其他 group 的 Video QA 使用与 Description QA 相同的四字段去重键，新结果不保存
 `work_title_prefix`；旧结果即使含有该字段也会忽略其值，不需要迁移或重跑。
 
+Question-only 结果保存在所属顶层 question 的 `question_only_results`，同样使用
+四字段键去重：
+
+```text
+input + question_id + qa_model + thinking_effort
+```
+
+`questions --force` 替换问题和 `delete --question-id` 删除问题时，会同步清除对应
+question-only QA/Judge 历史；删除或重新生成视频不影响 question-only 结果。
+
 仅 Fairy video 的旧 QA 若缺少该字段，普通 `qa-judge`、`--force-judge` 和
 `summarize` 才会要求先按真实运行条件补为 `true` 或 `false`。也可以使用
 `--force-qa` 删除当前筛选范围内的未分类旧结果并按当前 prefix 条件重跑；另一种
@@ -251,6 +283,18 @@ Description 去重键保持不变；除上述 video prefix 条件外，不为最
 ```text
 results/<group>/<qwen|kimi|gemini>_<video|description>_<none|default>_summary.json
 ```
+
+Question-only 产物为：
+
+```text
+results/<group>/<model>_question_only_<effort>_summary.json
+results/<group>/<model>_question_only_report.md
+```
+
+Question-only summary 只包含 answer-level control 指标，不包含 `videos`；其
+`grounded_answer_rate` 以全部回答为分母，包括 ambiguous。重复历史记录按
+`(timestamp, run_id)` 选择最新一条。Report 按 case/question 展示 raw answer、
+final answer、verdict 和 confidence，不显示视频 ID、本地文件或 context。
 
 Fairy video 使用显式条件名，分别生成：
 

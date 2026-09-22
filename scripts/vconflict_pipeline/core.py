@@ -361,6 +361,8 @@ def validate_question(
 
 def validate_questions(
     questions_raw: Any,
+    *,
+    allow_question_only_results: bool = False,
 ) -> dict[str, dict[str, Any]]:
     if not isinstance(questions_raw, list):
         raise PipelineError("questions must be an array.")
@@ -383,6 +385,29 @@ def validate_questions(
         if normalized in normalized_questions:
             raise PipelineError("Duplicate questions are not allowed.")
         normalized_questions.add(normalized)
+
+    for index, question in enumerate(questions_raw):
+        results = question.get("question_only_results")
+        if results is None:
+            continue
+        prefix = f"questions[{index}].question_only_results"
+        if not allow_question_only_results:
+            raise PipelineError(
+                f"{prefix} is only valid for case-level questions."
+            )
+        if not isinstance(results, list):
+            raise PipelineError(f"{prefix} must be an array.")
+        for result_index, result in enumerate(results):
+            result_prefix = f"{prefix}[{result_index}]"
+            validate_qa_result(result, result_prefix, questions)
+            if qa_result_input_mode(result) != "question_only":
+                raise PipelineError(
+                    f"{result_prefix}.input_mode must be question_only."
+                )
+            if result.get("question_id") != question["question_id"]:
+                raise PipelineError(
+                    f"{result_prefix}.question_id must match its owning question."
+                )
 
     if not questions_raw:
         return questions
@@ -575,7 +600,7 @@ def validate_qa_result(result: Any, prefix: str, questions: dict[str, dict[str, 
     input_mode = qa_result_input_mode(result)
     if input_mode not in INPUT_MODES:
         raise PipelineError(f"{prefix}.input_mode is invalid.")
-    if input_mode == "description" and "work_title_prefix" in result:
+    if input_mode != "video" and "work_title_prefix" in result:
         raise PipelineError(
             f"{prefix}.work_title_prefix is only valid for video input."
         )
@@ -608,6 +633,10 @@ def validate_qa_result(result: Any, prefix: str, questions: dict[str, dict[str, 
             raise PipelineError(
                 f"{prefix}.context_sha256 does not match context_text_en."
             )
+    elif input_mode == "question_only" and "context_text_en" in result:
+        raise PipelineError(
+            f"{prefix}.context_text_en is not valid for question_only input."
+        )
     require_nonempty_string(result.get("model"), f"{prefix}.model")
     thinking_effort = result.get("thinking_effort")
     if thinking_effort is not None:
@@ -641,6 +670,28 @@ def video_case_context(case: dict[str, Any], video: dict[str, Any]) -> dict[str,
     return {**case, "questions": context["questions"], "conflict_spec": context["conflict_spec"]}
 
 
+def require_question_only_compatible(
+    case: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Return shared questions after rejecting private video question scopes."""
+    private_videos = [
+        video["video_id"]
+        for video in case["videos"]
+        if video.get("variant_context") is not None
+    ]
+    if private_videos:
+        raise PipelineError(
+            f"Case {case['case_id']} has private variant_context questions "
+            f"({', '.join(private_videos)}); question_only currently supports "
+            "case-level questions only."
+        )
+    if not case["questions"]:
+        raise PipelineError(
+            f"Case {case['case_id']} has no questions. Run questions first."
+        )
+    return case["questions"]
+
+
 def validate_case(case: Any) -> None:
     if not isinstance(case, dict):
         raise PipelineError("Case must be an object.")
@@ -669,7 +720,10 @@ def validate_case(case: Any) -> None:
     if normalize_text(normal) == normalize_text(intended):
         raise PipelineError("Normal and intended video facts must be different.")
 
-    questions = validate_questions(case.get("questions"))
+    questions = validate_questions(
+        case.get("questions"),
+        allow_question_only_results=True,
+    )
 
     videos = case.get("videos")
     if not isinstance(videos, list) or not 2 <= len(videos) <= TOTAL_VIDEO_LIMIT:
@@ -816,6 +870,11 @@ def validate_case(case: Any) -> None:
                 f"{prefix}.qa_results[{result_index}]",
                 video_questions,
             )
+            if qa_result_input_mode(result) == "question_only":
+                raise PipelineError(
+                    f"{prefix}.qa_results[{result_index}] must be stored under "
+                    "its case-level question."
+                )
             if (
                 video["role"] == "control"
                 and qa_result_input_mode(result) == "description"
