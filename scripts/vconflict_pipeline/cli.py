@@ -130,6 +130,10 @@ def build_parser() -> argparse.ArgumentParser:
     questions.add_argument("--max-repairs", type=int, default=2)
     _add_retries(questions)
     questions.add_argument("--force", action="store_true")
+    questions.add_argument(
+        "--repair-variant-context", action="store_true",
+        help="Repair math variant questions in place, retaining IDs and shared questions.",
+    )
     questions.set_defaults(func=command_questions)
 
     description = _stage(subparsers, "description")
@@ -225,6 +229,11 @@ def _validate(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None
         and args.video_id
     ):
         parser.error("--video-id cannot be combined with --input question_only")
+    if getattr(args, "repair_variant_context", False):
+        if args.group != "mathematics_algorithm_conflicts":
+            parser.error("--repair-variant-context requires --group mathematics_algorithm_conflicts")
+        if args.force:
+            parser.error("--repair-variant-context cannot be combined with --force")
     if getattr(args, "with_work_title_prefix", False):
         if args.group != FAIRY_TALE_GROUP:
             parser.error(
