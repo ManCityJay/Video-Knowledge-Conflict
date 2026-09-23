@@ -56,3 +56,24 @@ Create exactly 5 seconds of 1280x720, 16:9 flat 2D animation, using the supplied
 2.85-3.05: hold the empty cache slot visibly EMPTY for 0.20 seconds; the evicted card is wholly inside the lower tray. GREEN has not started moving.
 3.05-3.65: GREEN alone moves in one straight line from (580,170) into the empty cache slot at (460,370). Do not duplicate or fade in GREEN in its destination. Its original overhead location becomes empty as the same physical card leaves it. The other cards remain stationary.
 3.65-5.00: hold all three cards motionless. RED remains visible at (460,575) in the lower EVICTED tray; GREEN occupies the left cache slot at (460,370); BLUE occupies the right cache slot at (700,370). Exactly two cards are inside the cache and one is in the separate tray; none overlap. At t=4.00 add only the word DONE centered at (1120,80), and hold the entire completed frame without motion through t=5.00. DONE is absent before t=4.00. No further action, correction, subtitles, extra titles, explanations, hands or mouse cursors.
+
+
+<!-- math-expansion-20260923-start -->
+#### 2026-09-23 新增 conflict 变体：数字与序列长度拓展
+
+**批次范围**：math_expansion_20260923。本批次共 25 个新 conflict，分属 13 个现有 case；基线为 78 个 qualified conflict，全部新增视频审核合格后目标为 103 个。
+**当前状态**：已按用户要求写入源案例描述；尚未为本批次生成视频或登记新 video 对象，不能计为 qualified。
+**与原文的关系**：上文保留原有设计与历史记录；本节是追加的新变体。本节输入、对象数量、正常结果及冲突结果专属于以下变体，不沿用上文旧版本的具体数字、三/四槽限制或版本总数。
+**编号说明**：以下 M 编号仅是本次 25 条方案的索引，不是上文历史 Case label，也不是正式 video_id；跨文件以 `math_expansion_20260923/Mxx` 唯一标识。落地时另行检查现有记录、归档与输出路径后分配 video_id。
+
+##### 新增变体 M25
+
+**拓展方式**：换数字并使用三槽缓存。
+**初始状态、动作与冲突终态**：容量 3，依次插入 2、5、8；命中读取 2，不移除或重新插入；再插入 9 时却淘汰 5，最终保留 2、8、9。
+**正常规则及结果**：FIFO 按插入先后淘汰，应淘汰最早插入的 2，保留 5、8、9；命中不改变插入顺序。
+
+**本批次共用画面要求**：使用固定镜头的简洁二维教学图，完整展示初始输入、操作名和必要的有序动作；数字、卡片身份及非目标元素始终保持不变。最后显示中性 DONE 并保持冲突结果，不在画面中展示正常答案或对错判定。
+**可见证据**：数组从左到右、栈从底到顶、堆按层序描述；队列 FRONT/REAR、栈 TOP、BST 左右与树的边必须清楚。冒泡排序完整展示非相邻交换；滑动窗口保留处理记录且不登记被跳过窗口；插入排序保留 TEMP 与空槽；栈和队列不自动压缩空槽。
+**形式规则**：归并案例展示完整归并排序中的子列排序被跳过，随后头元素比较与输出顺序保持一致；稳定排序只按数字键比较，身份标签不参与比较；循环为无条件每次画一点，不含 break、擦除或重叠绘点；FIFO 命中是读取，不是删除后重插。
+**后续数据接入**：每条新增视频保存自己的 variant_context.conflict_spec 与 questions，并据新输入生成匹配首帧；不得继承旧数字的参考答案。正常结果用于事实核对与正常参考答案，本批次仅新增 conflict 视频。每条视频生成后仍需单独审核，合格后才计入目标。
+<!-- math-expansion-20260923-end -->
