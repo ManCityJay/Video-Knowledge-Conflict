@@ -591,8 +591,9 @@ def validate_qa_result(result: Any, prefix: str, questions: dict[str, dict[str, 
     question_id = validate_id(result.get("question_id"), f"{prefix}.question_id")
     if question_id not in questions:
         raise PipelineError(f"{prefix} references unknown question_id: {question_id}")
-    if result.get("question") != questions[question_id]["text_en"]:
-        raise PipelineError(f"{prefix}.question does not match the case question.")
+    # Retain historical responses after an input edit. Reuse, judging and
+    # reporting perform content freshness checks instead of blocking loading.
+    require_nonempty_string(result.get("question"), f"{prefix}.question")
     require_nonempty_string(result.get("raw_answer"), f"{prefix}.raw_answer")
     final_answer = result.get("final_answer")
     if final_answer is not None:
@@ -667,7 +668,8 @@ def video_case_context(case: dict[str, Any], video: dict[str, Any]) -> dict[str,
     context = video.get("variant_context")
     if context is None:
         return case
-    return {**case, "questions": context["questions"], "conflict_spec": context["conflict_spec"]}
+    return {**case, "title": context.get("title", case["title"]),
+            "questions": context["questions"], "conflict_spec": context["conflict_spec"]}
 
 
 def require_question_only_compatible(
@@ -726,15 +728,14 @@ def validate_case(case: Any) -> None:
     )
 
     videos = case.get("videos")
-    if not isinstance(videos, list) or not 2 <= len(videos) <= TOTAL_VIDEO_LIMIT:
-        raise PipelineError(f"videos must contain 2-{TOTAL_VIDEO_LIMIT} entries.")
+    # Authoring limits apply to one model response, not accumulated reviewed variants.
+    if not isinstance(videos, list) or len(videos) < 2:
+        raise PipelineError("videos must contain at least 2 entries.")
     roles = Counter(video.get("role") for video in videos if isinstance(video, dict))
     if roles["control"] != 1:
         raise PipelineError("Each case must contain exactly one control video.")
-    if not 1 <= roles["conflict"] <= CONFLICT_VIDEO_LIMIT:
-        raise PipelineError(
-            f"Each case must contain 1-{CONFLICT_VIDEO_LIMIT} conflict videos."
-        )
+    if roles["conflict"] < 1:
+        raise PipelineError("Each case must contain at least one conflict video.")
     if set(roles) - VIDEO_ROLES:
         raise PipelineError("Video role must be conflict or control.")
 
@@ -760,6 +761,16 @@ def validate_case(case: Any) -> None:
         if normalized_prompt in prompts:
             raise PipelineError("Duplicate Seedance prompts are not allowed.")
         prompts.add(normalized_prompt)
+        observation = video.get('video_observation')
+        if observation is not None:
+            if not isinstance(observation, dict):
+                raise PipelineError(f'{prefix}.video_observation must be an object or null.')
+            if not re.fullmatch(r'[0-9a-f]{64}', str(observation.get('source_sha256', ''))):
+                raise PipelineError(f'{prefix}.video_observation requires a video SHA-256.')
+            if not is_english_text(observation.get('summary_en')):
+                raise PipelineError(f'{prefix}.video_observation.summary_en must be English.')
+            if 'context_en' in observation and not is_english_text(observation['context_en']):
+                raise PipelineError(f'{prefix}.video_observation.context_en must be English.')
         description = video.get("description")
         if description is not None:
             if video.get("role") != "conflict":
@@ -784,10 +795,14 @@ def validate_case(case: Any) -> None:
                     raise PipelineError(
                         f"{prefix}.description.context_en must start with its prefix."
                     )
-            if description.get("source") != "seedance_prompt_en":
+            if description.get("source") not in {"seedance_prompt_en", "video"}:
                 raise PipelineError(
-                    f"{prefix}.description.source must be seedance_prompt_en."
+                    f"{prefix}.description.source must be seedance_prompt_en or video."
                 )
+            if description.get('source') == 'video' and (
+                observation is None or description.get('source_sha256') != observation.get('source_sha256')
+            ):
+                raise PipelineError(f'{prefix}.description must match its reviewed video observation.')
             source_sha256 = require_nonempty_string(
                 description.get("source_sha256"),
                 f"{prefix}.description.source_sha256",

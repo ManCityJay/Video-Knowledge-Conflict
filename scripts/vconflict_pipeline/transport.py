@@ -14,6 +14,7 @@ from email.utils import parsedate_to_datetime
 from http.client import IncompleteRead
 from typing import Any, Callable, TypeVar
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
 from .core import PipelineError
@@ -106,6 +107,72 @@ def _http_error_message(error: HTTPError, secret: str) -> str:
     return redact(str(message), secret)
 
 
+def _validate_json_url(url: str, service: str) -> None:
+    try:
+        parsed = urlsplit(url)
+        host = parsed.hostname
+        parsed.port  # Validate a supplied port before opening the connection.
+    except ValueError as exc:
+        raise TransportError(f"{service} base URL is invalid.") from exc
+    if parsed.scheme == "https" and host:
+        return
+    if (
+        parsed.scheme == "http"
+        and host in {"localhost", "127.0.0.1", "::1"}
+        and parsed.username is None
+        and parsed.password is None
+    ):
+        return
+    raise TransportError(
+        f"{service} base URL must use HTTPS or loopback HTTP."
+    )
+
+
+def _read_json_response(
+    request: Request, *, timeout: int, service: str, secret: str
+) -> dict[str, Any]:
+    try:
+        with urlopen(request, timeout=timeout) as response:  # nosec B310
+            response_body = response.read().decode("utf-8")
+    except HTTPError as exc:
+        raise TransportError(
+            f"{service} request failed (HTTP {exc.code}): "
+            f"{_http_error_message(exc, secret)}",
+            retry_after=_retry_after_seconds(exc),
+        ) from exc
+    except URLError as exc:
+        raise TransportError(
+            f"Could not reach {service}: {redact(str(exc.reason), secret)}"
+        ) from exc
+    except IncompleteRead as exc:
+        raise TransportError(
+            f"{service} returned an incomplete HTTP response; connection closed before the body was fully received."
+        ) from exc
+    except UnicodeDecodeError as exc:
+        raise TransportError(f"{service} returned invalid JSON.") from exc
+    except TimeoutError as exc:
+        raise TransportError(f"{service} request timed out.") from exc
+    except OSError as exc:
+        raise TransportError(
+            f"{service} request failed: {redact(str(exc), secret)}"
+        ) from exc
+
+    try:
+        decoded = json.loads(response_body)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise TransportError(f"{service} returned invalid JSON.") from exc
+    if not isinstance(decoded, dict):
+        raise TransportError(f"{service} returned invalid JSON.")
+    return decoded
+
+
+def get_json(*, url: str, timeout: int, service: str) -> dict[str, Any]:
+    """GET JSON from HTTPS or a loopback HTTP service."""
+    _validate_json_url(url, service)
+    request = Request(url, headers={"Accept": "application/json"}, method="GET")
+    return _read_json_response(request, timeout=timeout, service=service, secret="")
+
+
 def post_json(
     *,
     url: str,
@@ -115,56 +182,21 @@ def post_json(
     service: str,
     max_body_bytes: int | None = None,
 ) -> dict[str, Any]:
-    """POST JSON to an HTTPS endpoint and return an object response."""
-    if not url.startswith("https://"):
-        raise TransportError(f"{service} base URL must use HTTPS.")
+    """POST JSON to HTTPS or a loopback HTTP service."""
+    _validate_json_url(url, service)
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     if max_body_bytes is not None and len(body) > max_body_bytes:
         raise TransportError(
             f"{service} request body is too large ({len(body)} bytes; "
             f"maximum {max_body_bytes} bytes)."
         )
-    request = Request(
-        url,
-        data=body,
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-        },
-        method="POST",
+    headers = {"Content-Type": "application/json", "Accept": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    request = Request(url, data=body, headers=headers, method="POST")
+    return _read_json_response(
+        request, timeout=timeout, service=service, secret=api_key
     )
-    try:
-        with urlopen(request, timeout=timeout) as response:  # nosec B310
-            response_body = response.read().decode("utf-8")
-    except HTTPError as exc:
-        raise TransportError(
-            f"{service} request failed (HTTP {exc.code}): "
-            f"{_http_error_message(exc, api_key)}",
-            retry_after=_retry_after_seconds(exc),
-        ) from exc
-    except URLError as exc:
-        raise TransportError(
-            f"Could not reach {service}: {redact(str(exc.reason), api_key)}"
-        ) from exc
-    except IncompleteRead as exc:
-        raise TransportError(
-            f"{service} returned an incomplete HTTP response; connection closed before the body was fully received."
-        ) from exc
-    except TimeoutError as exc:
-        raise TransportError(f"{service} request timed out.") from exc
-    except OSError as exc:
-        raise TransportError(
-            f"{service} request failed: {redact(str(exc), api_key)}"
-        ) from exc
-
-    try:
-        decoded = json.loads(response_body)
-    except json.JSONDecodeError as exc:
-        raise TransportError(f"{service} returned invalid JSON.") from exc
-    if not isinstance(decoded, dict):
-        raise TransportError(f"{service} returned invalid JSON.")
-    return decoded
 
 
 def extract_response_text(response: dict[str, Any], service: str) -> str:

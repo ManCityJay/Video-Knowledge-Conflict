@@ -42,38 +42,13 @@ python scripts/pipeline.py summarize --group <group_name> --input video \
 dataset/source_cases/<group>/
 dataset/cases/<group>/
 videos/seedance/<group>/<case_id>/
-results/<group>/
+results/<group>/<model>/
 ```
 
-不传 `--group` 时使用平铺目录。通常 `--case-id`、`--video-id` 和
+不传 `--group` 时结果位于 `results/<model>/`，其他数据使用平铺目录。
+通常 `--case-id`、`--video-id` 和
 `--question-id` 均可重复传入以缩小运行范围。删除视频或问题时只接受一个
 `--case-id`；使用 `delete --all` 时可重复传入同一 group 下的多个 case ID。
-
-## 环境变量
-
-```powershell
-$env:OPENROUTER_API_KEY = "<openrouter-api-key>"
-$env:ARK_API_KEY = "<ark-api-key>"
-$env:DASHSCOPE_API_KEY = "<dashscope-api-key>"
-$env:MOONSHOT_API_KEY = "<moonshot-api-key>"
-```
-
-Qwen 需要 DashScope Python SDK 1.24.6 或更新版本：
-
-```powershell
-python -m pip install -U "dashscope>=1.24.6"
-```
-
-可选 endpoint 覆盖：
-
-```powershell
-$env:ARK_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3"
-$env:DASHSCOPE_BASE_HTTP_API_URL = "https://dashscope.aliyuncs.com/api/v1"
-$env:MOONSHOT_BASE_URL = "https://api.moonshot.cn/v1"
-```
-
-历史 `QWEN_BASE_URL` 仍兼容；`/compatible-mode/v1` 后缀会自动转换为
-`/api/v1`。
 
 ## 数据准备阶段
 
@@ -259,6 +234,10 @@ description 或 human review。
 `--input` 接受 `video`、`description` 或 `question_only`，默认 `video`。不再支持
 `--input-mode`。
 
+视频输入预检会检查本地 `local_path`：选中视频的文件存在而状态不是 `ready` 时，
+先修正状态并写回 case JSON；状态不是 `ready` 且文件不存在时跳过。若状态已是
+`ready` 但文件不存在，整次 `qa-judge` 会在调用模型前报错。
+
 模型与 effort：
 
 - Qwen `qwen3.8-max`：`none` 或 `default`；`all` 同时执行两者。
@@ -266,6 +245,21 @@ description 或 human review。
 - Gemini：CLI 使用 `--qa-model gemini`，实际调用
   `google/gemini-3.1-pro-preview`；仅支持 `default`，实际 reasoning effort 为
   `medium`。
+- Cosmos3-Nano：CLI 使用 `--qa-model cosmos3-nano`，调用单卡本地 vLLM 上的
+  `nvidia/Cosmos3-Nano`；支持 `none` 和 `default`，视频以 4 fps 采样，
+  `max_tokens` 默认 4096。`--cosmos-max-tokens` 可调整输出上限，
+  `--cosmos-workers` 默认 4；
+  Cosmos 的 `--qa-workers` 默认也为 4，其他模型仍为 3。
+
+Cosmos 服务在仓库根目录运行 `./scripts/start_cosmos_vllm.sh` 启动；完整启动参数
+和架构说明见 `plan.md` 的「模型配置」。视频路径须是服务端可读取、位于
+`--allowed-local-media-path` 下的 MP4。预检从 `/v1/models` 获取实际请求模型 ID；
+视频请求会自动采用 `plan.md` 中的全帧加载和 4 fps 处理器采样配置。
+已有 Cosmos QA 需用 `--force-qa` 重跑，才能使用新的处理路径。
+服务不可达、模型 ID 不明确或选中的视频格式错误时，`--force-qa` 不会清除旧回答。
+输出达到 `max_tokens` 上限时该次 QA 失败，不保存截断回答。修改输出上限后需要
+`--force-qa` 才能替换已有结果。Cosmos QA 不使用 OpenRouter RPM 限制；Judge
+仍使用原有 OpenRouter 限制。
 
 Description QA 在每个 video 对象内部按以下字段去重：
 
@@ -302,9 +296,9 @@ Conclude with exactly one final line in this format: Final answer: <your clear, 
 单独保存为 `final_answer`。缺少有效末行时，该 question/effort 立即失败，不保存
 QA 记录、不额外重试；同批其他 QA 和已有成功回答的 Judge 继续执行。
 
-重复运行不会读取整个视频计算 SHA-256，也不会追加重复结果。视频、description
-或 questions 由 pipeline 重建时，相应 QA 会被自动清理。若手工替换同路径视频，
-必须使用 `--force-qa`。
+重复运行会按视频文件 SHA-256 检查已有 QA 的输入指纹，不会追加相同输入的重复
+结果。视频、description 或 questions 由 pipeline 重建时，相应 QA 会被自动清理。
+手工替换同路径视频会使旧 QA 过期，需重新运行 QA 和 Judge。
 
 旧 QA 没有 `final_answer`。Pipeline 不猜测或迁移旧回答；普通运行或
 `--force-judge` 选中这类记录时，会在任何模型请求前报错。使用 `--force-qa`
@@ -381,13 +375,16 @@ python scripts/pipeline.py summarize \
   --thinking-effort all
 ```
 
-模型短名映射为 `qwen`、`kimi` 和 `gemini`。以上命令自动生成：
+模型短名映射为 `qwen`、`kimi`、`gemini` 和 `cosmos`。以上命令自动生成：
 
 ```text
-results/classic_fairy_tale_film_conflicts/qwen_description_none_summary.json
-results/classic_fairy_tale_film_conflicts/qwen_description_default_summary.json
-results/classic_fairy_tale_film_conflicts/qwen_description_report.md
+results/classic_fairy_tale_film_conflicts/qwen/qwen_description_none_summary.json
+results/classic_fairy_tale_film_conflicts/qwen/qwen_description_default_summary.json
+results/classic_fairy_tale_film_conflicts/qwen/qwen_description_report.md
 ```
+
+所有模型的新 summary 和 report 都写入各自的模型子目录，文件名保持原样。
+旧的平铺结果留在原处，不移动或迁移。
 
 Fairy video 的两种条件分别汇总：
 

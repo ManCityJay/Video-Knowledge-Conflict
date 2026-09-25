@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+from .integrity import (video_selected, description_is_current, qa_is_current, judgment_fingerprint, judgment_is_current, require_writable_case)
+
 import argparse
 import json
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
+from .evidence import observed_summary
 
 from .core import (
     JUDGMENT_SCHEMA,
@@ -34,7 +37,7 @@ from .qa import (
     qa_run_key,
     work_title_prefix_condition,
 )
-from .settings import AUTHOR_JUDGE_MODEL
+from .settings import AUTHOR_JUDGE_MODEL, COSMOS_QA_MODEL
 from .transport import (
     make_openrouter_limiter,
     openrouter_json,
@@ -90,6 +93,7 @@ def _eligible_videos(
     *,
     input_mode: str,
     selected_video_ids: set[str],
+    video_scope: str | None = None,
 ) -> list[dict[str, Any]]:
     candidates = [
         video
@@ -108,6 +112,10 @@ def _eligible_videos(
     for video in candidates:
         if selected_video_ids and video["video_id"] not in selected_video_ids:
             continue
+        if not video_selected(video, input_mode, video_scope):
+            if video["video_id"] in selected_video_ids:
+                raise PipelineError(f"Selected video {video['video_id']} is outside the evaluation scope or not ready.")
+            continue
         if input_mode == "description":
             description = video.get("description")
             if not isinstance(description, dict):
@@ -115,9 +123,7 @@ def _eligible_videos(
                     f"Context is missing for {case['case_id']}/{video['video_id']}. "
                     "Run description first."
                 )
-            if description.get("source_sha256") != sha256_text(
-                video["seedance_prompt_en"]
-            ):
+            if not description_is_current(video):
                 raise PipelineError(
                     f"Context is stale for {case['case_id']}/{video['video_id']}. "
                     "Run description again."
@@ -125,6 +131,7 @@ def _eligible_videos(
         else:
             if video["status"] != "ready":
                 continue
+            observed_summary(video)  # Blocks stale annotations after regeneration.
             resolve_video_path(video["local_path"], must_exist=True)
         eligible.append(video)
     return eligible
@@ -135,18 +142,8 @@ def _promote_existing_local_videos(
     *,
     selected_video_ids: set[str],
 ) -> list[str]:
-    """Mark selected non-ready videos ready when their local files exist."""
-    promoted: list[str] = []
-    for video in case["videos"]:
-        if selected_video_ids and video["video_id"] not in selected_video_ids:
-            continue
-        if video["status"] == "ready":
-            continue
-        video_path = resolve_video_path(video["local_path"])
-        if video_path.exists() and video_path.is_file():
-            video["status"] = "ready"
-            promoted.append(video["video_id"])
-    return promoted
+    """An old file is not proof that the current generation task completed."""
+    return []
 
 
 def _result_base_selected(
@@ -157,7 +154,8 @@ def _result_base_selected(
     efforts: set[str | None],
 ) -> bool:
     return not (
-        (args.video_id and video["video_id"] not in set(args.video_id))
+        not video_selected(video, args.input, getattr(args, "video_scope", None))
+        or (args.video_id and video["video_id"] not in set(args.video_id))
         or (args.question_id and result["question_id"] not in set(args.question_id))
         or result.get("model") != args.qa_model
         or qa_result_input_mode(result) != args.input
@@ -228,10 +226,10 @@ def _preflight_cases(
     selected_questions = set(args.question_id or [])
     selected_videos = set(args.video_id or [])
     loaded: list[tuple[Path, dict[str, Any]]] = []
-    promoted_by_case: list[tuple[Path, dict[str, Any], list[str]]] = []
     target_total = 0
     for path in iter_case_paths(dataset_dir, args.case_id):
         case = load_case(path)
+        require_writable_case(case, path)
         if args.input == "question_only":
             questions = _selected_questions(
                 {**case, "questions": require_question_only_compatible(case)},
@@ -240,35 +238,16 @@ def _preflight_cases(
             target_total += len(questions) * len(efforts)
             loaded.append((path, case))
             continue
-        promoted = (
-            _promote_existing_local_videos(
-                case,
-                selected_video_ids=selected_videos,
-            )
-            if args.input == "video"
-            else []
-        )
         videos = _eligible_videos(
             case,
             input_mode=args.input,
             selected_video_ids=selected_videos,
+            video_scope=getattr(args, "video_scope", None),
         )
         for video in videos:
             questions = _selected_questions(video_case_context(case, video), selected_questions)
             target_total += len(questions) * len(efforts)
         loaded.append((path, case))
-        if promoted:
-            promoted_by_case.append((path, case, promoted))
-
-    # Persist status reconciliation only after every selected case passes
-    # preflight, and before any provider request can be made.
-    for path, case, promoted in promoted_by_case:
-        atomic_write_json(path, case)
-        for video_id in promoted:
-            print(
-                f"Preflight marked {case['case_id']}/{video_id} ready because "
-                "its local video file exists."
-            )
     return loaded, target_total
 
 
@@ -298,6 +277,8 @@ def _require_selected_final_answers(
             continue
         for video in case["videos"]:
             for result in video["qa_results"]:
+                if not qa_is_current(case, video, result):
+                    continue
                 if not _result_selected(
                     video, result, args=args, efforts=efforts
                 ):
@@ -440,6 +421,7 @@ def command_judge(args: argparse.Namespace) -> int:
 
     def run_case(case_path: Path) -> tuple[int, int]:
         case = load_case(case_path)
+        require_writable_case(case, case_path)
         case_completed = 0
         case_failures = 0
         if args.input == "question_only":
@@ -517,7 +499,7 @@ def command_judge(args: argparse.Namespace) -> int:
             for qa_result in video["qa_results"]:
                 if not _result_selected(
                     video, qa_result, args=args, efforts=efforts
-                ) or qa_result.get("judgment") is not None:
+                ) or not qa_is_current(case, video, qa_result) or judgment_is_current(case, video, qa_result):
                     continue
                 try:
                     context = video_case_context(case, video)
@@ -570,6 +552,7 @@ def command_judge(args: argparse.Namespace) -> int:
                         "confidence": float(result["confidence"]),
                         "judge_model": AUTHOR_JUDGE_MODEL,
                         "judge_request_id": response.get("id"),
+                        "input_fingerprint": judgment_fingerprint(case, video, qa_result),
                     }
                     atomic_write_json(case_path, case)
                     case_completed += 1
@@ -630,8 +613,10 @@ def _completion_counts(
                     video, result, args=args, efforts=effort_set
                 ):
                     continue
+                if not qa_is_current(case, video, result):
+                    continue
                 judge_total += 1
-                judge_completed += isinstance(result.get("judgment"), dict)
+                judge_completed += judgment_is_current(case, video, result)
     return qa_completed, qa_total, judge_completed, judge_total
 
 
@@ -675,6 +660,7 @@ def _qa_completed_from_loaded(
             case,
             input_mode=args.input,
             selected_video_ids=selected_videos,
+            video_scope=getattr(args, "video_scope", None),
         )
         for video in videos:
             questions = _selected_questions(video_case_context(case, video), selected_questions)
@@ -684,6 +670,7 @@ def _qa_completed_from_loaded(
                     include_work_title_prefix=prefix_condition is not None,
                 )
                 for result in video["qa_results"]
+                if qa_is_current(case, video, result)
             }
             completed += sum(
                 qa_run_key(
@@ -705,6 +692,9 @@ def command_qa_judge(args: argparse.Namespace) -> int:
     # before force mode is allowed to clear persisted results.
     efforts = expand_thinking_efforts(args.thinking_effort, args.qa_model)
     loaded, qa_total = _preflight_cases(args, efforts)
+    if qa_total == 0:
+        print("No eligible question/video targets in the selected scope.")
+        return 0
     if not args.force_qa:
         _require_selected_prefix_metadata(
             loaded,
@@ -718,13 +708,18 @@ def command_qa_judge(args: argparse.Namespace) -> int:
         )
     qa_done = _qa_completed_from_loaded(loaded, args=args, efforts=efforts)
     qa_needed = qa_total > 0 and (args.force_qa or qa_done != qa_total)
-    if qa_needed:
-        preflight_qa_backend(args)
+    cosmos_served_model_id = None
+    if qa_needed or (args.force_qa and args.qa_model == COSMOS_QA_MODEL):
+        cosmos_served_model_id = preflight_qa_backend(args, loaded)
     require_openrouter_api_key()
     if args.force_qa or args.force_judge:
         _preclear_force(loaded, args=args, efforts=set(efforts))
 
-    qa_status = command_qa(args) if qa_needed else 0
+    qa_status = (
+        command_qa(args, cosmos_served_model_id=cosmos_served_model_id)
+        if qa_needed
+        else 0
+    )
     judge_status = command_judge(args)
     qa_done, qa_total, judge_done, judge_total = _completion_counts(args, efforts)
     print(f"QA: {qa_done}/{qa_total}")

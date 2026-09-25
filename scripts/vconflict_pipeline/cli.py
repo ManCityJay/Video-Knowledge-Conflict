@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from .authoring import command_author, command_questions
+from .audit import command_audit
 from .core import PipelineError, validate_group, validate_id
 from .deletion import command_delete
 from .descriptions import command_description
@@ -21,6 +22,9 @@ from .settings import (
     CLI_QA_MODEL_IDS,
     CLI_QA_MODELS,
     CLI_THINKING_EFFORTS,
+    COSMOS_QA_MODEL,
+    DEFAULT_COSMOS_MAX_TOKENS,
+    DEFAULT_COSMOS_WORKERS,
     DEFAULT_CASE_DIR,
     DEFAULT_CASE_WORKERS,
     DEFAULT_QA_MODEL,
@@ -130,10 +134,14 @@ def build_parser() -> argparse.ArgumentParser:
     questions.add_argument("--max-repairs", type=int, default=2)
     _add_retries(questions)
     questions.add_argument("--force", action="store_true")
+    questions.add_argument("--video-id", action="append",
+                           help="Select the shared or variant question scopes used by these videos.")
     questions.add_argument(
         "--repair-variant-context", action="store_true",
         help="Repair math variant questions in place, retaining IDs and shared questions.",
     )
+    questions.add_argument("--audit-only", action="store_true",
+                           help="Audit existing questions without changing them; persist actual model checks.")
     questions.set_defaults(func=command_questions)
 
     description = _stage(subparsers, "description")
@@ -193,18 +201,22 @@ def build_parser() -> argparse.ArgumentParser:
         "--qa-model",
         type=_qa_model,
         default=DEFAULT_QA_MODEL,
-        metavar="{gemini,qwen3.8-max,kimi-k3}",
+        metavar="{gemini,qwen3.8-max,kimi-k3,cosmos3-nano}",
     )
     _add_input(qa_judge)
     _add_case_workers(qa_judge)
     _add_request_limits(qa_judge)
     _add_thinking_effort(qa_judge)
     _add_work_title_prefix(qa_judge)
-    qa_judge.add_argument("--qa-workers", type=int, default=3)
+    qa_judge.add_argument("--qa-workers", type=int)
+    qa_judge.add_argument("--cosmos-workers", type=int, default=DEFAULT_COSMOS_WORKERS)
+    qa_judge.add_argument("--cosmos-max-tokens", type=int, default=DEFAULT_COSMOS_MAX_TOKENS)
     _add_retries(qa_judge, timeout=REQUEST_TIMEOUT_SECONDS)
     force = qa_judge.add_mutually_exclusive_group()
     force.add_argument("--force-qa", action="store_true")
     force.add_argument("--force-judge", action="store_true")
+    qa_judge.add_argument("--video-scope", choices=("qualified", "all"),
+                          help="Math defaults to qualified; other groups default to all.")
     qa_judge.set_defaults(func=command_qa_judge)
 
     summarize = _stage(subparsers, "summarize")
@@ -213,12 +225,19 @@ def build_parser() -> argparse.ArgumentParser:
         "--qa-model",
         type=_qa_model,
         required=True,
-        metavar="{gemini,qwen3.8-max,kimi-k3}",
+        metavar="{gemini,qwen3.8-max,kimi-k3,cosmos3-nano}",
     )
     _add_input(summarize)
     _add_thinking_effort(summarize)
     _add_work_title_prefix(summarize)
+    summarize.add_argument("--video-scope", choices=("qualified", "all"))
     summarize.set_defaults(func=command_summarize)
+    audit = _stage(subparsers, "audit")
+    _add_case_selection(audit)
+    audit.add_argument("--output", type=Path, required=True)
+    audit.add_argument("--strict", action="store_true",
+                       help="Return nonzero for missing reviews as well as structural errors.")
+    audit.set_defaults(func=command_audit)
     return parser
 
 
@@ -229,6 +248,12 @@ def _validate(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None
         and args.video_id
     ):
         parser.error("--video-id cannot be combined with --input question_only")
+    if hasattr(args, "video_scope") and args.video_scope is None:
+        args.video_scope = "qualified" if args.group == "mathematics_algorithm_conflicts" else "all"
+    if args.command == "qa-judge" and args.qa_workers is None:
+        args.qa_workers = 4 if args.qa_model == COSMOS_QA_MODEL else 3
+    if getattr(args, "audit_only", False) and (args.force or args.repair_variant_context):
+        parser.error("--audit-only cannot be combined with --force or --repair-variant-context")
     if getattr(args, "repair_variant_context", False):
         if args.group != "mathematics_algorithm_conflicts":
             parser.error("--repair-variant-context requires --group mathematics_algorithm_conflicts")
@@ -261,6 +286,8 @@ def _validate(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None
         "seedance_workers",
         "seedance_total_workers",
         "qa_workers",
+        "cosmos_workers",
+        "cosmos_max_tokens",
     ):
         if hasattr(args, field) and getattr(args, field) <= 0:
             parser.error(f"--{field.replace('_', '-')} must be greater than zero")

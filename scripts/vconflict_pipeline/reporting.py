@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from .integrity import (video_selected, qa_is_current, judgment_is_current)
+
 import argparse
 from collections import Counter, defaultdict
 from pathlib import Path
@@ -143,6 +145,7 @@ def build_summary(
     input_mode: str,
     effort: str | None,
     work_title_prefix: bool | None,
+    video_scope: str | None = None,
 ) -> dict[str, Any]:
     if input_mode == "question_only":
         latest_questions: dict[tuple[str, str], dict[str, Any]] = {}
@@ -212,6 +215,8 @@ def build_summary(
     for case_path in case_paths:
         case = load_case(case_path)
         for video in case["videos"]:
+            if not video_selected(video, input_mode, video_scope):
+                continue
             for result in video["qa_results"]:
                 if not _result_matches(
                     result,
@@ -219,7 +224,7 @@ def build_summary(
                     input_mode=input_mode,
                     efforts={effort},
                     work_title_prefix=work_title_prefix,
-                ) or not isinstance(result.get("judgment"), dict):
+                ) or not judgment_is_current(case, video, result):
                     continue
                 key = (case["case_id"], video["video_id"], result["question_id"])
                 previous = latest.get(key)
@@ -250,6 +255,7 @@ def build_summary(
     overall = _summarize_counts(answer_counts, video_counts)
     summary = {
         "generated_at": utc_now(),
+        "video_scope": video_scope or "group_default",
         "qa_model": qa_model,
         "input": input_mode,
         "thinking_effort": _effort_name(effort),
@@ -312,6 +318,7 @@ def build_markdown(
     input_mode: str,
     efforts: set[str | None],
     work_title_prefix: bool | None,
+    video_scope: str | None = None,
 ) -> str:
     effort_names = ", ".join(
         _effort_name(item) for item in sorted(efforts, key=str)
@@ -391,6 +398,8 @@ def build_markdown(
             continue
         question_groups = []
         for video in case["videos"]:
+            if not video_selected(video, input_mode, video_scope):
+                continue
             for question in video_case_context(case, video)["questions"]:
                 group = next((item for item in question_groups if item[0] == question), None)
                 if group is None:
@@ -411,6 +420,7 @@ def build_markdown(
                     result
                     for result in video["qa_results"]
                     if result.get("question_id") == question["question_id"]
+                    and qa_is_current(case, video, result)
                     and _result_matches(
                         result,
                         qa_model=qa_model,
@@ -435,7 +445,7 @@ def build_markdown(
                         [f"**Local file:** {_local_video_link(video['local_path'])}", ""]
                     )
                 for result_index, result in enumerate(matching or [{}], start=1):
-                    judgment = result.get("judgment")
+                    judgment = result.get("judgment") if judgment_is_current(case, video, result) else None
                     judgment = judgment if isinstance(judgment, dict) else {}
                     verdict = canonical_verdict(judgment.get("verdict", ""))
                     effort_display = (
@@ -571,8 +581,8 @@ def command_summarize(args: argparse.Namespace) -> int:
             work_title_prefix=work_title_prefix,
         )
     )
-    result_dir = grouped_dir(RESULTS_DIR, args.group)
     model_slug = QA_MODEL_SLUGS[args.qa_model]
+    result_dir = grouped_dir(RESULTS_DIR, args.group) / model_slug
     prefix_name = _fairy_video_prefix_name(args)
     for effort in efforts:
         output_parts = [model_slug, args.input]
@@ -588,6 +598,7 @@ def command_summarize(args: argparse.Namespace) -> int:
                 input_mode=args.input,
                 effort=effort,
                 work_title_prefix=work_title_prefix,
+                video_scope=getattr(args, "video_scope", None),
             ),
         )
         print(f"Wrote summary: {output}")
@@ -604,6 +615,7 @@ def command_summarize(args: argparse.Namespace) -> int:
             input_mode=args.input,
             efforts=set(efforts),
             work_title_prefix=work_title_prefix,
+            video_scope=getattr(args, "video_scope", None),
         ),
     )
     print(f"Wrote report: {report_output}")

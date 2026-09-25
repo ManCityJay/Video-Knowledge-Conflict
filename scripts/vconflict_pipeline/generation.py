@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from .integrity import (require_writable_case)
+
 import argparse
 import base64
 import copy
@@ -114,6 +116,8 @@ def seedance_content(video: dict[str, Any]) -> tuple[list[dict[str, Any]], str |
     content: list[dict[str, Any]] = [{"type": "text", "text": video["seedance_prompt_en"]}]
     relative = video.get("first_frame_path")
     if relative is None:
+        if video.get('qualified_reference'):
+            raise PipelineError('A qualified-reference variant needs an adapted, inspected first_frame_path; text-only generation is disabled for this variant.')
         return content, None
     if not isinstance(relative, str) or not relative.strip():
         raise PipelineError("first_frame_path must be a nonempty project-relative path.")
@@ -167,7 +171,8 @@ def generate_one_video(
         # Validate inputs before changing an existing video's state.
         seedance_content(video)
         persist_video_state(case=case, case_path=case_path, video=video, lock=lock,
-                            task_id=None, status="pending", human_review="pending", qa_results=[])
+                            task_id=None, status="pending", human_review="pending", qa_results=[],
+                            description=None, video_observation=None)
         status = "pending"
 
     if status == "ready":
@@ -239,6 +244,8 @@ def generate_one_video(
             status="submitted",
             submitted_prompt_en=video["seedance_prompt_en"],
             submitted_first_frame_sha256=first_frame_hash,
+            description=None,
+            video_observation=None,
         )
 
     task_id = video.get("task_id")
@@ -313,6 +320,10 @@ def generate_one_video(
         lock=lock,
         status="ready",
         human_review="pending",
+        qualification_pending=True,
+        require_video_observation=(video.get("require_video_observation", False)
+            or (video["role"] == "conflict"
+                and "mathematics_algorithm_conflicts" in Path(video["local_path"]).parts)),
         qa_results=[
             result
             for result in video["qa_results"]
@@ -334,6 +345,7 @@ def command_generate(args: argparse.Namespace) -> int:
 
     def run_case(case_path: Path) -> int:
         case = load_case(case_path)
+        require_writable_case(case, case_path)
         videos = [
             video
             for video in case["videos"]
@@ -406,6 +418,7 @@ def command_review(args: argparse.Namespace) -> int:
     if not case_path.exists():
         raise PipelineError(f"Case file was not found: {case_path}")
     case = load_case(case_path)
+    require_writable_case(case, case_path)
     for video in case["videos"]:
         if video["video_id"] != args.video_id:
             continue
@@ -413,6 +426,10 @@ def command_review(args: argparse.Namespace) -> int:
             raise PipelineError("Only ready videos can be reviewed.")
         resolve_video_path(video["local_path"], must_exist=True)
         video["human_review"] = args.decision
+        if args.decision == "verified":
+            from .evidence import observed_summary
+            observed_summary(video)
+            video["qualification_pending"] = False
         atomic_write_json(case_path, case)
         print(
             f"Marked {args.case_id}/{args.video_id} as {args.decision}: "

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from .integrity import (description_is_current, require_writable_case)
+
 import argparse
 import json
 import sys
@@ -10,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from .core import (
+    video_case_context,
     PipelineError,
     atomic_write_json,
     grouped_dir,
@@ -21,6 +24,7 @@ from .core import (
     validate_case,
 )
 from .settings import AUTHOR_JUDGE_MODEL
+from .evidence import observed_summary, video_sha256
 from .transport import (
     make_openrouter_limiter,
     openrouter_json,
@@ -73,7 +77,6 @@ the event description. Return only the requested structured result."""
 
 
 def command_description(args: argparse.Namespace) -> int:
-    api_key = require_openrouter_api_key()
     request_limiter = make_openrouter_limiter(args)
     dataset_dir = grouped_dir(args.dataset_dir, args.group)
     case_paths = iter_case_paths(dataset_dir, args.case_id)
@@ -84,6 +87,7 @@ def command_description(args: argparse.Namespace) -> int:
 
     def run_case(case_path: Path) -> tuple[int, int]:
         case = load_case(case_path)
+        require_writable_case(case, case_path)
         conflicts = [video for video in case["videos"] if video["role"] == "conflict"]
         if selected_videos:
             available = {video["video_id"] for video in conflicts}
@@ -101,42 +105,52 @@ def command_description(args: argparse.Namespace) -> int:
         case_cleared = 0
         for video in conflicts:
             prompt = video["seedance_prompt_en"]
-            source_hash = sha256_text(prompt)
+            observation = observed_summary(video)
+            source_kind = 'video' if observation is not None else 'seedance_prompt_en'
+            source_hash = video_sha256(video) if observation is not None else sha256_text(prompt)
             existing = video.get("description")
             if (
                 not args.force
                 and isinstance(existing, dict)
                 and existing.get("source_sha256") == source_hash
+                and existing.get("source") == source_kind
+                and description_is_current(video)
             ):
                 print(f"Skipping current context: {case['case_id']}/{video['video_id']}")
                 continue
 
             source = {
                 "group": args.group,
-                "title": case["title"],
+                "title": video_case_context(case, video)["title"],
                 "seedance_prompt_en": prompt,
             }
-            authored, response = openrouter_json(
-                messages=[
-                    {"role": "system", "content": CONTEXT_SYSTEM_PROMPT},
-                    {
-                        "role": "user",
-                        "content": json.dumps(source, ensure_ascii=False),
-                    },
-                ],
-                model=AUTHOR_JUDGE_MODEL,
-                schema_name="knowledge_conflict_context_authoring",
-                schema=CONTEXT_SCHEMA,
-                api_key=api_key,
-                timeout=args.timeout,
-                max_retries=args.max_retries,
-                request_limiter=request_limiter,
-            )
+            if observation is not None:
+                # Use the reviewed factual paragraph verbatim, not the intended prompt.
+                authored = {'context_en': video['video_observation'].get('context_en', observation),
+                            'context_prefix_en': None}
+                response = {}
+            else:
+                authored, response = openrouter_json(
+                    messages=[
+                        {"role": "system", "content": CONTEXT_SYSTEM_PROMPT},
+                        {
+                            "role": "user",
+                            "content": json.dumps(source, ensure_ascii=False),
+                        },
+                    ],
+                    model=AUTHOR_JUDGE_MODEL,
+                    schema_name="knowledge_conflict_context_authoring",
+                    schema=CONTEXT_SCHEMA,
+                    api_key=require_openrouter_api_key(),
+                    timeout=args.timeout,
+                    max_retries=args.max_retries,
+                    request_limiter=request_limiter,
+                )
             video["description"] = {
                 **authored,
-                "source": "seedance_prompt_en",
+                "source": source_kind,
                 "source_sha256": source_hash,
-                "generator_model": AUTHOR_JUDGE_MODEL,
+                "generator_model": 'reviewed_video_observation' if observation is not None else AUTHOR_JUDGE_MODEL,
                 "generated_at": utc_now(),
                 "generator_request_id": response.get("id"),
             }

@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+from .integrity import (require_writable_case)
+
 import argparse
 import copy
-import shutil
 import sys
 from pathlib import Path
 from typing import Any, Iterable
@@ -175,36 +176,42 @@ def _remove_entire_case(
     case: dict[str, Any],
     video_directories: list[Path],
 ) -> int:
+    # Variant JSONs share a case directory. Never recursively delete that directory.
+    video_paths = [_validated_local_video_path(v['local_path']) for v in case['videos']]
     try:
         case_path.unlink()
     except OSError as exc:
         raise PipelineError(f"Could not delete case JSON {case_path}: {exc}") from exc
 
-    deleted_directories = 0
-    missing_directories = 0
+    deleted_files = 0
+    missing_files = 0
     cleanup_failures = 0
-    for directory in video_directories:
-        if not directory.exists() and not directory.is_symlink():
-            missing_directories += 1
+    for video_path in video_paths:
+        if not video_path.exists() and not video_path.is_symlink():
+            missing_files += 1
             continue
         try:
-            if directory.is_symlink():
-                directory.unlink()
-            else:
-                shutil.rmtree(directory)
+            video_path.unlink()
         except OSError as exc:
             cleanup_failures += 1
             print(
-                f"Error deleting case video directory {directory}: {exc}",
+                f"Error deleting case video {video_path}: {exc}",
                 file=sys.stderr,
             )
         else:
-            deleted_directories += 1
+            deleted_files += 1
+    for directory in {path.parent for path in video_paths}:
+        if directory.is_symlink():
+            continue
+        try:
+            directory.rmdir()  # Only succeeds when no other variant or asset remains.
+        except OSError:
+            pass
 
     print(f"Deleted case JSON: {case_path}")
     print(
-        f"Case video directories: deleted {deleted_directories}; already missing "
-        f"{missing_directories}; failed {cleanup_failures}."
+        f"Case video files: deleted {deleted_files}; already missing "
+        f"{missing_files}; failed {cleanup_failures}."
     )
     print(
         "Source Markdown and derived results were not deleted; existing summaries "
@@ -225,7 +232,10 @@ def _load_selected_cases(
             "Case files were not found: "
             + ", ".join(str(path) for path in missing_paths)
         )
-    return [(path, load_case(path)) for path in case_paths]
+    loaded = [(path, load_case(path)) for path in case_paths]
+    for path, case in loaded:
+        require_writable_case(case, path)
+    return loaded
 
 
 def command_delete(args: argparse.Namespace) -> int:

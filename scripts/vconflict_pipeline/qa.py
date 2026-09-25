@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from .integrity import (video_selected, description_is_current, qa_fingerprint, qa_is_current, require_writable_case)
+
 import base64
 import os
 import sys
@@ -13,6 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from types import ModuleType
 from typing import Any, Callable, Iterable
+from .evidence import observed_summary
 
 from .core import (
     PipelineError,
@@ -28,6 +31,9 @@ from .core import (
     video_case_context,
 )
 from .settings import (
+    COSMOS_QA_MODEL,
+    DEFAULT_COSMOS_BASE_URL,
+    DEFAULT_COSMOS_MAX_TOKENS,
     FAIRY_TALE_GROUP,
     GEMINI_QA_MODEL,
     KIMI_QA_MODEL,
@@ -38,6 +44,7 @@ from .transport import (
     RequestLimiter,
     TransportError,
     extract_response_text,
+    get_json,
     make_request_limiter,
     post_json,
     redact,
@@ -76,7 +83,7 @@ class QABackend:
     thinking_efforts: tuple[str | None, ...]
     default_thinking_effort: str | None
     temperature: float
-    api_key_variable: str
+    api_key_variable: str | None
     service: str
     endpoint: EndpointResolver | None
     build_payload: PayloadBuilder | None
@@ -84,7 +91,7 @@ class QABackend:
     effective_reasoning_effort: str | None = None
 
     def require_api_key(self) -> str:
-        return require_api_key(self.api_key_variable)
+        return require_api_key(self.api_key_variable) if self.api_key_variable else ""
 
     def encode_video(self, video_path: Path) -> str:
         return encode_video_as_data_url(video_path)
@@ -127,6 +134,27 @@ def encode_video_as_data_url(video_path: Path) -> str:
 def _compatible_endpoint(variable: str, default: str) -> str:
     base_url = os.environ.get(variable, "").strip().rstrip("/") or default
     return f"{base_url}/chat/completions"
+
+
+def _cosmos_base_url() -> str:
+    return (
+        os.environ.get("COSMOS_BASE_URL", "").strip().rstrip("/")
+        or DEFAULT_COSMOS_BASE_URL
+    )
+
+
+def _cosmos_video_uri(video_path: Path) -> str:
+    if video_path.suffix.lower() != ".mp4":
+        raise PipelineError(f"Cosmos3-Nano requires an MP4 video: {video_path}")
+    try:
+        resolved = video_path.resolve(strict=True)
+        if not resolved.is_file():
+            raise PipelineError(f"Cosmos3-Nano video is not a file: {video_path}")
+        return resolved.as_uri()
+    except (OSError, ValueError) as exc:
+        raise PipelineError(
+            f"Could not create a file URI for Cosmos3-Nano video {video_path}: {exc}"
+        ) from exc
 
 
 def _dashscope_base_http_api_url() -> str:
@@ -284,7 +312,7 @@ def _send_qwen_request(
             messages=messages,
             temperature=0.0,
             enable_thinking=thinking_effort is not None,
-            timeout=timeout,
+            request_timeout=timeout,
         )
     except Exception as exc:
         raise TransportError(
@@ -417,6 +445,61 @@ def _kimi_description_payload(
     }
 
 
+def _cosmos_prompt(prompt_text: str, thinking_effort: str | None) -> str:
+    if not prompt_text.endswith(FINAL_ANSWER_INSTRUCTION):
+        raise PipelineError("Cosmos3-Nano question is missing its final-answer instruction.")
+    task = prompt_text[: -len(FINAL_ANSWER_INSTRUCTION)].rstrip()
+    if thinking_effort is None:
+        instruction = "Answer without using <think> tags."
+    elif thinking_effort == "default":
+        instruction = (
+            "Answer the question using the following format:\n"
+            "<think>\nYour reasoning.\n</think>\n"
+            "Write your final answer immediately after the </think> tag."
+        )
+    else:
+        raise PipelineError("Cosmos3-Nano thinking effort must be none or default.")
+    return f"{task}\n\n{instruction}\n\n{FINAL_ANSWER_INSTRUCTION}"
+
+
+def _cosmos_payload(
+    *,
+    prompt_text: str,
+    video_uri: str | None,
+    thinking_effort: str | None,
+    served_model_id: str,
+    max_tokens: int,
+) -> dict[str, Any]:
+    content: str | list[dict[str, Any]] = _cosmos_prompt(
+        prompt_text, thinking_effort
+    )
+    if video_uri is not None:
+        content = [
+            {"type": "video_url", "video_url": {"url": video_uri}},
+            {"type": "text", "text": content},
+        ]
+    payload: dict[str, Any] = {
+        "model": served_model_id,
+        "temperature": 0.0,
+        "seed": 0,
+        "max_tokens": max_tokens,
+        "stream": False,
+        "messages": [
+            {"role": "system", "content": "You are a helpful assistant."},
+            {"role": "user", "content": content},
+        ],
+    }
+    if video_uri is not None:
+        # The Qwen3VL loader samples by fps even with num_frames=-1. Use the
+        # generic loader to pass every decoded frame to the HF video processor,
+        # which then performs the single 4 fps sampling pass.
+        payload["media_io_kwargs"] = {
+            "video": {"video_backend": "opencv", "num_frames": -1, "fps": -1}
+        }
+        payload["mm_processor_kwargs"] = {"fps": 4, "do_sample_frames": True}
+    return payload
+
+
 GEMINI_BACKEND = QABackend(
     model=GEMINI_QA_MODEL,
     thinking_efforts=("default",),
@@ -450,9 +533,19 @@ KIMI_BACKEND = QABackend(
     max_body_bytes=KIMI_MAX_REQUEST_BODY_BYTES,
     effective_reasoning_effort="max",
 )
+COSMOS_BACKEND = QABackend(
+    model=COSMOS_QA_MODEL,
+    thinking_efforts=(None, "default"),
+    default_thinking_effort="default",
+    temperature=0.0,
+    api_key_variable=None,
+    service="Cosmos3-Nano",
+    endpoint=lambda: f"{_cosmos_base_url()}/chat/completions",
+    build_payload=None,
+)
 QA_BACKENDS = {
     backend.model: backend
-    for backend in (GEMINI_BACKEND, QWEN_BACKEND, KIMI_BACKEND)
+    for backend in (GEMINI_BACKEND, QWEN_BACKEND, KIMI_BACKEND, COSMOS_BACKEND)
 }
 
 
@@ -568,6 +661,8 @@ def run_qa_batch(
     timeout: int,
     max_retries: int,
     request_limiter: RequestLimiter,
+    cosmos_served_model_id: str | None = None,
+    cosmos_max_tokens: int = DEFAULT_COSMOS_MAX_TOKENS,
 ) -> tuple[list[dict[str, Any]], list[tuple[str, str | None, str]]]:
     backend = get_backend(qa_model)
     if input_mode == "video":
@@ -577,11 +672,12 @@ def run_qa_batch(
             raise PipelineError(
                 "Video input requires a work title when its prefix is enabled."
             )
-        video_input = (
-            _qwen_video_uri(video_path)
-            if qa_model == QWEN_QA_MODEL
-            else backend.encode_video(video_path)
-        )
+        if qa_model == QWEN_QA_MODEL:
+            video_input = _qwen_video_uri(video_path)
+        elif qa_model == COSMOS_QA_MODEL:
+            video_input = _cosmos_video_uri(video_path)
+        else:
+            video_input = backend.encode_video(video_path)
     elif input_mode == "description":
         if context_text is None:
             raise PipelineError("Description input requires context text.")
@@ -621,7 +717,17 @@ def run_qa_batch(
                     max_retries=max_retries,
                 )
             else:
-                if input_mode != "video" and qa_model == GEMINI_QA_MODEL:
+                if qa_model == COSMOS_QA_MODEL:
+                    if cosmos_served_model_id is None:
+                        raise PipelineError("Cosmos3-Nano served model ID is missing.")
+                    payload = _cosmos_payload(
+                        prompt_text=prompt_text,
+                        video_uri=video_input,
+                        thinking_effort=thinking_effort,
+                        served_model_id=cosmos_served_model_id,
+                        max_tokens=cosmos_max_tokens,
+                    )
+                elif input_mode != "video" and qa_model == GEMINI_QA_MODEL:
                     payload = _gemini_description_payload(prompt_text, thinking_effort)
                 elif input_mode != "video" and qa_model == KIMI_QA_MODEL:
                     payload = _kimi_description_payload(prompt_text, thinking_effort)
@@ -640,6 +746,18 @@ def run_qa_batch(
                     request_limiter=request_limiter,
                     max_retries=max_retries,
                 )
+            if qa_model == COSMOS_QA_MODEL:
+                choices = response.get("choices")
+                if (
+                    isinstance(choices, list)
+                    and choices
+                    and isinstance(choices[0], dict)
+                    and choices[0].get("finish_reason") == "length"
+                ):
+                    raise PipelineError(
+                        "Cosmos3-Nano answer was truncated at max_tokens; "
+                        "increase --cosmos-max-tokens and rerun this QA."
+                    )
             raw_answer = backend.extract_answer(response)
             final_answer = extract_final_answer(raw_answer)
         except PipelineError as exc:
@@ -673,20 +791,76 @@ def run_qa_batch(
     return results, failures
 
 
-def preflight_qa_backend(args: Any) -> None:
+def _preflight_cosmos_videos(
+    args: Any, loaded: list[tuple[Path, dict[str, Any]]]
+) -> None:
+    if args.input != "video":
+        return
+    selected_videos = set(args.video_id or [])
+    for _, case in loaded:
+        for video in case["videos"]:
+            if selected_videos and video["video_id"] not in selected_videos:
+                continue
+            if video_selected(video, args.input, getattr(args, "video_scope", None)):
+                path = resolve_video_path(video["local_path"], must_exist=True)
+                _cosmos_video_uri(path)
+
+
+def _cosmos_served_model_id(timeout: int) -> str:
+    response = get_json(
+        url=f"{_cosmos_base_url()}/models",
+        timeout=min(timeout, 10),
+        service="Cosmos3-Nano",
+    )
+    models = response.get("data")
+    if not isinstance(models, list) or not models:
+        raise PipelineError("Cosmos3-Nano /models returned no served models.")
+    ids = [
+        item.get("id")
+        for item in models
+        if isinstance(item, dict)
+        and isinstance(item.get("id"), str)
+        and item["id"].strip()
+    ]
+    if len(ids) != len(models):
+        raise PipelineError("Cosmos3-Nano /models returned an invalid model ID.")
+    if COSMOS_QA_MODEL in ids:
+        return COSMOS_QA_MODEL
+    if len(ids) == 1:
+        return ids[0]
+    raise PipelineError(
+        "Cosmos3-Nano /models returned multiple models without a unique "
+        f"{COSMOS_QA_MODEL} entry: {', '.join(ids)}."
+    )
+
+
+def preflight_qa_backend(
+    args: Any, loaded: list[tuple[Path, dict[str, Any]]] | None = None
+) -> str | None:
     backend = get_backend(args.qa_model)
     expand_thinking_efforts(args.thinking_effort, args.qa_model)
     if args.qa_model == QWEN_QA_MODEL:
         _require_dashscope_sdk()
     backend.require_api_key()
+    if args.qa_model == COSMOS_QA_MODEL:
+        if loaded is not None:
+            _preflight_cosmos_videos(args, loaded)
+        return _cosmos_served_model_id(args.timeout)
+    return None
 
 
-def command_qa(args: Any) -> int:
+def command_qa(args: Any, *, cosmos_served_model_id: str | None = None) -> int:
     backend = get_backend(args.qa_model)
     if args.qa_model == QWEN_QA_MODEL:
         _require_dashscope_sdk()
     api_key = backend.require_api_key()
-    request_limiter = make_request_limiter(args)
+    request_limiter = (
+        RequestLimiter(args.cosmos_workers)
+        if args.qa_model == COSMOS_QA_MODEL
+        else make_request_limiter(args)
+    )
+    if args.qa_model == COSMOS_QA_MODEL and cosmos_served_model_id is None:
+        cosmos_served_model_id = _cosmos_served_model_id(args.timeout)
     selected_videos = set(args.video_id or [])
     selected_questions = set(args.question_id or [])
     efforts = expand_thinking_efforts(args.thinking_effort, args.qa_model)
@@ -702,6 +876,7 @@ def command_qa(args: Any) -> int:
 
     def run_case(case_path: Path) -> tuple[int, int]:
         case = load_case(case_path)
+        require_writable_case(case, case_path)
         if args.input == "question_only":
             questions = require_question_only_compatible(case)
             selected = [
@@ -756,6 +931,8 @@ def command_qa(args: Any) -> int:
                     timeout=args.timeout,
                     max_retries=args.max_retries,
                     request_limiter=request_limiter,
+                    cosmos_served_model_id=cosmos_served_model_id,
+                    cosmos_max_tokens=args.cosmos_max_tokens,
                 )
 
             case_completed = 0
@@ -817,6 +994,8 @@ def command_qa(args: Any) -> int:
         for video in case["videos"]:
             if selected_videos and video["video_id"] not in selected_videos:
                 continue
+            if not video_selected(video, args.input, getattr(args, "video_scope", None)):
+                continue
             path: Path | None = None
             context_text: str | None = None
             if args.input == "description":
@@ -828,8 +1007,7 @@ def command_qa(args: Any) -> int:
                         f"Context is missing for {case['case_id']}/{video['video_id']}. "
                         "Run description first."
                     )
-                source_hash = sha256_text(video["seedance_prompt_en"])
-                if description.get("source_sha256") != source_hash:
+                if not description_is_current(video):
                     raise PipelineError(
                         f"Context is stale for {case['case_id']}/{video['video_id']}. "
                         "Run description again."
@@ -838,6 +1016,7 @@ def command_qa(args: Any) -> int:
             else:
                 if video["status"] != "ready":
                     continue
+                observed_summary(video)  # Blocks stale annotations after regeneration.
                 path = resolve_video_path(video["local_path"], must_exist=True)
             context = video_case_context(case, video)
             if not context["questions"]:
@@ -864,6 +1043,7 @@ def command_qa(args: Any) -> int:
                     include_work_title_prefix=prefix_condition is not None,
                 )
                 for result in video["qa_results"]
+                if qa_is_current(case, video, result)
             }
             pending = [
                 (question, effort)
@@ -894,12 +1074,15 @@ def command_qa(args: Any) -> int:
         def run(
             job: dict[str, Any],
         ) -> tuple[list[dict[str, Any]], list[tuple[str, str | None, str]]]:
-            return run_qa_batch(
+            context = video_case_context(case, job["video"])
+            fingerprints = {q["question_id"]: qa_fingerprint(
+                case, job["video"], q, args.input, prefix_condition) for q, _ in job["pending"]}
+            results, failures = run_qa_batch(
                 input_mode=args.input,
                 video_path=job["path"],
                 context_text=job["context_text"],
                 work_title=(
-                    case["title"].split(":", 1)[0].strip()
+                    context["title"].split(":", 1)[0].strip()
                     if prefix_condition is True
                     else None
                 ),
@@ -910,7 +1093,14 @@ def command_qa(args: Any) -> int:
                 timeout=args.timeout,
                 max_retries=args.max_retries,
                 request_limiter=request_limiter,
+                cosmos_served_model_id=cosmos_served_model_id,
+                cosmos_max_tokens=args.cosmos_max_tokens,
             )
+            # Bind to inputs from before the provider request. If files change
+            # during the request, the returned result will immediately be stale.
+            for result in results:
+                result["input_fingerprint"] = fingerprints[result["question_id"]]
+            return results, failures
 
         case_completed = 0
         case_failures = 0

@@ -12,17 +12,20 @@ AUTHOR_JUDGE_MODEL = "openai/gpt-5.6-luna-pro"
 GEMINI_QA_MODEL = "google/gemini-3.1-pro-preview"
 QWEN_QA_MODEL = "qwen3.8-max"
 KIMI_QA_MODEL = "kimi-k3"
+COSMOS_QA_MODEL = "nvidia/Cosmos3-Nano"
 DEFAULT_QA_MODEL = GEMINI_QA_MODEL
-CLI_QA_MODELS = ("gemini", QWEN_QA_MODEL, KIMI_QA_MODEL)
+CLI_QA_MODELS = ("gemini", QWEN_QA_MODEL, KIMI_QA_MODEL, "cosmos3-nano")
 CLI_QA_MODEL_IDS = {
     "gemini": GEMINI_QA_MODEL,
     QWEN_QA_MODEL: QWEN_QA_MODEL,
     KIMI_QA_MODEL: KIMI_QA_MODEL,
+    "cosmos3-nano": COSMOS_QA_MODEL,
 }
 QA_MODEL_SLUGS = {
     GEMINI_QA_MODEL: "gemini",
     QWEN_QA_MODEL: "qwen",
     KIMI_QA_MODEL: "kimi",
+    COSMOS_QA_MODEL: "cosmos",
 }
 CLI_THINKING_EFFORTS = ("none", "default")
 FAIRY_TALE_GROUP = "classic_fairy_tale_film_conflicts"
@@ -32,6 +35,9 @@ ARK_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3"
 DEFAULT_CASE_WORKERS = 8
 DEFAULT_REQUEST_WORKERS = 24
 DEFAULT_REQUEST_RPM = 20.0
+DEFAULT_COSMOS_BASE_URL = "http://127.0.0.1:8000/v1"
+DEFAULT_COSMOS_WORKERS = 4
+DEFAULT_COSMOS_MAX_TOKENS = 4096
 DEFAULT_SEEDANCE_TOTAL_WORKERS = 12
 
 CASE_SCHEMA_VERSION = "4.0"

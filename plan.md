@@ -7,8 +7,8 @@
 control 视频，并为每个独立语义目标生成一个中性问题。
 
 Luna Pro 负责 case authoring、问题生成、文字 context 生成和答案判定；
-Seedance 负责生成视频；Gemini、Qwen 或 Kimi 负责视频、文字 context 或
-question-only QA。
+Seedance 负责生成视频；Gemini、Qwen、Kimi 或本地 Cosmos3-Nano 负责视频、
+文字 context 或 question-only QA。
 
 ## 数据结构
 
@@ -77,52 +77,90 @@ case JSON 是运行状态的唯一持久化单元。视频状态、任务 ID、d
 新 QA 记录不再包含 `context_sha256` 或 `video_sha256`。旧记录中的这些字段
 继续兼容读取，但不参与去重或统计。
 
-新生成的问题直接使用连续 ID `q001`–`q003`，不包含
-`question_pair_id`、`question_type` 或 implicit/explicit 后缀。删除问题后允许 ID
-出现缺口，其他问题不会重编号。旧 case 的问题格式继续兼容读取，可参与普通 QA
-和整体汇总，但 pipeline 不再生成旧格式，也不再按 implicit/explicit 类型计算分组
-指标。
+## 环境变量
+
+```powershell
+$env:OPENROUTER_API_KEY = "<openrouter-api-key>"
+$env:ARK_API_KEY = "<ark-api-key>"
+$env:DASHSCOPE_API_KEY = "<dashscope-api-key>"
+$env:MOONSHOT_API_KEY = "<moonshot-api-key>"
+```
+
+可选 endpoint 覆盖：
+
+```powershell
+$env:ARK_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3"
+$env:DASHSCOPE_BASE_HTTP_API_URL = "https://dashscope.aliyuncs.com/api/v1"
+$env:MOONSHOT_BASE_URL = "https://api.moonshot.cn/v1"
+$env:COSMOS_BASE_URL = "http://127.0.0.1:8000/v1"
+```
+
+历史 `QWEN_BASE_URL` 仍兼容；`/compatible-mode/v1` 后缀会自动转换为
+`/api/v1`。
 
 ## 模型配置
 
 - Author / Questions / Judge：`openai/gpt-5.6-luna-pro`，通过 OpenRouter。
-- Gemini QA：CLI 名称为 `gemini`，实际模型为
-  `google/gemini-3.1-pro-preview`；CLI effort 为 `default`，实际 reasoning
-  effort 为 `medium`，`temperature=0`。
-- Qwen QA：`qwen3.8-max`，通过 DashScope SDK 上传本地视频；支持 `none` 和
-  `default`，固定 `fps=2`，`temperature=0`。
-- Kimi QA：`kimi-k3`，CLI effort 为 `default`，实际 reasoning effort 为
-  `max`，有效温度为 `1.0`。
+- Gemini QA：`google/gemini-3.1-pro-preview`，`temperature=0`。
+- Qwen QA：`qwen3.8-max`，通过 DashScope SDK 上传本地视频，固定 `fps=2`、
+  `temperature=0`。
+- Kimi QA：`kimi-k3`，有效温度为 `1.0`。
+- Cosmos3-Nano QA：`nvidia/Cosmos3-Nano`，本地 vLLM 服务，固定
+  `temperature=0`、`seed=0`；请求使用 `/v1/models` 返回的模型 ID。
 
 Gemini 和 Kimi 把本地视频编码为 Base64 Data URL。Qwen 使用中国大陆
 DashScope endpoint，并把本地绝对路径转换为 `file:///...` URI 交给 SDK。
 Qwen 本地视频最大 100 MiB；Kimi 请求体最大 100 MB。
+Cosmos 视频使用服务端可读的绝对 `file://` MP4 路径；文字 QA 不发送视频或采样参数。
+服务地址由 `COSMOS_BASE_URL` 配置，默认 `http://127.0.0.1:8000/v1`。
+
+单卡 Cosmos3-Nano 服务在仓库根目录运行：
+
+```bash
+./scripts/start_cosmos_vllm.sh
+```
+
+脚本自动激活 `vllm` 环境，使用 `HF_HOME=/cache/huggingface`，只使用第 0 张
+GPU（TP=1），监听 `127.0.0.1:8000`，默认允许读取仓库的 `videos/`。
+若视频存放在其他目录，运行
+`VIDEO_ROOT=/绝对路径/视频目录 ./scripts/start_cosmos_vllm.sh`；该目录必须覆盖
+case 中的视频路径。脚本等价于在交互式 Bash 中运行以下命令：
+
+```bash
+conda activate vllm
+export HF_HOME=/cache/huggingface
+export LD_LIBRARY_PATH="$CONDA_PREFIX/lib:${LD_LIBRARY_PATH:-}"
+export VLLM_USE_FLASHINFER_SAMPLER=0
+VIDEO_ROOT="$(pwd -P)/videos"
+CUDA_VISIBLE_DEVICES=0 vllm serve nvidia/Cosmos3-Nano \
+  --tensor-parallel-size 1 \
+  --mm-encoder-tp-mode data \
+  --async-scheduling \
+  --allowed-local-media-path "$VIDEO_ROOT" \
+  --media-io-kwargs '{"video": {"video_backend": "opencv", "num_frames": -1, "fps": -1}}' \
+  --max-num-seqs 4 \
+  --host 127.0.0.1 --port 8000
+```
+
+不要使用 `--hf-overrides '{"architectures": ["Cosmos3ReasonerForConditionalGeneration"]}'`：
+当前本机 vLLM 不支持这个架构名。由模型配置和 vLLM 选择其支持的
+`Cosmos3ForConditionalGeneration` 实现；服务就绪后可用
+`curl http://127.0.0.1:8000/v1/models` 查看实际对外模型 ID。
+
+Cosmos 视频的实验采样协议是先保留原始视频帧，再由模型配套的视频处理器
+从头到尾均匀抽取 4 fps，不固定为 8 帧。不能让 vLLM 加载器先按 fps 抽帧后
+由处理器再次采样。每个视频请求显式传入
+`media_io_kwargs={"video":{"video_backend":"opencv","num_frames":-1,"fps":-1}}`
+和 `mm_processor_kwargs={"fps":4,"do_sample_frames":true}`。全帧解码会增加
+CPU 内存占用。
 
 ## 判断与指标
 
-每个 QA user prompt 最后固定追加：
+实验保存完整 `raw_answer` 供核查，但仅根据明确的 `final_answer` 判定，
+不从模型的其他表述中推断主答案。Fairy 视频另设有无作品名前缀两种条件，
+用于比较提示中是否出现作品名对回答的影响。
 
-```text
-Conclude with exactly one final line in this format: Final answer: <your clear, direct answer in one sentence>.
-```
-
-视频问题默认直接发送原始 question。仅当 group 为
-`classic_fairy_tale_film_conflicts`、input 为 `video` 且命令显式传入
-`--with-work-title-prefix` 时，问题才包装为：
-
-```text
-This is a video clip from the work <title>. <question>
-```
-
-其中 `<title>` 取 case `title` 第一个冒号前的作品名。其他 group 禁止使用该参数；
-description 输入不使用该包装，也不保存 `work_title_prefix`。
-
-Pipeline 保留完整 `raw_answer`，但只从最后一个非空行的精确
-`Final answer:` 标记提取 `final_answer`。缺少标记或标记后为空时，仅当前
-question/effort 失败且不保存记录，不进行格式重试；其他 QA 和 Judge 继续运行。
-
-Judge 只读取问题、`final_answer`、输入角色、冲突事实和两类 reference，绝不读取
-或推断 `raw_answer`：
+Judge 根据问题、`final_answer`、输入角色、冲突事实和两类 reference 分类：
 
 - conflict 输入回答 conflict reference：`context_grounded`
 - conflict 输入回答 normal reference：`knowledge_trapped`
@@ -130,13 +168,8 @@ Judge 只读取问题、`final_answer`、输入角色、冲突事实和两类 re
 - 混合、矛盾、含糊、回避、无关或无法可靠归类：
   `ambiguous_or_unjudgeable`
 
-Judge 不再从多项表述中选择所谓 main answer。结构化输出仅包含 `verdict` 和
-`confidence`；持久化 judgment 另保存时间、Judge 模型和请求 ID，不再保存
-`extracted_answer` 或 `evidence`。
-
 Description 输入复用相同 verdict，其中 `context_grounded` 表示回答遵循所提供的
-文字 context。旧 JSON 的 `video_grounded` 在加载和汇总时映射为
-`context_grounded`，原文件不迁移。
+文字 context。
 
 Question-only 输入只发送原始 question 和相同的 `Final answer:` 格式要求，不发送
 视频、description 或作品名前缀。它按 control 角色判定：匹配 normal reference 为
@@ -149,53 +182,44 @@ grounded 与 trapped 时，video-level verdict 为 ambiguous。
 `knowledge_trapped / (context_grounded + knowledge_trapped + ambiguous_or_unjudgeable)`；
 没有 conflict 样本时为 `null`。
 
-## 执行流程
+Pipeline 的运行命令、参数和结果文件路径见 `pipeline.md`。
 
-统一入口为 `scripts/pipeline.py`。视频实验显式运行：
+## Math 数据一致性与审核记录（2026-09-24）
 
-```bash
-python scripts/pipeline.py author --group <group>
-python scripts/pipeline.py questions --group <group>
-python scripts/pipeline.py generate --group <group>
-python scripts/pipeline.py qa-judge --group <group> \
-  --input video --qa-model qwen3.8-max --thinking-effort all
-python scripts/pipeline.py summarize --group <group> \
-  --input video --qa-model qwen3.8-max --thinking-effort all
-```
+math 的 `qa-judge` 和 `summarize` 默认只选择 qualified 数据；
+显式 `--video-scope all` 才扩大范围。重新生成后的文件必须重新审核，
+不会仅因 qualified 路径或旧文件还存在而自动恢复资格。
 
-Fairy video 默认运行 `no_prefix` 条件；对照的 `with_prefix` 条件在
-`qa-judge` 和 `summarize` 中同时追加 `--with-work-title-prefix`。两种结果可在同一
-case JSON 中并存。
+QA 及判断结果会绑定实际题目、视频/description 和参考答案；
+过期结果不会作为完成项或纳入统计。历史 math 结果没有新指纹时需要重跑，
+原结果仍保留在 JSON 中。修改 description 的观察文本同样会使旧结果过期。
+
+离线检查（不调用模型）：
 
 ```bash
-# no_prefix
-python scripts/pipeline.py qa-judge \
-  --group classic_fairy_tale_film_conflicts \
-  --input video --qa-model qwen3.8-max --thinking-effort all
-python scripts/pipeline.py summarize \
-  --group classic_fairy_tale_film_conflicts \
-  --input video --qa-model qwen3.8-max --thinking-effort all
-
-# with_prefix
-python scripts/pipeline.py qa-judge \
-  --group classic_fairy_tale_film_conflicts \
-  --input video --qa-model qwen3.8-max --thinking-effort all \
-  --with-work-title-prefix
-python scripts/pipeline.py summarize \
-  --group classic_fairy_tale_film_conflicts \
-  --input video --qa-model qwen3.8-max --thinking-effort all \
-  --with-work-title-prefix
+python scripts/pipeline.py audit --group mathematics_algorithm_conflicts \
+  --output artifacts/math_pipeline_audit.json
 ```
 
-文字描述实验：
+加 `--strict` 会在缺少审核回执等警告出现时也返回非零状态。
+该检查验证结构、关联和证据新鲜度，不代替视频内容审核或问题语义审核。
+
+对已有题目只审不改（会调用 OpenRouter/Luna）：
 
 ```bash
-python scripts/pipeline.py description --group <group>
-python scripts/pipeline.py qa-judge --group <group> \
-  --input description --qa-model qwen3.8-max --thinking-effort all
-python scripts/pipeline.py summarize --group <group> \
-  --input description --qa-model qwen3.8-max --thinking-effort all
+python scripts/pipeline.py questions --group mathematics_algorithm_conflicts \
+  --case-id queue_removes_newest_item_first --video-id v008 --audit-only
 ```
+
+审核结果保存到对应的 `question_audit`，包括模型、时间、请求 ID、
+逐项检查和上下文指纹；不能把“questions 非空”等同于“独立审题已通过”。
+`--audit-only` 不与 `--force` 或 `--repair-variant-context` 混用。
+
+已入库变体的 `dataset/variant_cases` 文件是历史来源快照，
+其 `canonical_case_path` 指向正式数据。应在正式 case 的 `variant_context`
+上操作，不能通过历史副本重新生成或删除正式视频。
+`author --force` 也不能覆盖已有 qualified 视频的 math case；
+新增数字变体请使用独立 `--output-dir`，审核后再入库。
 
 Question-only control 实验不依赖视频文件、状态、description 或人工审核：
 
@@ -257,13 +281,10 @@ question-only QA/Judge 历史；删除或重新生成视频不影响 question-on
 `--force-qa` 删除当前筛选范围内的未分类旧结果并按当前 prefix 条件重跑；另一种
 已明确标记的 prefix 结果和全部 description 结果不会被清除。
 
-视频输入预检会检查本地 `local_path`。本次选中的视频如果文件存在但 `status`
-不是 `ready`，预检会先把状态修正为 `ready` 并写回 case JSON；非 `ready` 且文件
-不存在的视频继续跳过。已经标记为 `ready` 但本地文件不存在时仍视为数据错误，
-整个 `qa-judge` 在调用模型前失败。
-
-视频文件不会为去重而计算 SHA-256。通过 pipeline 重新生成视频、description
-或 questions 时会清除相应 QA；手工替换同路径视频后必须使用 `--force-qa`。
+视频输入预检会检查选中视频的状态和本地 `local_path`。未标记为 `ready` 的视频
+不会因文件存在而自动升级；已标记为 `ready` 但文件不存在时，在模型请求前报错。
+视频 QA 的输入指纹包含文件 SHA-256；手工替换同路径视频会使旧 QA 过期。
+通过 pipeline 重新生成视频、description 或 questions 时会清除相应 QA。
 
 Description 去重键保持不变；除上述 video prefix 条件外，不为最终回答
 协议增加版本。旧记录允许加载和被
@@ -281,7 +302,7 @@ Description 去重键保持不变；除上述 video prefix 条件外，不为最
 `summarize` 为每个实际 effort 生成：
 
 ```text
-results/<group>/<qwen|kimi|gemini>_<video|description>_<none|default>_summary.json
+results/<group>/<qwen|kimi|gemini|cosmos>_<video|description>_<none|default>_summary.json
 ```
 
 Question-only 产物为：
@@ -306,7 +327,7 @@ results/classic_fairy_tale_film_conflicts/<model>_video_with_prefix_<effort>_sum
 同一模型和 input 的不同 effort 合并到：
 
 ```text
-results/<group>/<qwen|kimi|gemini>_<video|description>_report.md
+results/<group>/<qwen|kimi|gemini|cosmos>_<video|description>_report.md
 ```
 
 Fairy video report 同样分别使用 `_video_no_prefix_report.md` 和
@@ -320,6 +341,7 @@ Report 同时展示 QA 的完整 `raw_answer`、Judge 实际使用的 `final_ans
 ```text
 scripts/
 ├── pipeline.py
+├── start_cosmos_vllm.sh
 └── vconflict_pipeline/
     ├── cli.py
     ├── settings.py
@@ -331,5 +353,11 @@ scripts/
     ├── deletion.py
     ├── qa.py
     ├── evaluation.py
+    ├── evidence.py
+    ├── integrity.py
+    ├── audit.py
     └── reporting.py
 ```
+
+历史 control 的 `pending` 审核状态保留为审计警告，不自动视为 `verified`。
+本次详细审查和备份见 `artifacts/math_pipeline_audit_20260924/README.md`。
