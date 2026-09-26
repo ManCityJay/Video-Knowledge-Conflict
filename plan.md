@@ -1,5 +1,13 @@
 # Video Knowledge Conflict 实验框架
 
+2026-09-26 更新：video QA 现在默认逐 question 执行 question-only → 匹配 control
+video 两层 baseline，均答对后才运行该 question 的 conflict video QA。按模型、
+thinking effort、题目作用域和 video prefix 隔离，不按 case 或 video 整体筛掉。
+私有数学变体使用自己的题目和 `matched_control_path`。
+已有 QA 可用 `qa-judge --input video --baselines-only` 补齐 baseline，随后
+`summarize --baseline-filter passed` 生成独立的筛选报告，原始数据和全量报告保留。
+完整命令、来源指纹和 force 规则见 `pipeline.md` 的「Question 级双 baseline 筛选」。
+
 ## 目标
 
 实验用于测量视频问答模型在“画面事实与经典知识冲突”时，是否忽略当前输入

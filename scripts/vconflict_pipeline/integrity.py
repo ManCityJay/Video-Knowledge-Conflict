@@ -17,6 +17,14 @@ def digest(value: Any) -> str:
                                      separators=(",", ":")).encode()).hexdigest()
 
 
+def question_content(question: dict | None) -> dict | None:
+    """Runtime answers must never change the identity of a question/reference."""
+    if question is None:
+        return None
+    return {key: value for key, value in question.items()
+            if key not in {"question_only_results", "baseline_results"}}
+
+
 def video_selected(video: dict, input_mode: str, scope: str | None = None) -> bool:
     parts = Path(video["local_path"]).parts
     # Existing other groups retain their default scope. Math experiments use the
@@ -87,7 +95,7 @@ def qa_is_current(case: dict, video: dict, result: dict) -> bool:
 def judgment_fingerprint(case: dict, video: dict, result: dict) -> str:
     context = video_case_context(case, video)
     return digest({"version": 1, "role": video["role"],
-                   "question": current_question(case, video, result),
+                   "question": question_content(current_question(case, video, result)),
                    "conflict_spec": context["conflict_spec"],
                    "final_answer": result.get("final_answer"),
                    "input_fingerprint": result.get("input_fingerprint")})
@@ -104,7 +112,8 @@ def judgment_is_current(case: dict, video: dict, result: dict) -> bool:
 
 
 def question_scope_fingerprint(owner: dict, context: dict) -> str:
-    return digest({"questions": owner["questions"], "case_context": context})
+    return digest({"questions": [question_content(q) for q in owner["questions"]],
+                   "case_context": context})
 
 
 def require_writable_case(case: dict, case_path: Path) -> None:

@@ -179,7 +179,8 @@ python scripts/pipeline.py qa-judge \
   --thinking-effort all
 ```
 
-上述命令运行 Fairy video 的默认 `no_prefix` 条件。只有 Fairy video 可以选择加入
+上述命令会先执行下面的逐 question 双 baseline 筛选，再运行通过筛选的 conflict
+视频 QA。运行 Fairy video 的默认 `no_prefix` 条件。只有 Fairy video 可以选择加入
 作品名前缀；对照条件显式执行：
 
 ```bash
@@ -361,6 +362,80 @@ knowledge_trapped / (context_grounded + knowledge_trapped + ambiguous_or_unjudge
 ```
 
 没有 conflict 样本时 rate 为 `null`。Control 指标的计算方式不变。
+
+## Question 级双 baseline 筛选
+
+从 2026-09-26 起，`qa-judge --input video` 默认按如下顺序执行，不能绕过：
+
+1. 同一 question、QA 模型、thinking effort 的 question-only QA + Judge。
+2. 第一层为 `context_grounded` 后，执行该 question 对应的 control 视频 QA + Judge。
+3. 两层都为 `context_grounded`，才允许该 question 的 conflict 视频 QA。
+
+筛选单位是 `case_id + question_scope + question_id + model + thinking_effort`，
+control 视频还匹配作品名前缀条件。共享 question 的 scope 为 `case`；私有
+`variant_context.questions` 的 scope 为所属 `video_id`，即使 ID 相同也不能互用。
+一个 question 未通过不会排除同 case / 同 video 的其他 question。
+Control 视频是第二层 baseline，只要求第一层通过，不要求它先通过自身。
+Description QA 的执行流程保持独立；其历史统计也可以选择下述 baseline 筛选。
+
+共享题目的两层回答、判分、阶段和输入指纹分别保存在现有 `question_only_results` /
+control `qa_results`；私有变体保存在该题目上的 `baseline_results`。每个回答只有一份
+权威记录，避免重新判分后存在互相矛盾的副本。
+指纹绑定题目内容、参考答案、事实和对应 control 文件 SHA-256；参考答案或视频变化
+后旧结果不可作为通过依据。旧 control QA 仅在题目、配置和来源检查均匹配时复用；
+旧 question-only 记录没有 baseline 来源指纹时会重新执行。错误回答是筛选失败；
+缺失、过期、未判分和 control 不可用分别记录，不会被当作通过。请求失败保留已完成
+阶段，下次继续；已判错的结果不会自动反复尝试到答对。
+
+私有变体使用其显式 `variant_context.matched_control_path`，不会回退到共享 control。
+缺少该映射或对应视频不可用时，该题不放行，并输出原因。该路径不会自动生成视频。
+原有独立 `--input question_only` 命令仍仅支持共享问题；下面的新 baseline 入口支持
+私有变体，不受该旧入口限制。
+
+### 给已有 QA 补齐两层 baseline
+
+只补 baseline，不重新运行 conflict QA，也不删除历史回答：
+
+```bash
+python scripts/pipeline.py qa-judge \
+  --group classic_fairy_tale_film_conflicts \
+  --input video --qa-model qwen3.8-max --thinking-effort all \
+  --baselines-only
+```
+
+可保留原实验的 `--case-id`、`--video-id`、`--question-id`、`--video-scope` 和
+`--with-work-title-prefix` 选择。选择某个 conflict 视频仍会自动运行它对应的 control
+baseline，不要求把 control 加入 `--video-id`。所有 baseline 阶段按题逐项保存。
+
+普通 video 运行中的 `--force-qa` / `--force-judge` 只处理通过筛选的 conflict 结果，
+不会清理 baseline 或未通过题目的历史结果。要主动重跑 baseline，显式组合
+`--baselines-only --force-qa`；仅重新判分使用 `--baselines-only --force-judge`。
+
+### 筛选历史统计
+
+```bash
+python scripts/pipeline.py summarize \
+  --group classic_fairy_tale_film_conflicts \
+  --input video --qa-model qwen3.8-max --thinking-effort all \
+  --baseline-filter passed
+```
+
+该命令只读 case 数据，不发模型请求。JSON 指标与 Markdown 明细都仅保留两层通过
+的 question；answer-level 指标先逐题过滤，video-level 标签由保留的问题重新聚合，
+没有剩余问题的视频不计入分母。输出文件名增加 `_baseline_passed`，不会覆盖原始
+报告。JSON 的 `baseline_gate` 包含题目总数、通过数、排除数、原因及逐题配置状态；
+没有通过题目时分母为 0、rate 为 `null`。Control 统计同样按 question 过滤；需要完整
+baseline 正确率时查看默认全量报告。
+
+`--baseline-filter all`（默认）保留原有全量统计口径。Description 筛选使用对应的
+无作品名前缀 video baseline。不同模型 / effort 的通过题目集合可以不同，不能把
+筛选后指标当作相同样本集上的直接比较。
+
+离线回归测试（不调用模型，不写真实 dataset / results）：
+
+```bash
+python -B -m unittest discover -s tests -v
+```
 
 ## Summary 与 Report
 

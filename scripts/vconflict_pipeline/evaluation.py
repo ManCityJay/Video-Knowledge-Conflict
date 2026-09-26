@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from .integrity import (video_selected, description_is_current, qa_is_current, judgment_fingerprint, judgment_is_current, require_writable_case)
+from .baselines import qa_allowed, prepare_baselines
 
 import argparse
 import json
@@ -221,6 +222,7 @@ def _question_result_selected(
 def _preflight_cases(
     args: argparse.Namespace,
     efforts: tuple[str | None, ...],
+    *, enforce_gate: bool = True,
 ) -> tuple[list[tuple[Path, dict[str, Any]]], int]:
     dataset_dir = grouped_dir(args.dataset_dir, args.group)
     selected_questions = set(args.question_id or [])
@@ -246,9 +248,20 @@ def _preflight_cases(
         )
         for video in videos:
             questions = _selected_questions(video_case_context(case, video), selected_questions)
-            target_total += len(questions) * len(efforts)
+            target_total += sum(
+                not enforce_gate or qa_allowed(case, video, question, args.qa_model, effort,
+                    work_title_prefix_condition(args.group, args.input, args.with_work_title_prefix), args.input)
+                for question in questions for effort in efforts)
         loaded.append((path, case))
     return loaded, target_total
+
+
+def _gate_result(case, video, result, args):
+    question = next((q for q in video_case_context(case, video)['questions']
+                     if q['question_id'] == result.get('question_id')), None)
+    return question is not None and qa_allowed(
+        case, video, question, args.qa_model, qa_result_thinking_effort(result),
+        work_title_prefix_condition(args.group, args.input, args.with_work_title_prefix), args.input)
 
 
 def _require_selected_final_answers(
@@ -277,6 +290,8 @@ def _require_selected_final_answers(
             continue
         for video in case["videos"]:
             for result in video["qa_results"]:
+                if not _gate_result(case, video, result, args):
+                    continue
                 if not qa_is_current(case, video, result):
                     continue
                 if not _result_selected(
@@ -308,6 +323,8 @@ def _require_selected_prefix_metadata(
     for path, case in loaded:
         for video in case["videos"]:
             for result in video["qa_results"]:
+                if not _gate_result(case, video, result, args):
+                    continue
                 if not _legacy_video_result_selected(
                     video, result, args=args, efforts=efforts
                 ):
@@ -362,9 +379,16 @@ def _preclear_force(
                 changed.append((path, case))
             continue
         for video in case["videos"]:
+            if args.input == "video" and video["role"] == "control":
+                # Baselines are forced only by --baselines-only; do not invalidate
+                # the admission decision between baseline checks and conflict QA.
+                continue
             if args.force_qa:
                 kept: list[dict[str, Any]] = []
                 for result in video["qa_results"]:
+                    if not _gate_result(case, video, result, args):
+                        kept.append(result)
+                        continue
                     if _result_selected(
                         video, result, args=args, efforts=efforts
                     ) or _legacy_video_result_selected(
@@ -377,6 +401,8 @@ def _preclear_force(
                 video["qa_results"] = kept
             elif args.force_judge:
                 for result in video["qa_results"]:
+                    if not _gate_result(case, video, result, args):
+                        continue
                     if not _result_selected(
                         video, result, args=args, efforts=efforts
                     ) or result.get("judgment") is None:
@@ -497,6 +523,8 @@ def command_judge(args: argparse.Namespace) -> int:
 
         for video in case["videos"]:
             for qa_result in video["qa_results"]:
+                if not _gate_result(case, video, qa_result, args):
+                    continue
                 if not _result_selected(
                     video, qa_result, args=args, efforts=efforts
                 ) or not qa_is_current(case, video, qa_result) or judgment_is_current(case, video, qa_result):
@@ -609,6 +637,8 @@ def _completion_counts(
             continue
         for video in case["videos"]:
             for result in video["qa_results"]:
+                if not _gate_result(case, video, result, args):
+                    continue
                 if not _result_selected(
                     video, result, args=args, efforts=effort_set
                 ):
@@ -683,6 +713,8 @@ def _qa_completed_from_loaded(
                 in existing
                 for effort in efforts
                 for question in questions
+                if qa_allowed(case, video, question, args.qa_model, effort,
+                              prefix_condition, args.input)
             )
     return completed
 
@@ -691,10 +723,19 @@ def command_qa_judge(args: argparse.Namespace) -> int:
     # All dependency, credential, selection, file, and context checks happen
     # before force mode is allowed to clear persisted results.
     efforts = expand_thinking_efforts(args.thinking_effort, args.qa_model)
-    loaded, qa_total = _preflight_cases(args, efforts)
+    loaded, qa_total = _preflight_cases(args, efforts, enforce_gate=False)
     if qa_total == 0:
         print("No eligible question/video targets in the selected scope.")
         return 0
+    baseline_status = 0
+    if args.input == "video":
+        baseline_status = prepare_baselines(args, loaded, efforts)
+        if getattr(args, "baselines_only", False):
+            return baseline_status
+        loaded, qa_total = _preflight_cases(args, efforts)
+        if qa_total == 0:
+            print("No questions passed the required baseline gates in the selected scope.")
+            return baseline_status
     if not args.force_qa:
         _require_selected_prefix_metadata(
             loaded,
@@ -725,4 +766,4 @@ def command_qa_judge(args: argparse.Namespace) -> int:
     print(f"QA: {qa_done}/{qa_total}")
     print(f"Judge: {judge_done}/{judge_total}")
     incomplete = qa_done != qa_total or judge_done != judge_total
-    return 1 if qa_status or judge_status or incomplete else 0
+    return 1 if baseline_status or qa_status or judge_status or incomplete else 0
