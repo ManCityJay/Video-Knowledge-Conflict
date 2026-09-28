@@ -53,7 +53,7 @@ def description_is_current(video: dict) -> bool:
 
 
 def qa_fingerprint(case: dict, video: dict, question: dict, input_mode: str,
-                   prefix: bool | None = None) -> str:
+                   prefix: bool | None = None, *, based: bool = False) -> str:
     context = video_case_context(case, video)
     if input_mode == "video":
         observed_summary(video)
@@ -62,9 +62,12 @@ def qa_fingerprint(case: dict, video: dict, question: dict, input_mode: str,
         if not description_is_current(video):
             raise PipelineError(f"Context is stale for {case['case_id']}/{video['video_id']}. Run description again.")
         content = video["description"]["context_en"]
-    return digest({"version": 1, "input": input_mode, "content": content,
-                   "question": question["text_en"], "question_id": question["question_id"],
-                   "title": context["title"].split(":", 1)[0].strip() if prefix else None})
+    payload = {"version": 1, "input": input_mode, "content": content,
+               "question": question["text_en"], "question_id": question["question_id"],
+               "title": context["title"].split(":", 1)[0].strip() if prefix else None}
+    if based:
+        payload["based"] = True
+    return digest(payload)
 
 
 def current_question(case: dict, video: dict, result: dict) -> dict | None:
@@ -85,7 +88,8 @@ def qa_is_current(case: dict, video: dict, result: dict) -> bool:
             return False
         if result.get("input_fingerprint"):
             return result["input_fingerprint"] == qa_fingerprint(
-                case, video, question, mode, result.get("work_title_prefix"))
+                case, video, question, mode, result.get("work_title_prefix"),
+                based=result.get("based", False))
         # Never certify legacy math results lacking a binding to their inputs.
         return MATH_GROUP not in Path(video["local_path"]).parts
     except (PipelineError, OSError):

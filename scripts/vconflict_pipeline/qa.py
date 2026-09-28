@@ -381,18 +381,20 @@ def _video_question_prompt(
     *,
     work_title: str | None,
     work_title_prefix: bool,
+    based: bool = False,
 ) -> str:
-    if not work_title_prefix:
-        return _question_prompt(question)
-    if not work_title:
-        raise PipelineError("A work title is required when its prefix is enabled.")
-    return _question_prompt(
-        f"This is a video clip from the work {work_title}. {question}"
-    )
+    if work_title_prefix:
+        if not work_title:
+            raise PipelineError("A work title is required when its prefix is enabled.")
+        question = f"This is a video clip from the work {work_title}. {question}"
+    if based:
+        question = f"Answer the question based on the video.\n\n{question}"
+    return _question_prompt(question)
 
 
-def _description_prompt(context: str, question: str) -> str:
-    return f"{context}\n\nQuestion:\n{_question_prompt(question)}"
+def _description_prompt(context: str, question: str, *, based: bool = False) -> str:
+    instruction = "\n\nAnswer the question based on the context above." if based else ""
+    return f"{context}{instruction}\n\nQuestion:\n{_question_prompt(question)}"
 
 
 def extract_final_answer(raw_answer: str) -> str:
@@ -609,6 +611,10 @@ def qa_result_work_title_prefix(result: dict[str, Any]) -> bool | None:
     return value if isinstance(value, bool) else None
 
 
+def qa_result_based(result: dict[str, Any]) -> bool:
+    return result.get("based", False) is True
+
+
 def work_title_prefix_condition(
     group: Any,
     input_mode: str,
@@ -626,9 +632,12 @@ def qa_run_key(
     model: Any,
     thinking_effort: Any,
     *,
+    based: bool = False,
     work_title_prefix: bool | None = None,
 ) -> tuple[Any, ...]:
     key = (input_mode, question_id, model, thinking_effort)
+    if input_mode != "question_only":
+        key = (*key, based)
     return (*key, work_title_prefix) if work_title_prefix is not None else key
 
 
@@ -644,6 +653,8 @@ def qa_result_key(
         result.get("model"),
         qa_result_thinking_effort(result),
     )
+    if input_mode != "question_only":
+        key = (*key, qa_result_based(result))
     if input_mode == "video" and include_work_title_prefix:
         return (*key, qa_result_work_title_prefix(result))
     return key
@@ -664,6 +675,7 @@ def run_qa_batch(
     request_limiter: RequestLimiter,
     cosmos_served_model_id: str | None = None,
     cosmos_max_tokens: int = DEFAULT_COSMOS_MAX_TOKENS,
+    based: bool = False,
 ) -> tuple[list[dict[str, Any]], list[tuple[str, str | None, str]]]:
     backend = get_backend(qa_model)
     if input_mode == "video":
@@ -684,6 +696,8 @@ def run_qa_batch(
             raise PipelineError("Description input requires context text.")
         video_input = None
     elif input_mode == "question_only":
+        if based:
+            raise PipelineError("Question-only input does not support --based.")
         if work_title_prefix is not None:
             raise PipelineError(
                 "Question-only input does not support a work-title prefix."
@@ -699,9 +713,10 @@ def run_qa_batch(
                 question["text_en"],
                 work_title=work_title,
                 work_title_prefix=work_title_prefix is True,
+                based=based,
             )
         elif input_mode == "description":
-            prompt_text = _description_prompt(context_text, question["text_en"])
+            prompt_text = _description_prompt(context_text, question["text_en"], based=based)
         else:
             prompt_text = _question_prompt(question["text_en"])
         try:
@@ -784,6 +799,8 @@ def run_qa_batch(
             result["context_text_en"] = context_text
         elif work_title_prefix is not None:
             result["work_title_prefix"] = work_title_prefix
+        if input_mode != "question_only":
+            result["based"] = based
         if backend.effective_reasoning_effort is not None:
             result["effective_reasoning_effort"] = backend.effective_reasoning_effort
         if isinstance(response.get("usage"), dict):
@@ -870,6 +887,7 @@ def command_qa(args: Any, *, cosmos_served_model_id: str | None = None) -> int:
         args.input,
         args.with_work_title_prefix,
     )
+    based_condition = bool(getattr(args, "based", False))
     dataset_dir = grouped_dir(args.dataset_dir, args.group)
     case_paths = iter_case_paths(dataset_dir, args.case_id)
     completed = 0
@@ -1057,6 +1075,7 @@ def command_qa(args: Any, *, cosmos_served_model_id: str | None = None) -> int:
                     question["question_id"],
                     args.qa_model,
                     effort,
+                    based=based_condition,
                     work_title_prefix=prefix_condition,
                 )
                 not in existing
@@ -1079,7 +1098,8 @@ def command_qa(args: Any, *, cosmos_served_model_id: str | None = None) -> int:
         ) -> tuple[list[dict[str, Any]], list[tuple[str, str | None, str]]]:
             context = video_case_context(case, job["video"])
             fingerprints = {q["question_id"]: qa_fingerprint(
-                case, job["video"], q, args.input, prefix_condition) for q, _ in job["pending"]}
+                case, job["video"], q, args.input, prefix_condition,
+                based=based_condition) for q, _ in job["pending"]}
             results, failures = run_qa_batch(
                 input_mode=args.input,
                 video_path=job["path"],
@@ -1098,6 +1118,7 @@ def command_qa(args: Any, *, cosmos_served_model_id: str | None = None) -> int:
                 request_limiter=request_limiter,
                 cosmos_served_model_id=cosmos_served_model_id,
                 cosmos_max_tokens=args.cosmos_max_tokens,
+                based=based_condition,
             )
             # Bind to inputs from before the provider request. If files change
             # during the request, the returned result will immediately be stale.

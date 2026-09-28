@@ -32,6 +32,7 @@ from .qa import (
     command_qa,
     expand_thinking_efforts,
     preflight_qa_backend,
+    qa_result_based,
     qa_result_key,
     qa_result_thinking_effort,
     qa_result_work_title_prefix,
@@ -173,6 +174,8 @@ def _result_selected(
 ) -> bool:
     if not _result_base_selected(video, result, args=args, efforts=efforts):
         return False
+    if qa_result_based(result) is not bool(getattr(args, "based", False)):
+        return False
     prefix_condition = work_title_prefix_condition(
         args.group,
         args.input,
@@ -199,6 +202,7 @@ def _legacy_video_result_selected(
     return (
         prefix_condition is not None
         and _result_base_selected(video, result, args=args, efforts=efforts)
+        and qa_result_based(result) is bool(getattr(args, "based", False))
         and qa_result_work_title_prefix(result) is None
     )
 
@@ -708,6 +712,7 @@ def _qa_completed_from_loaded(
                     question["question_id"],
                     args.qa_model,
                     effort,
+                    based=bool(getattr(args, "based", False)),
                     work_title_prefix=prefix_condition,
                 )
                 in existing

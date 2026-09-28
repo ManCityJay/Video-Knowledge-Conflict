@@ -26,6 +26,7 @@ from .core import (
 from .qa import (
     expand_thinking_efforts,
     get_backend,
+    qa_result_based,
     qa_result_thinking_effort,
     qa_result_work_title_prefix,
     work_title_prefix_condition,
@@ -116,11 +117,13 @@ def _result_matches(
     input_mode: str,
     efforts: set[str | None],
     work_title_prefix: bool | None,
+    based: bool = False,
 ) -> bool:
     matches = (
         result.get("model") == qa_model
         and qa_result_input_mode(result) == input_mode
         and qa_result_thinking_effort(result) in efforts
+        and (input_mode == "question_only" or qa_result_based(result) is based)
     )
     if not matches or input_mode != "video" or work_title_prefix is None:
         return matches
@@ -146,6 +149,7 @@ def build_summary(
     input_mode: str,
     effort: str | None,
     work_title_prefix: bool | None,
+    based: bool = False,
     video_scope: str | None = None,
     baseline_filter: str = "all",
     baseline_work_title_prefix: bool | None = None,
@@ -236,6 +240,7 @@ def build_summary(
                     input_mode=input_mode,
                     efforts={effort},
                     work_title_prefix=work_title_prefix,
+                    based=based,
                 ) or not judgment_is_current(case, video, result):
                     continue
                 key = (case["case_id"], video["video_id"], result["question_id"])
@@ -293,6 +298,7 @@ def build_summary(
     }
     if work_title_prefix is not None:
         summary["work_title_prefix"] = work_title_prefix
+    summary["based"] = based
     summary['baseline_filter'] = baseline_filter
     if baseline_filter == 'passed':
         reasons = Counter(g['reason'] for g in gates.values())
@@ -346,6 +352,7 @@ def build_markdown(
     input_mode: str,
     efforts: set[str | None],
     work_title_prefix: bool | None,
+    based: bool = False,
     video_scope: str | None = None,
     baseline_filter: str = "all",
     baseline_work_title_prefix: bool | None = None,
@@ -369,11 +376,14 @@ def build_markdown(
     if work_title_prefix is not None:
         prefix_name = "with_prefix" if work_title_prefix else "no_prefix"
         lines.extend([f"**Work-title prefix:** {prefix_name}", ""])
+    if input_mode != "question_only":
+        lines.extend([f"**Based prompt:** {'enabled' if based else 'disabled'}", ""])
     if baseline_filter == 'passed':
         lines.extend(['**Baseline filter:** both baselines must pass for each question/model/effort.', ''])
         for effort in sorted(efforts, key=str):
             stats = build_summary(case_paths, qa_model=qa_model, input_mode=input_mode,
                                   effort=effort, work_title_prefix=work_title_prefix,
+                                  based=based,
                                   video_scope=video_scope, baseline_filter='passed',
                                   baseline_work_title_prefix=baseline_work_title_prefix)['baseline_gate']
             lines.extend([f"- {_effort_name(effort)}: {stats['passed_questions']}/{stats['total_questions']} questions passed; "
@@ -476,6 +486,7 @@ def build_markdown(
                         input_mode=input_mode,
                         efforts=efforts,
                         work_title_prefix=work_title_prefix,
+                        based=based,
                     )
                 )
                 if (input_mode == "description" or baseline_filter == 'passed') and not matching:
@@ -534,6 +545,7 @@ def _discover_efforts(
     qa_model: str,
     input_mode: str,
     work_title_prefix: bool | None,
+    based: bool = False,
 ) -> tuple[str | None, ...]:
     backend = get_backend(qa_model)
     observed: set[str | None] = set()
@@ -567,6 +579,7 @@ def _discover_efforts(
                         input_mode=input_mode,
                         efforts=set(backend.thinking_efforts),
                         work_title_prefix=work_title_prefix,
+                        based=based,
                     )
                     and isinstance(result.get("judgment"), dict)
                     and effort in backend.thinking_efforts
@@ -582,6 +595,7 @@ def _require_video_prefix_metadata(
     case_paths: list[Path],
     *,
     qa_model: str,
+    based: bool,
 ) -> None:
     for path in case_paths:
         case = load_case(path)
@@ -590,6 +604,7 @@ def _require_video_prefix_metadata(
                 if (
                     result.get("model") == qa_model
                     and qa_result_input_mode(result) == "video"
+                    and qa_result_based(result) is based
                     and qa_result_work_title_prefix(result) is None
                 ):
                     raise PipelineError(
@@ -609,6 +624,7 @@ def _fairy_video_prefix_name(args: argparse.Namespace) -> str | None:
 def command_summarize(args: argparse.Namespace) -> int:
     dataset_dir = grouped_dir(args.dataset_dir, args.group)
     paths = iter_case_paths(dataset_dir, args.case_id)
+    based_condition = bool(getattr(args, "based", False))
     if args.input == "question_only":
         for path in paths:
             require_question_only_compatible(load_case(path))
@@ -618,7 +634,7 @@ def command_summarize(args: argparse.Namespace) -> int:
         args.with_work_title_prefix,
     )
     if work_title_prefix is not None:
-        _require_video_prefix_metadata(paths, qa_model=args.qa_model)
+        _require_video_prefix_metadata(paths, qa_model=args.qa_model, based=based_condition)
     requested = list(args.thinking_effort or [])
     efforts = (
         expand_thinking_efforts(requested, args.qa_model)
@@ -628,6 +644,7 @@ def command_summarize(args: argparse.Namespace) -> int:
             qa_model=args.qa_model,
             input_mode=args.input,
             work_title_prefix=work_title_prefix,
+            based=based_condition,
         )
     )
     model_slug = QA_MODEL_SLUGS[args.qa_model]
@@ -636,6 +653,8 @@ def command_summarize(args: argparse.Namespace) -> int:
     baseline_filter = getattr(args, 'baseline_filter', 'all')
     for effort in efforts:
         output_parts = [model_slug, args.input]
+        if based_condition:
+            output_parts.append('based')
         if prefix_name is not None:
             output_parts.append(prefix_name)
         if baseline_filter == 'passed':
@@ -650,6 +669,7 @@ def command_summarize(args: argparse.Namespace) -> int:
                 input_mode=args.input,
                 effort=effort,
                 work_title_prefix=work_title_prefix,
+                based=based_condition,
                 video_scope=getattr(args, "video_scope", None),
                 baseline_filter=baseline_filter,
                 baseline_work_title_prefix=work_title_prefix_condition(args.group, 'video', args.with_work_title_prefix),
@@ -658,6 +678,8 @@ def command_summarize(args: argparse.Namespace) -> int:
         print(f"Wrote summary: {output}")
 
     report_parts = [model_slug, args.input]
+    if based_condition:
+        report_parts.append('based')
     if prefix_name is not None:
         report_parts.append(prefix_name)
     if baseline_filter == 'passed':
@@ -671,6 +693,7 @@ def command_summarize(args: argparse.Namespace) -> int:
             input_mode=args.input,
             efforts=set(efforts),
             work_title_prefix=work_title_prefix,
+            based=based_condition,
             video_scope=getattr(args, "video_scope", None),
             baseline_filter=baseline_filter,
             baseline_work_title_prefix=work_title_prefix_condition(args.group, 'video', args.with_work_title_prefix),

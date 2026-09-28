@@ -6,6 +6,8 @@ thinking effort、题目作用域和 video prefix 隔离，不按 case 或 video
 私有数学变体使用自己的题目和 `matched_control_path`。
 已有 QA 可用 `qa-judge --input video --baselines-only` 补齐 baseline，随后
 `summarize --baseline-filter passed` 生成独立的筛选报告，原始数据和全量报告保留。
+`--based` 仅改变目标 video/description QA；两层 baseline 始终使用未加该提示的回答，
+`--baselines-only` 与 `--based` 不可组合。
 完整命令、来源指纹和 force 规则见 `pipeline.md` 的「Question 级双 baseline 筛选」。
 
 ## 目标
@@ -80,7 +82,7 @@ case JSON 是运行状态的唯一持久化单元。视频状态、任务 ID、d
 写入使用临时文件替换。
 `description` 是仅用于 conflict 视频的可选扩展。
 `question_only_results` 是 case 顶层 question 的可选扩展；结果不依附任何视频，
-不包含 `context_text_en` 或 `work_title_prefix`。现有 case 无需迁移。
+不包含 `context_text_en`、`work_title_prefix` 或 `based`。现有 case 无需迁移。
 
 新 QA 记录不再包含 `context_sha256` 或 `video_sha256`。旧记录中的这些字段
 继续兼容读取，但不参与去重或统计。
@@ -240,7 +242,7 @@ python scripts/pipeline.py summarize --group <group> \
 
 首版只支持 `case.questions`，不支持含 `variant_context` 私有问题 scope 的 case；
 选中这类 case 会在任何模型请求和 force 清理前报错。`question_only` 禁止与
-`--video-id` 或 `--with-work-title-prefix` 组合，Math group 暂不纳入该实验。
+`--video-id`、`--with-work-title-prefix` 或 `--based` 组合，Math group 暂不纳入该实验。
 
 数据清理使用 `delete`。删除视频或问题时一次命令只操作一个 case，可同时指定
 多个 `--video-id` 和 `--question-id`；`--all` 可同时删除同一 group 下多个完整
@@ -252,10 +254,11 @@ video/description 配对 `compare`。Source cases 必须预先按每个 case 一
 文件准备，各阶段显式执行。文字 context stage 名称为 `description`。
 
 `qa-judge` 使用 case 层与输入层两级并发，所有请求共享 limiter、RPM pacing 和
-retry 策略。Description QA 在当前 video 对象中按以下键去重：
+retry 策略。Video 和 Description QA 新记录均保存布尔字段 `based`；旧记录缺少时
+按 `false` 处理。Description QA 在当前 video 对象中按以下键去重：
 
 ```text
-input + question_id + qa_model + thinking_effort
+input + question_id + qa_model + thinking_effort + based
 ```
 
 仅 `classic_fairy_tale_film_conflicts` 的 Video QA 额外记录布尔字段
@@ -268,10 +271,10 @@ input + question_id + qa_model + thinking_effort
 对照条件则为 `true`。Description QA 不得包含该字段。
 
 ```text
-input + question_id + qa_model + thinking_effort + work_title_prefix
+input + question_id + qa_model + thinking_effort + based + work_title_prefix
 ```
 
-其他 group 的 Video QA 使用与 Description QA 相同的四字段去重键，新结果不保存
+其他 group 的 Video QA 使用与 Description QA 相同的五字段去重键，新结果不保存
 `work_title_prefix`；旧结果即使含有该字段也会忽略其值，不需要迁移或重跑。
 
 Question-only 结果保存在所属顶层 question 的 `question_only_results`，同样使用
@@ -294,7 +297,8 @@ question-only QA/Judge 历史；删除或重新生成视频不影响 question-on
 视频 QA 的输入指纹包含文件 SHA-256；手工替换同路径视频会使旧 QA 过期。
 通过 pipeline 重新生成视频、description 或 questions 时会清除相应 QA。
 
-Description 去重键保持不变；除上述 video prefix 条件外，不为最终回答
+关闭 `--based` 时沿用旧 prompt 和输入指纹；开启后在 question 前加入中性的
+video/context 依据指令并使用独立指纹，`Final answer:` 指令仍在最后。不为最终回答
 协议增加版本。旧记录允许加载和被
 `--force-qa` 清除，但不会猜测或迁移 `final_answer`；普通运行或
 `--force-judge` 选中旧格式记录时，会在任何模型请求前要求先执行
@@ -340,6 +344,8 @@ results/<group>/<qwen|kimi|gemini|cosmos>_<video|description>_report.md
 
 Fairy video report 同样分别使用 `_video_no_prefix_report.md` 和
 `_video_with_prefix_report.md`；其他 group 和 description 的文件名保持不变。
+开启 `--based` 的 summary/report 在 input 后、Fairy prefix 和 `baseline_passed` 前
+加 `_based`，关闭时文件名保持原样；JSON 标明 `based` 条件。
 
 Report 同时展示 QA 的完整 `raw_answer`、Judge 实际使用的 `final_answer`、verdict
 和 confidence。
@@ -359,6 +365,7 @@ scripts/
     ├── descriptions.py
     ├── generation.py
     ├── deletion.py
+    ├── baselines.py
     ├── qa.py
     ├── evaluation.py
     ├── evidence.py

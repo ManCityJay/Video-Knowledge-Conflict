@@ -111,6 +111,10 @@ def _add_work_title_prefix(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--with-work-title-prefix", action="store_true")
 
 
+def _add_based(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--based", action="store_true")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(add_help=False)
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -200,7 +204,10 @@ def build_parser() -> argparse.ArgumentParser:
     qa_judge.add_argument(
         "--qa-model",
         type=_qa_model,
-        default=DEFAULT_QA_MODEL,
+        default=next(
+            alias for alias, model in CLI_QA_MODEL_IDS.items()
+            if model == DEFAULT_QA_MODEL
+        ),
         metavar="{gemini,qwen3.8-max,kimi-k3,cosmos3-nano}",
     )
     _add_input(qa_judge)
@@ -208,6 +215,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_request_limits(qa_judge)
     _add_thinking_effort(qa_judge)
     _add_work_title_prefix(qa_judge)
+    _add_based(qa_judge)
     qa_judge.add_argument("--qa-workers", type=int)
     qa_judge.add_argument("--cosmos-workers", type=int, default=DEFAULT_COSMOS_WORKERS)
     qa_judge.add_argument("--cosmos-max-tokens", type=int, default=DEFAULT_COSMOS_MAX_TOKENS)
@@ -232,6 +240,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_input(summarize)
     _add_thinking_effort(summarize)
     _add_work_title_prefix(summarize)
+    _add_based(summarize)
     summarize.add_argument("--video-scope", choices=("qualified", "all"))
     summarize.add_argument("--baseline-filter", choices=("all", "passed"), default="all",
                            help="Filter individual questions by both baselines; write separate reports.")
@@ -246,6 +255,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _validate(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
+    if getattr(args, "based", False) and args.input == "question_only":
+        parser.error("--based requires --input video or description")
+    if getattr(args, "baselines_only", False) and getattr(args, "based", False):
+        parser.error("--baselines-only cannot be combined with --based")
     if getattr(args, "baselines_only", False) and args.input != "video":
         parser.error("--baselines-only requires --input video")
     if getattr(args, "baseline_filter", "all") == "passed" and args.input == "question_only":

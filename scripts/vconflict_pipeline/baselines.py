@@ -72,6 +72,7 @@ def _matches(result, question, model, effort, mode, prefix=None):
             and result.get('model') == model
             and qa_result_thinking_effort(result) == effort
             and qa_result_input_mode(result) == mode
+            and (mode != 'video' or result.get('based', False) is False)
             and (mode != 'video' or prefix is None
                  or result.get('work_title_prefix') is prefix))
 
@@ -221,7 +222,8 @@ No force flag on a conflict run clears baseline or historical conflict results.
                                     work_title_prefix=stage_prefix, question_runs=[(question, effort)],
                                     qa_model=args.qa_model, api_key=get_backend(args.qa_model).require_api_key(),
                                     timeout=args.timeout, max_retries=args.max_retries, request_limiter=qa_limiter,
-                                    cosmos_served_model_id=served, cosmos_max_tokens=args.cosmos_max_tokens)
+                                    cosmos_served_model_id=served, cosmos_max_tokens=args.cosmos_max_tokens,
+                                    based=False)
                                 if errors or len(answers) != 1:
                                     raise PipelineError(f'Baseline QA failed: {errors}')
                                 result = answers[0]

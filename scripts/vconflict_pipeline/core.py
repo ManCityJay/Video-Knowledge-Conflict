@@ -616,6 +616,11 @@ def validate_qa_result(result: Any, prefix: str, questions: dict[str, dict[str, 
     input_mode = qa_result_input_mode(result)
     if input_mode not in INPUT_MODES:
         raise PipelineError(f"{prefix}.input_mode is invalid.")
+    if "based" in result:
+        if input_mode == "question_only":
+            raise PipelineError(f"{prefix}.based is not valid for question-only input.")
+        if not isinstance(result["based"], bool):
+            raise PipelineError(f"{prefix}.based must be a boolean.")
     if input_mode != "video" and "work_title_prefix" in result:
         raise PipelineError(
             f"{prefix}.work_title_prefix is only valid for video input."

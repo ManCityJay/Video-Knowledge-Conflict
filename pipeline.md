@@ -201,6 +201,27 @@ This is a video clip from the work <title>. <question>
 `<title>` 取 case `title` 第一个冒号前的作品名。其他 group、description 或
 question-only 使用 `--with-work-title-prefix` 会在任何模型请求前报错。
 
+`--based` 为 video 和 description QA 加一条中性的回答依据指令，默认关闭。
+Video 的新增前缀是 `Answer the question based on the video.`；Fairy 同时选择
+`--with-work-title-prefix` 时，顺序为 based 指令、作品名前缀、原始 question：
+
+```text
+Answer the question based on the video.
+
+This is a video clip from the work <title>. <question>
+```
+
+Description 在 context 与 `Question:` 之间加入
+`Answer the question based on the context above.`。两种输入的 `Final answer:`
+格式要求仍在最后；关闭 `--based` 时，发送的 prompt 与旧版本一致。
+
+```bash
+python scripts/pipeline.py qa-judge --group <group> --input video \
+  --qa-model qwen3.8-max --based
+python scripts/pipeline.py qa-judge --group <group> --input description \
+  --qa-model qwen3.8-max --based
+```
+
 纯文字实验：
 
 ```bash
@@ -224,13 +245,13 @@ python scripts/pipeline.py qa-judge \
 该模式只把 case 顶层原始 question 和 `Final answer:` 格式要求发给模型。结果存入
 question 的可选 `question_only_results` 数组，按
 `input + question_id + qa_model + thinking_effort` 去重，且不写
-`context_text_en` 或 `work_title_prefix`。Gemini、Kimi 使用纯文本 payload；Qwen
+`context_text_en`、`work_title_prefix` 或 `based`。Gemini、Kimi 使用纯文本 payload；Qwen
 发送不含 video URI 的文本请求。运行不读取视频文件，也不检查视频 status、
 description 或 human review。
 
 首版不支持 `variant_context.questions`：选中 case 只要含私有 question scope，
 就会在 provider 请求和 force 清理前失败。`--video-id` 与
-`--with-work-title-prefix` 均不能用于 question-only。Math group 暂不纳入这一模式。
+`--with-work-title-prefix`、`--based` 均不能用于 question-only。Math group 暂不纳入这一模式。
 
 `--input` 接受 `video`、`description` 或 `question_only`，默认 `video`。不再支持
 `--input-mode`。
@@ -262,10 +283,11 @@ Cosmos 服务在仓库根目录运行 `./scripts/start_cosmos_vllm.sh` 启动；
 `--force-qa` 才能替换已有结果。Cosmos QA 不使用 OpenRouter RPM 限制；Judge
 仍使用原有 OpenRouter 限制。
 
-Description QA 在每个 video 对象内部按以下字段去重：
+Video 和 Description QA 新结果都记录布尔字段 `based`；旧结果缺失时视为
+`false`，无需迁移。Description QA 在每个 video 对象内部按以下字段去重：
 
 ```text
-input + question_id + qa_model + thinking_effort
+input + question_id + qa_model + thinking_effort + based
 ```
 
 仅 `classic_fairy_tale_film_conflicts` 的 Video QA 写入布尔字段
@@ -278,10 +300,10 @@ input + question_id + qa_model + thinking_effort
 `with_prefix` 条件写入 `true`。Description QA 不得包含该字段。
 
 ```text
-input + question_id + qa_model + thinking_effort + work_title_prefix
+input + question_id + qa_model + thinking_effort + based + work_title_prefix
 ```
 
-其他 group 的 Video QA 使用与 Description QA 相同的四字段去重键，新结果不写入
+其他 group 的 Video QA 使用与 Description QA 相同的五字段去重键，新结果不写入
 `work_title_prefix`。已有非 Fairy 结果无论缺少该字段还是保存了 `false` 或 `true`，
 均忽略该字段且无需迁移。
 
@@ -297,8 +319,7 @@ Conclude with exactly one final line in this format: Final answer: <your clear, 
 单独保存为 `final_answer`。缺少有效末行时，该 question/effort 立即失败，不保存
 QA 记录、不额外重试；同批其他 QA 和已有成功回答的 Judge 继续执行。
 
-重复运行会按视频文件 SHA-256 检查已有 QA 的输入指纹，不会追加相同输入的重复
-结果。视频、description 或 questions 由 pipeline 重建时，相应 QA 会被自动清理。
+重复运行不会追加相同输入的重复结果。视频、description 或 questions 由 pipeline 重建时，相应 QA 会被自动清理。
 手工替换同路径视频会使旧 QA 过期，需重新运行 QA 和 Judge。
 
 旧 QA 没有 `final_answer`。Pipeline 不猜测或迁移旧回答；普通运行或
@@ -319,6 +340,8 @@ python scripts/pipeline.py qa-judge ... --force-judge
 
 - `--force-qa` 删除筛选范围内全部 QA 记录及其中的 judgment，再重新执行。
 - `--force-judge` 保留 QA 回答，只清空全部匹配 judgment，再重新判定。
+
+两种 force 对 video/description 仅处理当前 `--based` 条件，保留另一条件的结果。
 
 Question-only 的 force 只作用于匹配的 `question_only_results`；不会清理视频 QA。
 
@@ -377,6 +400,9 @@ control 视频还匹配作品名前缀条件。共享 question 的 scope 为 `ca
 一个 question 未通过不会排除同 case / 同 video 的其他 question。
 Control 视频是第二层 baseline，只要求第一层通过，不要求它先通过自身。
 Description QA 的执行流程保持独立；其历史统计也可以选择下述 baseline 筛选。
+`--based` 只作用于目标 QA；baseline 的 question-only 和 control video 均使用
+未加 based 指令的 prompt。若 control 对象中另有 based QA，baseline 不会将它误作
+原始 control 回答。
 
 共享题目的两层回答、判分、阶段和输入指纹分别保存在现有 `question_only_results` /
 control `qa_results`；私有变体保存在该题目上的 `baseline_results`。每个回答只有一份
@@ -406,6 +432,7 @@ python scripts/pipeline.py qa-judge \
 可保留原实验的 `--case-id`、`--video-id`、`--question-id`、`--video-scope` 和
 `--with-work-title-prefix` 选择。选择某个 conflict 视频仍会自动运行它对应的 control
 baseline，不要求把 control 加入 `--video-id`。所有 baseline 阶段按题逐项保存。
+`--baselines-only --based` 在参数校验时报错；单独运行 `--baselines-only` 补原始 baseline。
 
 普通 video 运行中的 `--force-qa` / `--force-judge` 只处理通过筛选的 conflict 结果，
 不会清理 baseline 或未通过题目的历史结果。要主动重跑 baseline，显式组合
@@ -430,12 +457,8 @@ baseline 正确率时查看默认全量报告。
 `--baseline-filter all`（默认）保留原有全量统计口径。Description 筛选使用对应的
 无作品名前缀 video baseline。不同模型 / effort 的通过题目集合可以不同，不能把
 筛选后指标当作相同样本集上的直接比较。
-
-离线回归测试（不调用模型，不写真实 dataset / results）：
-
-```bash
-python -B -m unittest discover -s tests -v
-```
+带或不带 `--based` 的报告都使用同一套原始 baseline gate，但分别统计各自的目标
+QA 回答。
 
 ## Summary 与 Report
 
@@ -482,6 +505,11 @@ python scripts/pipeline.py summarize \
 JSON 包含布尔字段 `work_title_prefix`，report 显示 `no_prefix` 或
 `with_prefix`。其他 group 的 video 和所有 description 保持原文件名，summary 和
 report 也不输出 prefix 元数据。
+
+`summarize --based` 只选择开启该条件的目标 QA，summary JSON 标明 `based`。
+输出文件名在 input 后、Fairy prefix 与可选的 `baseline_passed` 前加入 `_based`，
+例如 `qwen_video_based_with_prefix_baseline_passed_none_summary.json`；默认条件
+的文件名保持不变。
 
 不指定 `--thinking-effort` 或使用 `all` 时，只为现有已判定结果中实际存在的
 effort 分别生成 summary；若没有结果，则生成模型默认 effort 的空 summary。
