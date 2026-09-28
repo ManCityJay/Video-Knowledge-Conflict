@@ -232,6 +232,11 @@ python scripts/pipeline.py qa-judge \
   --thinking-effort all
 ```
 
+Description QA 也会逐 question 先运行 question-only 和匹配 control 视频两层
+baseline；两层均通过后才运行该 question 的 description QA。Fairy description
+使用无作品名前缀的 control baseline。即使文字 context 已就绪，匹配 control
+视频仍须可用。baseline 的 QA/Judge 结果逐阶段写入 case JSON。
+
 不带视频或 description 的 question-only control：
 
 ```bash
@@ -388,18 +393,21 @@ knowledge_trapped / (context_grounded + knowledge_trapped + ambiguous_or_unjudge
 
 ## Question 级双 baseline 筛选
 
-从 2026-09-26 起，`qa-judge --input video` 默认按如下顺序执行，不能绕过：
+`qa-judge --input video` 和 `qa-judge --input description` 默认按如下顺序执行，
+不能绕过：
 
 1. 同一 question、QA 模型、thinking effort 的 question-only QA + Judge。
 2. 第一层为 `context_grounded` 后，执行该 question 对应的 control 视频 QA + Judge。
-3. 两层都为 `context_grounded`，才允许该 question 的 conflict 视频 QA。
+3. 两层都为 `context_grounded`，才允许该 question 的 conflict 视频或
+   description QA。
 
 筛选单位是 `case_id + question_scope + question_id + model + thinking_effort`，
 control 视频还匹配作品名前缀条件。共享 question 的 scope 为 `case`；私有
 `variant_context.questions` 的 scope 为所属 `video_id`，即使 ID 相同也不能互用。
 一个 question 未通过不会排除同 case / 同 video 的其他 question。
 Control 视频是第二层 baseline，只要求第一层通过，不要求它先通过自身。
-Description QA 的执行流程保持独立；其历史统计也可以选择下述 baseline 筛选。
+Description 使用无作品名前缀的 video baseline；其历史统计也可以选择下述
+baseline 筛选。两种目标输入的 baseline 回答可以复用，不重复存储。
 `--based` 只作用于目标 QA；baseline 的 question-only 和 control video 均使用
 未加 based 指令的 prompt。若 control 对象中另有 based QA，baseline 不会将它误作
 原始 control 回答。
@@ -434,8 +442,8 @@ python scripts/pipeline.py qa-judge \
 baseline，不要求把 control 加入 `--video-id`。所有 baseline 阶段按题逐项保存。
 `--baselines-only --based` 在参数校验时报错；单独运行 `--baselines-only` 补原始 baseline。
 
-普通 video 运行中的 `--force-qa` / `--force-judge` 只处理通过筛选的 conflict 结果，
-不会清理 baseline 或未通过题目的历史结果。要主动重跑 baseline，显式组合
+普通 video/description 运行中的 `--force-qa` / `--force-judge` 只处理通过筛选的
+目标结果，不会清理 baseline 或未通过题目的历史结果。要主动重跑 baseline，显式组合
 `--baselines-only --force-qa`；仅重新判分使用 `--baselines-only --force-judge`。
 
 ### 筛选历史统计

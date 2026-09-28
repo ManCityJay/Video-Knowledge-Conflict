@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from .integrity import (video_selected, description_is_current, qa_is_current, judgment_fingerprint, judgment_is_current, require_writable_case)
-from .baselines import qa_allowed, prepare_baselines
+from .baselines import effective_prefix, qa_allowed, prepare_baselines
 
 import argparse
 import json
@@ -254,7 +254,7 @@ def _preflight_cases(
             questions = _selected_questions(video_case_context(case, video), selected_questions)
             target_total += sum(
                 not enforce_gate or qa_allowed(case, video, question, args.qa_model, effort,
-                    work_title_prefix_condition(args.group, args.input, args.with_work_title_prefix), args.input)
+                    effective_prefix(args.group, args.with_work_title_prefix), args.input)
                 for question in questions for effort in efforts)
         loaded.append((path, case))
     return loaded, target_total
@@ -265,7 +265,7 @@ def _gate_result(case, video, result, args):
                      if q['question_id'] == result.get('question_id')), None)
     return question is not None and qa_allowed(
         case, video, question, args.qa_model, qa_result_thinking_effort(result),
-        work_title_prefix_condition(args.group, args.input, args.with_work_title_prefix), args.input)
+        effective_prefix(args.group, args.with_work_title_prefix), args.input)
 
 
 def _require_selected_final_answers(
@@ -719,7 +719,7 @@ def _qa_completed_from_loaded(
                 for effort in efforts
                 for question in questions
                 if qa_allowed(case, video, question, args.qa_model, effort,
-                              prefix_condition, args.input)
+                              effective_prefix(args.group, args.with_work_title_prefix), args.input)
             )
     return completed
 
@@ -733,7 +733,7 @@ def command_qa_judge(args: argparse.Namespace) -> int:
         print("No eligible question/video targets in the selected scope.")
         return 0
     baseline_status = 0
-    if args.input == "video":
+    if args.input in ("video", "description"):
         baseline_status = prepare_baselines(args, loaded, efforts)
         if getattr(args, "baselines_only", False):
             return baseline_status

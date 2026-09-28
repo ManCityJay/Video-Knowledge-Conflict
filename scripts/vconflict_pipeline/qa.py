@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from .integrity import (video_selected, description_is_current, qa_fingerprint, qa_is_current, require_writable_case)
-from .baselines import qa_allowed
+from .baselines import effective_prefix, qa_allowed
 
 import base64
 import os
@@ -1069,7 +1069,7 @@ def command_qa(args: Any, *, cosmos_served_model_id: str | None = None) -> int:
                 for effort in efforts
                 for question in questions
                 if qa_allowed(case, video, question, args.qa_model, effort,
-                              prefix_condition, args.input)
+                              effective_prefix(args.group, args.with_work_title_prefix), args.input)
                 if qa_run_key(
                     args.input,
                     question["question_id"],

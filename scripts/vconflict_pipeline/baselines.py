@@ -149,9 +149,9 @@ def question_gate(case, video, question, model, effort, prefix=None):
 
 
 def qa_allowed(case, video, question, model, effort, prefix, input_mode='video'):
-    if input_mode != 'video':
+    if input_mode not in ('video', 'description'):
         return True
-    if video['role'] == 'control':
+    if input_mode == 'video' and video['role'] == 'control':
         return stage_state(case, video, question, 'question_only', model, effort, None)['status'] == 'passed'
     return question_gate(case, video, question, model, effort, prefix)['passed']
 
@@ -160,17 +160,16 @@ def prepare_baselines(args, loaded, efforts):
     """Run both stages in order; incorrect answers are exclusions, errors are failures.
 
 Saves after each answer/judgment so an interrupted invocation resumes safely.
-No force flag on a conflict run clears baseline or historical conflict results.
+    Force on a target QA run does not clear baselines or excluded historical results.
 """
     from .evaluation import _eligible_videos, _selected_questions, JUDGE_SYSTEM_PROMPT
     from .core import JUDGMENT_SCHEMA
-    from .qa import (get_backend, preflight_qa_backend, run_qa_batch,
-                     work_title_prefix_condition)
+    from .qa import get_backend, preflight_qa_backend, run_qa_batch
     from .transport import (RequestLimiter, make_request_limiter, make_openrouter_limiter,
                             openrouter_json, require_openrouter_api_key)
     from .integrity import qa_fingerprint, judgment_fingerprint
 
-    prefix = work_title_prefix_condition(args.group, 'video', args.with_work_title_prefix)
+    prefix = effective_prefix(args.group, args.with_work_title_prefix)
     qa_limiter = (RequestLimiter(args.cosmos_workers) if args.qa_model == COSMOS_QA_MODEL
                   else make_request_limiter(args))
     judge_limiter = make_openrouter_limiter(args)
@@ -179,7 +178,7 @@ No force flag on a conflict run clears baseline or historical conflict results.
     failures = 0
     counts = Counter()
     for path, case in loaded:
-        videos = _eligible_videos(case, input_mode='video',
+        videos = _eligible_videos(case, input_mode=args.input,
                                   selected_video_ids=set(args.video_id or []),
                                   video_scope=getattr(args, 'video_scope', None))
         seen = set()
