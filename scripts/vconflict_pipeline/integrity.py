@@ -22,7 +22,7 @@ def question_content(question: dict | None) -> dict | None:
     if question is None:
         return None
     return {key: value for key, value in question.items()
-            if key not in {"question_only_results", "baseline_results"}}
+            if key not in {"question_only_results", "filter_results", "baseline_results"}}
 
 
 def video_selected(video: dict, input_mode: str, scope: str | None = None) -> bool:

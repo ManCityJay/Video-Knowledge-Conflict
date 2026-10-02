@@ -179,7 +179,7 @@ python scripts/pipeline.py qa-judge \
   --thinking-effort all
 ```
 
-上述命令会先执行下面的逐 question 双 baseline 筛选，再运行通过筛选的 conflict
+上述命令会先执行下面的逐 question 双 filter 筛选，再运行通过筛选的 conflict
 视频 QA。运行 Fairy video 的默认 `no_prefix` 条件。只有 Fairy video 可以选择加入
 作品名前缀；对照条件显式执行：
 
@@ -232,10 +232,8 @@ python scripts/pipeline.py qa-judge \
   --thinking-effort all
 ```
 
-Description QA 也会逐 question 先运行 question-only 和匹配 control 视频两层
-baseline；两层均通过后才运行该 question 的 description QA。Fairy description
-使用无作品名前缀的 control baseline。即使文字 context 已就绪，匹配 control
-视频仍须可用。baseline 的 QA/Judge 结果逐阶段写入 case JSON。
+Description QA 也会逐 question 先运行 question-only 和匹配 control 视频两层filter；两层均通过后才运行该 question 的 description QA。Fairy description 使用无作品名前缀的 control filter。即使文字 context 已就绪，匹配 control
+视频仍须可用。filter 的 QA/Judge 结果逐阶段写入 case JSON。
 
 不带视频或 description 的 question-only control：
 
@@ -391,7 +389,7 @@ knowledge_trapped / (context_grounded + knowledge_trapped + ambiguous_or_unjudge
 
 没有 conflict 样本时 rate 为 `null`。Control 指标的计算方式不变。
 
-## Question 级双 baseline 筛选
+## Question 级双 filter 筛选
 
 `qa-judge --input video` 和 `qa-judge --input description` 默认按如下顺序执行，
 不能绕过：
@@ -405,46 +403,60 @@ knowledge_trapped / (context_grounded + knowledge_trapped + ambiguous_or_unjudge
 control 视频还匹配作品名前缀条件。共享 question 的 scope 为 `case`；私有
 `variant_context.questions` 的 scope 为所属 `video_id`，即使 ID 相同也不能互用。
 一个 question 未通过不会排除同 case / 同 video 的其他 question。
-Control 视频是第二层 baseline，只要求第一层通过，不要求它先通过自身。
-Description 使用无作品名前缀的 video baseline；其历史统计也可以选择下述
-baseline 筛选。两种目标输入的 baseline 回答可以复用，不重复存储。
-`--based` 只作用于目标 QA；baseline 的 question-only 和 control video 均使用
-未加 based 指令的 prompt。若 control 对象中另有 based QA，baseline 不会将它误作
-原始 control 回答。
+Control 视频是第二层 filter，只要求第一层通过，不要求它先通过自身。
+Description 使用无作品名前缀的 video filter；其历史统计也可以选择下述
+filter 筛选。两种目标输入的 filter 回答可以复用，不重复存储。
+`--based` 只作用于目标 QA；filter 的 question-only 和 control video 均使用
+未加 based 指令的 prompt。开启 `--based` 时，video QA 的目标仅包含 conflict，
+不会额外生成加了 based 的 control QA。未指定 `--video-id` 时自动排除 control
+目标；显式指定 control 则在模型请求和写入之前报错，可改用不带 `--based` 的
+`--filter-only` 执行原始 control 筛选。
+已有 based control 的回答和判分保持原位，后续 QA/Judge、两种 force 和完成数统计
+均跳过这些记录；历史汇总与展示仍保留它们，filter 不会将其误作原始 control 回答。
+Fairy video 开启 `--with-work-title-prefix` 时，control filter 同样添加作品名前缀，
+但仍不添加 based 指令；question-only filter 只发送原始题目，不额外添加作品名前缀。
 
 共享题目的两层回答、判分、阶段和输入指纹分别保存在现有 `question_only_results` /
-control `qa_results`；私有变体保存在该题目上的 `baseline_results`。每个回答只有一份
+control `qa_results`；私有变体保存在该题目上的 `filter_results`。每个回答只有一份
 权威记录，避免重新判分后存在互相矛盾的副本。
+新筛选记录的阶段及指纹字段为 `filter_stage`、`filter_fingerprint`，判分的筛选
+指纹也使用 `filter_fingerprint`。旧 `baseline_stage`、`baseline_fingerprint` 和
+私有题目的 `baseline_results` 继续兼容读取，不执行批量迁移。新旧私有容器共同
+参与查找，按 `(timestamp, run_id)` 选择最新回答；续跑和重判在原容器中更新原记录，
+不复制历史回答。新旧元数据字段同时存在时以新字段为准。指纹算法和版本不变，
+不会仅因命名变化而使已有有效筛选结果过期。
 指纹绑定题目内容、参考答案、事实和对应 control 文件 SHA-256；参考答案或视频变化
 后旧结果不可作为通过依据。旧 control QA 仅在题目、配置和来源检查均匹配时复用；
-旧 question-only 记录没有 baseline 来源指纹时会重新执行。错误回答是筛选失败；
+旧 question-only 记录没有 filter 来源指纹时会重新执行。错误回答是筛选失败；
 缺失、过期、未判分和 control 不可用分别记录，不会被当作通过。请求失败保留已完成
 阶段，下次继续；已判错的结果不会自动反复尝试到答对。
 
 私有变体使用其显式 `variant_context.matched_control_path`，不会回退到共享 control。
 缺少该映射或对应视频不可用时，该题不放行，并输出原因。该路径不会自动生成视频。
-原有独立 `--input question_only` 命令仍仅支持共享问题；下面的新 baseline 入口支持
+原有独立 `--input question_only` 命令仍仅支持共享问题；下面的新 filter 入口支持
 私有变体，不受该旧入口限制。
 
-### 给已有 QA 补齐两层 baseline
+### 给已有 QA 补齐两层 filter
 
-只补 baseline，不重新运行 conflict QA，也不删除历史回答：
+只补 filter，不重新运行 conflict QA，也不删除历史回答：
 
 ```bash
 python scripts/pipeline.py qa-judge \
   --group classic_fairy_tale_film_conflicts \
   --input video --qa-model qwen3.8-max --thinking-effort all \
-  --baselines-only
+  --filter-only
 ```
 
 可保留原实验的 `--case-id`、`--video-id`、`--question-id`、`--video-scope` 和
 `--with-work-title-prefix` 选择。选择某个 conflict 视频仍会自动运行它对应的 control
-baseline，不要求把 control 加入 `--video-id`。所有 baseline 阶段按题逐项保存。
-`--baselines-only --based` 在参数校验时报错；单独运行 `--baselines-only` 补原始 baseline。
+filter，不要求把 control 加入 `--video-id`。所有 filter 阶段按题逐项保存。
+`--filter-only --based` 在参数校验时报错；单独运行 `--filter-only` 补原始 filter。
+旧 CLI 参数 `--baselines-only` 和 `--baseline-filter` 已移除，不提供别名；
+现有脚本需要分别改为 `--filter-only` 和 `--filter all|passed`。
 
 普通 video/description 运行中的 `--force-qa` / `--force-judge` 只处理通过筛选的
-目标结果，不会清理 baseline 或未通过题目的历史结果。要主动重跑 baseline，显式组合
-`--baselines-only --force-qa`；仅重新判分使用 `--baselines-only --force-judge`。
+目标结果，不会清理 filter 或未通过题目的历史结果。要主动重跑 filter，显式组合
+`--filter-only --force-qa`；仅重新判分使用 `--filter-only --force-judge`。
 
 ### 筛选历史统计
 
@@ -452,20 +464,22 @@ baseline，不要求把 control 加入 `--video-id`。所有 baseline 阶段按�
 python scripts/pipeline.py summarize \
   --group classic_fairy_tale_film_conflicts \
   --input video --qa-model qwen3.8-max --thinking-effort all \
-  --baseline-filter passed
+  --filter passed
 ```
 
 该命令只读 case 数据，不发模型请求。JSON 指标与 Markdown 明细都仅保留两层通过
 的 question；answer-level 指标先逐题过滤，video-level 标签由保留的问题重新聚合，
-没有剩余问题的视频不计入分母。输出文件名增加 `_baseline_passed`，不会覆盖原始
-报告。JSON 的 `baseline_gate` 包含题目总数、通过数、排除数、原因及逐题配置状态；
+没有剩余问题的视频不计入分母。输出文件名增加 `_filter_passed`，不会覆盖原始
+报告。JSON 的 `filter_gate` 包含题目总数、通过数、排除数、原因及逐题配置状态；
 没有通过题目时分母为 0、rate 为 `null`。Control 统计同样按 question 过滤；需要完整
-baseline 正确率时查看默认全量报告。
+filter 正确率时查看默认全量报告。
+Summary JSON 用 `filter` 标明 `all` 或 `passed`。历史 `_baseline_passed` 报告保留，
+本次更名不移动或删除已有产物。
 
-`--baseline-filter all`（默认）保留原有全量统计口径。Description 筛选使用对应的
-无作品名前缀 video baseline。不同模型 / effort 的通过题目集合可以不同，不能把
+`--filter all`（默认）保留原有全量统计口径。Description 筛选使用对应的
+无作品名前缀 video filter。不同模型 / effort 的通过题目集合可以不同，不能把
 筛选后指标当作相同样本集上的直接比较。
-带或不带 `--based` 的报告都使用同一套原始 baseline gate，但分别统计各自的目标
+带或不带 `--based` 的报告都使用同一套原始 filter gate，但分别统计各自的目标
 QA 回答。
 
 ## Summary 与 Report
@@ -515,8 +529,8 @@ JSON 包含布尔字段 `work_title_prefix`，report 显示 `no_prefix` 或
 report 也不输出 prefix 元数据。
 
 `summarize --based` 只选择开启该条件的目标 QA，summary JSON 标明 `based`。
-输出文件名在 input 后、Fairy prefix 与可选的 `baseline_passed` 前加入 `_based`，
-例如 `qwen_video_based_with_prefix_baseline_passed_none_summary.json`；默认条件
+输出文件名在 input 后、Fairy prefix 与可选的 `filter_passed` 前加入 `_based`，
+例如 `qwen_video_based_with_prefix_filter_passed_none_summary.json`；默认条件
 的文件名保持不变。
 
 不指定 `--thinking-effort` 或使用 `all` 时，只为现有已判定结果中实际存在的

@@ -225,8 +225,8 @@ def build_parser() -> argparse.ArgumentParser:
     force.add_argument("--force-judge", action="store_true")
     qa_judge.add_argument("--video-scope", choices=("qualified", "all"),
                           help="Math defaults to qualified; other groups default to all.")
-    qa_judge.add_argument("--baselines-only", action="store_true",
-                          help="Run question-only then matched control baselines; do not run conflict QA.")
+    qa_judge.add_argument("--filter-only", action="store_true",
+                          help="Run question-only then matched control filters; do not run conflict QA.")
     qa_judge.set_defaults(func=command_qa_judge)
 
     summarize = _stage(subparsers, "summarize")
@@ -242,8 +242,8 @@ def build_parser() -> argparse.ArgumentParser:
     _add_work_title_prefix(summarize)
     _add_based(summarize)
     summarize.add_argument("--video-scope", choices=("qualified", "all"))
-    summarize.add_argument("--baseline-filter", choices=("all", "passed"), default="all",
-                           help="Filter individual questions by both baselines; write separate reports.")
+    summarize.add_argument("--filter", dest="filter_mode", choices=("all", "passed"), default="all",
+                           help="Require both question filters to pass; write separate reports.")
     summarize.set_defaults(func=command_summarize)
     audit = _stage(subparsers, "audit")
     _add_case_selection(audit)
@@ -257,12 +257,12 @@ def build_parser() -> argparse.ArgumentParser:
 def _validate(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
     if getattr(args, "based", False) and args.input == "question_only":
         parser.error("--based requires --input video or description")
-    if getattr(args, "baselines_only", False) and getattr(args, "based", False):
-        parser.error("--baselines-only cannot be combined with --based")
-    if getattr(args, "baselines_only", False) and args.input != "video":
-        parser.error("--baselines-only requires --input video")
-    if getattr(args, "baseline_filter", "all") == "passed" and args.input == "question_only":
-        parser.error("--baseline-filter passed requires video or description input")
+    if getattr(args, "filter_only", False) and getattr(args, "based", False):
+        parser.error("--filter-only cannot be combined with --based")
+    if getattr(args, "filter_only", False) and args.input != "video":
+        parser.error("--filter-only requires --input video")
+    if getattr(args, "filter_mode", "all") == "passed" and args.input == "question_only":
+        parser.error("--filter passed requires video or description input")
     if (
         args.command == "qa-judge"
         and args.input == "question_only"

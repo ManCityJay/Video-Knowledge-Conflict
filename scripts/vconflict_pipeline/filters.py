@@ -1,6 +1,6 @@
-"""Question-scoped knowledge baselines shared by execution and reporting.
+"""Question-scoped knowledge filters shared by execution and reporting.
 
-No model calls occur while checking a gate. Only prepare_baselines makes requests.
+No model calls occur while checking a gate. Only prepare_filters makes requests.
 Private variant questions own their own records and matched control video.
 """
 from __future__ import annotations
@@ -10,10 +10,12 @@ import copy
 import json
 from collections import Counter
 
-from .core import (PipelineError, atomic_write_json, canonical_verdict,
+from .core import (FILTER_RESULT_FIELDS, PipelineError, atomic_write_json, canonical_verdict,
+                   filter_field, set_filter_field,
                    qa_result_input_mode, resolve_video_path, utc_now, video_case_context)
 from .evidence import observed_summary, video_sha256
 from .integrity import digest, judgment_is_current, qa_is_current, question_content
+from .selection import eligible_videos, selected_questions
 from .settings import COSMOS_QA_MODEL, FAIRY_TALE_GROUP, AUTHOR_JUDGE_MODEL
 
 
@@ -84,8 +86,8 @@ def _latest(results):
 
 def stage_result(case, video, question, stage, model, effort, prefix):
     mode = 'question_only' if stage == 'question_only' else 'video'
-    candidates = [r for r in question.get('baseline_results', [])
-                  if r.get('baseline_stage') == stage
+    candidates = [r for field in FILTER_RESULT_FIELDS for r in question.get(field, [])
+                  if filter_field(r, 'stage') == stage
                   and _matches(r, question, model, effort, mode, prefix)]
     if stage == 'question_only':
         candidates.extend(r for r in question.get('question_only_results', [])
@@ -114,10 +116,10 @@ def stage_state(case, video, question, stage, model, effort, prefix):
     if result is None:
         return {'status': 'missing', 'result': None, 'fingerprint': fingerprint}
     status = 'stale'
-    current = (result.get('baseline_fingerprint') == fingerprint
+    current = (filter_field(result, 'fingerprint') == fingerprint
                and result.get('question') == question['text_en'])
     # Existing control results already carry the pipeline's video/question provenance.
-    legacy_control = stage == 'control_video' and not result.get('baseline_stage')
+    legacy_control = stage == 'control_video' and not filter_field(result, 'stage')
     if legacy_control:
         current = qa_is_current(case, control_video(case, video), result)
     if current and result.get('final_answer'):
@@ -126,7 +128,7 @@ def stage_state(case, video, question, stage, model, effort, prefix):
             status = 'unjudged'
         elif legacy_control and not judgment_is_current(case, control_video(case, video), result):
             status = 'unjudged'
-        elif result.get('baseline_stage') and judgment.get('baseline_fingerprint') != digest(
+        elif filter_field(result, 'stage') and filter_field(judgment, 'fingerprint') != digest(
                 {'input': fingerprint, 'final_answer': result['final_answer']}):
             status = 'unjudged'
         else:
@@ -156,13 +158,13 @@ def qa_allowed(case, video, question, model, effort, prefix, input_mode='video')
     return question_gate(case, video, question, model, effort, prefix)['passed']
 
 
-def prepare_baselines(args, loaded, efforts):
+def prepare_filters(args, loaded, efforts):
     """Run both stages in order; incorrect answers are exclusions, errors are failures.
 
-Saves after each answer/judgment so an interrupted invocation resumes safely.
-    Force on a target QA run does not clear baselines or excluded historical results.
-"""
-    from .evaluation import _eligible_videos, _selected_questions, JUDGE_SYSTEM_PROMPT
+    Saves after each answer/judgment so an interrupted invocation resumes safely.
+    Force on a target QA run does not clear filters or excluded historical results.
+    """
+    from .evaluation import JUDGE_SYSTEM_PROMPT
     from .core import JUDGMENT_SCHEMA
     from .qa import get_backend, preflight_qa_backend, run_qa_batch
     from .transport import (RequestLimiter, make_request_limiter, make_openrouter_limiter,
@@ -178,13 +180,14 @@ Saves after each answer/judgment so an interrupted invocation resumes safely.
     failures = 0
     counts = Counter()
     for path, case in loaded:
-        videos = _eligible_videos(case, input_mode=args.input,
+        videos = eligible_videos(case, input_mode=args.input,
                                   selected_video_ids=set(args.video_id or []),
-                                  video_scope=getattr(args, 'video_scope', None))
+                                  video_scope=getattr(args, 'video_scope', None),
+                                  based=bool(getattr(args, 'based', False)))
         seen = set()
         for video in videos:
             context = video_case_context(case, video)
-            for question in _selected_questions(context, set(args.question_id or [])):
+            for question in selected_questions(context, set(args.question_id or [])):
                 for effort in efforts:
                     key = (scope_id(video), question['question_id'], effort)
                     if key in seen:
@@ -193,14 +196,14 @@ Saves after each answer/judgment so an interrupted invocation resumes safely.
                     for stage in ('question_only', 'control_video'):
                         stage_prefix = None if stage == 'question_only' else prefix
                         state = stage_state(case, video, question, stage, args.qa_model, effort, stage_prefix)
-                        force_qa = getattr(args, 'baselines_only', False) and args.force_qa
-                        force_judge = getattr(args, 'baselines_only', False) and args.force_judge
+                        force_qa = getattr(args, 'filter_only', False) and args.force_qa
+                        force_judge = getattr(args, 'filter_only', False) and args.force_judge
                         if state['status'] in ('passed', 'failed') and not (force_qa or force_judge):
                             if state['status'] == 'failed':
                                 break
                             continue
                         if state['status'] == 'unavailable':
-                            print(f"Baseline unavailable {case['case_id']}/{scope_id(video)}/{question['question_id']}: {state['reason']}")
+                            print(f"Filter unavailable {case['case_id']}/{scope_id(video)}/{question['question_id']}: {state['reason']}")
                             failures += 1
                             break
                         try:
@@ -224,18 +227,24 @@ Saves after each answer/judgment so an interrupted invocation resumes safely.
                                     cosmos_served_model_id=served, cosmos_max_tokens=args.cosmos_max_tokens,
                                     based=False)
                                 if errors or len(answers) != 1:
-                                    raise PipelineError(f'Baseline QA failed: {errors}')
+                                    raise PipelineError(f'Filter QA failed: {errors}')
                                 result = answers[0]
                             else:
                                 result = copy.deepcopy(result)
-                            result['baseline_stage'] = stage
-                            result['baseline_fingerprint'] = state['fingerprint']
+                            set_filter_field(result, 'stage', stage)
+                            set_filter_field(result, 'fingerprint', state['fingerprint'])
                             result['judgment'] = None
                             # Each answer has one authoritative storage location;
                             # rejudging through an existing command must not leave
-                            # a second, contradictory copy of the baseline verdict.
+                            # a second, contradictory copy of the filter verdict.
                             if scope_id(video) != 'case':
-                                records = question.setdefault('baseline_results', [])
+                                # Resume in the owning container; never copy a legacy run
+                                # into the new container just because its name changed.
+                                records = next((question[field] for field in FILTER_RESULT_FIELDS
+                                                if any(r.get('run_id') == result['run_id']
+                                                       for r in question.get(field, []))), None)
+                                if records is None:
+                                    records = question.setdefault('filter_results', [])
                             elif stage == 'question_only':
                                 records = question.setdefault('question_only_results', [])
                             else:
@@ -258,21 +267,21 @@ Saves after each answer/judgment so an interrupted invocation resumes safely.
                                 schema=JUDGMENT_SCHEMA, api_key=require_openrouter_api_key(),
                                 timeout=args.timeout, max_retries=args.max_retries, request_limiter=judge_limiter)
                             if verdict['verdict'] not in ('context_grounded', 'ambiguous_or_unjudgeable'):
-                                raise PipelineError('Invalid baseline judgment verdict')
+                                raise PipelineError('Invalid filter judgment verdict')
                             result['judgment'] = {**verdict, 'timestamp': utc_now(),
                                 'judge_model': AUTHOR_JUDGE_MODEL, 'judge_request_id': response.get('id'),
-                                'baseline_fingerprint': digest({'input': state['fingerprint'], 'final_answer': result['final_answer']})}
+                                'filter_fingerprint': digest({'input': state['fingerprint'], 'final_answer': result['final_answer']})}
                             if scope_id(video) == 'case' and stage == 'control_video':
                                 result['judgment']['input_fingerprint'] = judgment_fingerprint(case, control, result)
                             atomic_write_json(path, case)
-                            print(f"Baseline {stage} {case['case_id']}/{scope_id(video)}/{question['question_id']}/{effort}: {verdict['verdict']}")
+                            print(f"Filter {stage} {case['case_id']}/{scope_id(video)}/{question['question_id']}/{effort}: {verdict['verdict']}")
                             if verdict['verdict'] != 'context_grounded':
                                 break
                         except (PipelineError, OSError) as exc:
                             failures += 1
-                            print(f"Baseline error {case['case_id']}/{scope_id(video)}/{question['question_id']}: {exc}")
+                            print(f"Filter error {case['case_id']}/{scope_id(video)}/{question['question_id']}: {exc}")
                             break
                     gate = question_gate(case, video, question, args.qa_model, effort, prefix)
                     counts[gate['reason']] += 1
-    print('Question baseline gates: ' + json.dumps(dict(counts), sort_keys=True))
+    print('Question filter gates: ' + json.dumps(dict(counts), sort_keys=True))
     return 1 if failures else 0

@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from .integrity import (video_selected, description_is_current, qa_is_current, judgment_fingerprint, judgment_is_current, require_writable_case)
-from .baselines import effective_prefix, qa_allowed, prepare_baselines
+from .integrity import (qa_is_current, judgment_fingerprint, judgment_is_current, require_writable_case)
+from .filters import effective_prefix, qa_allowed, prepare_filters
 
 import argparse
 import json
@@ -11,7 +11,7 @@ import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
-from .evidence import observed_summary
+from .selection import eligible_videos, selected_questions, target_video_selected
 
 from .core import (
     JUDGMENT_SCHEMA,
@@ -24,8 +24,6 @@ from .core import (
     qa_result_input_mode,
     require_question_only_compatible,
     require_nonempty_string,
-    resolve_video_path,
-    sha256_text,
     utc_now,
 )
 from .qa import (
@@ -66,88 +64,6 @@ For video_role=control:
 Return only the requested structured result."""
 
 
-def _selected_questions(
-    case: dict[str, Any], selected_question_ids: set[str]
-) -> list[dict[str, Any]]:
-    if not case["questions"]:
-        raise PipelineError(
-            f"Case {case['case_id']} has no questions. Run questions first."
-        )
-    questions = [
-        question
-        for question in case["questions"]
-        if not selected_question_ids
-        or question["question_id"] in selected_question_ids
-    ]
-    missing = selected_question_ids - {
-        question["question_id"] for question in questions
-    }
-    if missing:
-        raise PipelineError(
-            f"Question IDs not found in {case['case_id']}: "
-            f"{', '.join(sorted(missing))}"
-        )
-    return questions
-
-
-def _eligible_videos(
-    case: dict[str, Any],
-    *,
-    input_mode: str,
-    selected_video_ids: set[str],
-    video_scope: str | None = None,
-) -> list[dict[str, Any]]:
-    candidates = [
-        video
-        for video in case["videos"]
-        if input_mode == "video" or video["role"] == "conflict"
-    ]
-    available = {video["video_id"] for video in candidates}
-    missing = selected_video_ids - available
-    if missing:
-        kind = "Conflict video IDs" if input_mode == "description" else "Video IDs"
-        raise PipelineError(
-            f"{kind} not found in {case['case_id']}: {', '.join(sorted(missing))}"
-        )
-
-    eligible: list[dict[str, Any]] = []
-    for video in candidates:
-        if selected_video_ids and video["video_id"] not in selected_video_ids:
-            continue
-        if not video_selected(video, input_mode, video_scope):
-            if video["video_id"] in selected_video_ids:
-                raise PipelineError(f"Selected video {video['video_id']} is outside the evaluation scope or not ready.")
-            continue
-        if input_mode == "description":
-            description = video.get("description")
-            if not isinstance(description, dict):
-                raise PipelineError(
-                    f"Context is missing for {case['case_id']}/{video['video_id']}. "
-                    "Run description first."
-                )
-            if not description_is_current(video):
-                raise PipelineError(
-                    f"Context is stale for {case['case_id']}/{video['video_id']}. "
-                    "Run description again."
-                )
-        else:
-            if video["status"] != "ready":
-                continue
-            observed_summary(video)  # Blocks stale annotations after regeneration.
-            resolve_video_path(video["local_path"], must_exist=True)
-        eligible.append(video)
-    return eligible
-
-
-def _promote_existing_local_videos(
-    case: dict[str, Any],
-    *,
-    selected_video_ids: set[str],
-) -> list[str]:
-    """An old file is not proof that the current generation task completed."""
-    return []
-
-
 def _result_base_selected(
     video: dict[str, Any],
     result: dict[str, Any],
@@ -156,7 +72,8 @@ def _result_base_selected(
     efforts: set[str | None],
 ) -> bool:
     return not (
-        not video_selected(video, args.input, getattr(args, "video_scope", None))
+        not target_video_selected(video, args.input, getattr(args, "video_scope", None),
+                                  based=bool(getattr(args, "based", False)))
         or (args.video_id and video["video_id"] not in set(args.video_id))
         or (args.question_id and result["question_id"] not in set(args.question_id))
         or result.get("model") != args.qa_model
@@ -229,7 +146,7 @@ def _preflight_cases(
     *, enforce_gate: bool = True,
 ) -> tuple[list[tuple[Path, dict[str, Any]]], int]:
     dataset_dir = grouped_dir(args.dataset_dir, args.group)
-    selected_questions = set(args.question_id or [])
+    selected_question_ids = set(args.question_id or [])
     selected_videos = set(args.video_id or [])
     loaded: list[tuple[Path, dict[str, Any]]] = []
     target_total = 0
@@ -237,21 +154,22 @@ def _preflight_cases(
         case = load_case(path)
         require_writable_case(case, path)
         if args.input == "question_only":
-            questions = _selected_questions(
+            questions = selected_questions(
                 {**case, "questions": require_question_only_compatible(case)},
-                selected_questions,
+                selected_question_ids,
             )
             target_total += len(questions) * len(efforts)
             loaded.append((path, case))
             continue
-        videos = _eligible_videos(
+        videos = eligible_videos(
             case,
             input_mode=args.input,
             selected_video_ids=selected_videos,
             video_scope=getattr(args, "video_scope", None),
+            based=bool(getattr(args, "based", False)),
         )
         for video in videos:
-            questions = _selected_questions(video_case_context(case, video), selected_questions)
+            questions = selected_questions(video_case_context(case, video), selected_question_ids)
             target_total += sum(
                 not enforce_gate or qa_allowed(case, video, question, args.qa_model, effort,
                     effective_prefix(args.group, args.with_work_title_prefix), args.input)
@@ -261,6 +179,9 @@ def _preflight_cases(
 
 
 def _gate_result(case, video, result, args):
+    if not target_video_selected(video, args.input, getattr(args, "video_scope", None),
+                                 based=bool(getattr(args, "based", False))):
+        return False
     question = next((q for q in video_case_context(case, video)['questions']
                      if q['question_id'] == result.get('question_id')), None)
     return question is not None and qa_allowed(
@@ -384,8 +305,8 @@ def _preclear_force(
             continue
         for video in case["videos"]:
             if args.input == "video" and video["role"] == "control":
-                # Baselines are forced only by --baselines-only; do not invalidate
-                # the admission decision between baseline checks and conflict QA.
+                # Filters are forced only by --filter-only; do not invalidate
+                # the admission decision between filter checks and conflict QA.
                 continue
             if args.force_qa:
                 kept: list[dict[str, Any]] = []
@@ -660,7 +581,7 @@ def _qa_completed_from_loaded(
     args: argparse.Namespace,
     efforts: tuple[str | None, ...],
 ) -> int:
-    selected_questions = set(args.question_id or [])
+    selected_question_ids = set(args.question_id or [])
     selected_videos = set(args.video_id or [])
     prefix_condition = work_title_prefix_condition(
         args.group,
@@ -670,9 +591,9 @@ def _qa_completed_from_loaded(
     completed = 0
     for _, case in loaded:
         if args.input == "question_only":
-            questions = _selected_questions(
+            questions = selected_questions(
                 {**case, "questions": require_question_only_compatible(case)},
-                selected_questions,
+                selected_question_ids,
             )
             for question in questions:
                 existing = {
@@ -690,14 +611,15 @@ def _qa_completed_from_loaded(
                     for effort in efforts
                 )
             continue
-        videos = _eligible_videos(
+        videos = eligible_videos(
             case,
             input_mode=args.input,
             selected_video_ids=selected_videos,
             video_scope=getattr(args, "video_scope", None),
+            based=bool(getattr(args, "based", False)),
         )
         for video in videos:
-            questions = _selected_questions(video_case_context(case, video), selected_questions)
+            questions = selected_questions(video_case_context(case, video), selected_question_ids)
             existing = {
                 qa_result_key(
                     result,
@@ -732,15 +654,15 @@ def command_qa_judge(args: argparse.Namespace) -> int:
     if qa_total == 0:
         print("No eligible question/video targets in the selected scope.")
         return 0
-    baseline_status = 0
+    filter_status = 0
     if args.input in ("video", "description"):
-        baseline_status = prepare_baselines(args, loaded, efforts)
-        if getattr(args, "baselines_only", False):
-            return baseline_status
+        filter_status = prepare_filters(args, loaded, efforts)
+        if getattr(args, "filter_only", False):
+            return filter_status
         loaded, qa_total = _preflight_cases(args, efforts)
         if qa_total == 0:
-            print("No questions passed the required baseline gates in the selected scope.")
-            return baseline_status
+            print("No questions passed the required filter gates in the selected scope.")
+            return filter_status
     if not args.force_qa:
         _require_selected_prefix_metadata(
             loaded,
@@ -771,4 +693,4 @@ def command_qa_judge(args: argparse.Namespace) -> int:
     print(f"QA: {qa_done}/{qa_total}")
     print(f"Judge: {judge_done}/{judge_total}")
     incomplete = qa_done != qa_total or judge_done != judge_total
-    return 1 if baseline_status or qa_status or judge_status or incomplete else 0
+    return 1 if filter_status or qa_status or judge_status or incomplete else 0

@@ -359,6 +359,24 @@ def validate_question(
         raise PipelineError(f"{prefix}.text_en must contain an explicit prior cue.")
 
 
+FILTER_RESULT_FIELDS = ("filter_results", "baseline_results")
+
+
+def filter_field(record: dict[str, Any], name: str) -> Any:
+    """Read current metadata first, without rewriting historical records."""
+    key = f"filter_{name}"
+    return record[key] if key in record else record.get(f"baseline_{name}")
+
+
+def set_filter_field(record: dict[str, Any], name: str, value: Any) -> None:
+    """New records use filter names; resumed records retain their field spelling."""
+    key = f"filter_{name}"
+    legacy_key = f"baseline_{name}"
+    if key not in record and legacy_key in record:
+        key = legacy_key
+    record[key] = value
+
+
 def validate_questions(
     questions_raw: Any,
     *,
@@ -387,21 +405,22 @@ def validate_questions(
         normalized_questions.add(normalized)
 
     for index, question in enumerate(questions_raw):
-        baseline_results = question.get("baseline_results", [])
-        baseline_prefix = f"questions[{index}].baseline_results"
-        if not isinstance(baseline_results, list):
-            raise PipelineError(f"{baseline_prefix} must be an array.")
-        for result_index, result in enumerate(baseline_results):
-            result_prefix = f"{baseline_prefix}[{result_index}]"
-            validate_qa_result(result, result_prefix, questions)
-            if result.get("question_id") != question["question_id"]:
-                raise PipelineError(f"{result_prefix} must reference its owning question.")
-            stage = result.get("baseline_stage")
-            expected_mode = {"question_only": "question_only", "control_video": "video"}.get(stage)
-            if expected_mode is None or qa_result_input_mode(result) != expected_mode:
-                raise PipelineError(f"{result_prefix} has an invalid baseline stage/input.")
-            if not re.fullmatch(r"[0-9a-f]{64}", str(result.get("baseline_fingerprint", ""))):
-                raise PipelineError(f"{result_prefix} needs a baseline SHA-256 fingerprint.")
+        for field in FILTER_RESULT_FIELDS:
+            filter_results = question.get(field, [])
+            filter_prefix = f"questions[{index}].{field}"
+            if not isinstance(filter_results, list):
+                raise PipelineError(f"{filter_prefix} must be an array.")
+            for result_index, result in enumerate(filter_results):
+                result_prefix = f"{filter_prefix}[{result_index}]"
+                validate_qa_result(result, result_prefix, questions)
+                if result.get("question_id") != question["question_id"]:
+                    raise PipelineError(f"{result_prefix} must reference its owning question.")
+                stage = filter_field(result, "stage")
+                expected_mode = {"question_only": "question_only", "control_video": "video"}.get(stage)
+                if expected_mode is None or qa_result_input_mode(result) != expected_mode:
+                    raise PipelineError(f"{result_prefix} has an invalid filter stage/input.")
+                if not re.fullmatch(r"[0-9a-f]{64}", str(filter_field(result, "fingerprint"))):
+                    raise PipelineError(f"{result_prefix} needs a filter SHA-256 fingerprint.")
         results = question.get("question_only_results")
         if results is None:
             continue

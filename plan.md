@@ -1,15 +1,24 @@
 # Video Knowledge Conflict 实验框架
 
 2026-09-28 更新：video 和 description QA 现在默认逐 question 执行
-question-only → 匹配 control video 两层 baseline，均答对后才运行该 question 的
+question-only → 匹配 control video 两层 filter，均答对后才运行该 question 的
 conflict video 或 description QA。按模型、thinking effort、题目作用域和 video
 prefix 隔离，不按 case 或 video 整体筛掉。
 私有数学变体使用自己的题目和 `matched_control_path`。
-已有 QA 可用 `qa-judge --input video --baselines-only` 补齐 baseline，随后
-`summarize --baseline-filter passed` 生成独立的筛选报告，原始数据和全量报告保留。
-`--based` 仅改变目标 video/description QA；两层 baseline 始终使用未加该提示的回答，
-`--baselines-only` 与 `--based` 不可组合。
-完整命令、来源指纹和 force 规则见 `pipeline.md` 的「Question 级双 baseline 筛选」。
+已有 QA 可用 `qa-judge --input video --filter-only` 补齐 filter，随后
+`summarize --filter passed` 生成独立的筛选报告，原始数据和全量报告保留。
+`--based` 仅改变目标 video/description QA；两层 filter 始终使用未加该提示的回答，
+`--filter-only` 与 `--based` 不可组合。
+完整命令、来源指纹和 force 规则见 `pipeline.md` 的「Question 级双 filter 筛选」。
+
+2026-10-02 更新：筛选统一命名为 filter，CLI 使用 `--filter-only` 和
+`summarize --filter all|passed`，不再接受旧 baseline 参数。旧 JSON 字段兼容读取，
+已有数据和报告不迁移；新筛选记录使用 `filter_stage`、`filter_fingerprint`，
+私有题目新增记录写入 `filter_results`，指纹算法保持不变。
+`qa-judge --input video --based` 仅执行 conflict 目标；control 仍以未加 based 的
+条件参与筛选。已有 based control 的回答和判分保留，后续 QA/Judge 和 force
+均跳过它们，历史汇总规则不变。Fairy control filter 的作品名前缀仍与目标 video
+条件一致；description 的 control filter 不额外添加作品名前缀。
 
 ## 目标
 
@@ -345,7 +354,7 @@ results/<group>/<qwen|kimi|gemini|cosmos>_<video|description>_report.md
 
 Fairy video report 同样分别使用 `_video_no_prefix_report.md` 和
 `_video_with_prefix_report.md`；其他 group 和 description 的文件名保持不变。
-开启 `--based` 的 summary/report 在 input 后、Fairy prefix 和 `baseline_passed` 前
+开启 `--based` 的 summary/report 在 input 后、Fairy prefix 和 `filter_passed` 前
 加 `_based`，关闭时文件名保持原样；JSON 标明 `based` 条件。
 
 Report 同时展示 QA 的完整 `raw_answer`、Judge 实际使用的 `final_answer`、verdict
@@ -366,7 +375,8 @@ scripts/
     ├── descriptions.py
     ├── generation.py
     ├── deletion.py
-    ├── baselines.py
+    ├── filters.py
+    ├── selection.py
     ├── qa.py
     ├── evaluation.py
     ├── evidence.py

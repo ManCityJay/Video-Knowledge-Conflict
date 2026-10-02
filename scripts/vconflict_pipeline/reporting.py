@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from .integrity import (video_selected, qa_is_current, judgment_is_current)
-from .baselines import question_gate, scope_id
+from .filters import question_gate, scope_id
 
 import argparse
 from collections import Counter, defaultdict
@@ -151,8 +151,8 @@ def build_summary(
     work_title_prefix: bool | None,
     based: bool = False,
     video_scope: str | None = None,
-    baseline_filter: str = "all",
-    baseline_work_title_prefix: bool | None = None,
+    filter_mode: str = "all",
+    filter_work_title_prefix: bool | None = None,
 ) -> dict[str, Any]:
     if input_mode == "question_only":
         latest_questions: dict[tuple[str, str], dict[str, Any]] = {}
@@ -221,14 +221,14 @@ def build_summary(
     latest: dict[tuple[str, str, str], tuple[str, dict[str, Any]]] = {}
     gates = {}
     excluded_answers = set()
-    gate_prefix = work_title_prefix if input_mode == 'video' else baseline_work_title_prefix
+    gate_prefix = work_title_prefix if input_mode == 'video' else filter_work_title_prefix
     for case_path in case_paths:
         case = load_case(case_path)
         for video in case["videos"]:
             if not video_selected(video, input_mode, video_scope):
                 continue
             questions = {q['question_id']: q for q in video_case_context(case, video)['questions']}
-            if baseline_filter == "passed":
+            if filter_mode == "passed":
                 for question in questions.values():
                     key = (case['case_id'], scope_id(video), question['question_id'])
                     if key not in gates:
@@ -244,7 +244,7 @@ def build_summary(
                 ) or not judgment_is_current(case, video, result):
                     continue
                 key = (case["case_id"], video["video_id"], result["question_id"])
-                if baseline_filter == "passed":
+                if filter_mode == "passed":
                     gate = gates[(case['case_id'], scope_id(video), result['question_id'])]
                     if not gate['passed']:
                         excluded_answers.add(key)
@@ -299,10 +299,10 @@ def build_summary(
     if work_title_prefix is not None:
         summary["work_title_prefix"] = work_title_prefix
     summary["based"] = based
-    summary['baseline_filter'] = baseline_filter
-    if baseline_filter == 'passed':
+    summary['filter'] = filter_mode
+    if filter_mode == 'passed':
         reasons = Counter(g['reason'] for g in gates.values())
-        summary['baseline_gate'] = {
+        summary['filter_gate'] = {
             'unit': 'case + question_scope + question_id + model + thinking_effort + video_prefix',
             'total_questions': len(gates), 'passed_questions': reasons['passed'],
             'excluded_questions': len(gates) - reasons['passed'],
@@ -354,10 +354,10 @@ def build_markdown(
     work_title_prefix: bool | None,
     based: bool = False,
     video_scope: str | None = None,
-    baseline_filter: str = "all",
-    baseline_work_title_prefix: bool | None = None,
+    filter_mode: str = "all",
+    filter_work_title_prefix: bool | None = None,
 ) -> str:
-    gate_prefix = work_title_prefix if input_mode == 'video' else baseline_work_title_prefix
+    gate_prefix = work_title_prefix if input_mode == 'video' else filter_work_title_prefix
     effort_names = ", ".join(
         _effort_name(item) for item in sorted(efforts, key=str)
     )
@@ -378,14 +378,14 @@ def build_markdown(
         lines.extend([f"**Work-title prefix:** {prefix_name}", ""])
     if input_mode != "question_only":
         lines.extend([f"**Based prompt:** {'enabled' if based else 'disabled'}", ""])
-    if baseline_filter == 'passed':
-        lines.extend(['**Baseline filter:** both baselines must pass for each question/model/effort.', ''])
+    if filter_mode == 'passed':
+        lines.extend(['**Question filter:** both stages must pass for each question/model/effort.', ''])
         for effort in sorted(efforts, key=str):
             stats = build_summary(case_paths, qa_model=qa_model, input_mode=input_mode,
                                   effort=effort, work_title_prefix=work_title_prefix,
                                   based=based,
-                                  video_scope=video_scope, baseline_filter='passed',
-                                  baseline_work_title_prefix=baseline_work_title_prefix)['baseline_gate']
+                                  video_scope=video_scope, filter_mode='passed',
+                                  filter_work_title_prefix=filter_work_title_prefix)['filter_gate']
             lines.extend([f"- {_effort_name(effort)}: {stats['passed_questions']}/{stats['total_questions']} questions passed; "
                           f"{stats['excluded_judged_answers']} judged answers excluded. Reasons: {stats['reasons']}", ''])
     for path in case_paths:
@@ -457,7 +457,7 @@ def build_markdown(
                     question_groups.append(group)
                 group[1].append(video)
         for index, (question, question_videos) in enumerate(question_groups, start=1):
-            if baseline_filter == 'passed' and not any(
+            if filter_mode == 'passed' and not any(
                 question_gate(case, v, question, qa_model, effort, gate_prefix)['passed']
                 for v in question_videos for effort in efforts
             ):
@@ -476,7 +476,7 @@ def build_markdown(
                     for result in video["qa_results"]
                     if result.get("question_id") == question["question_id"]
                     and qa_is_current(case, video, result)
-                    and (baseline_filter != 'passed' or (
+                    and (filter_mode != 'passed' or (
                         judgment_is_current(case, video, result)
                         and question_gate(case, video, question, qa_model,
                                           qa_result_thinking_effort(result), gate_prefix)['passed']))
@@ -489,7 +489,7 @@ def build_markdown(
                         based=based,
                     )
                 )
-                if (input_mode == "description" or baseline_filter == 'passed') and not matching:
+                if (input_mode == "description" or filter_mode == 'passed') and not matching:
                     continue
                 lines.extend([f"#### Video `{video['video_id']}`", ""])
                 if input_mode == "description":
@@ -650,15 +650,15 @@ def command_summarize(args: argparse.Namespace) -> int:
     model_slug = QA_MODEL_SLUGS[args.qa_model]
     result_dir = grouped_dir(RESULTS_DIR, args.group) / model_slug
     prefix_name = _fairy_video_prefix_name(args)
-    baseline_filter = getattr(args, 'baseline_filter', 'all')
+    filter_mode = getattr(args, 'filter_mode', 'all')
     for effort in efforts:
         output_parts = [model_slug, args.input]
         if based_condition:
             output_parts.append('based')
         if prefix_name is not None:
             output_parts.append(prefix_name)
-        if baseline_filter == 'passed':
-            output_parts.append('baseline_passed')
+        if filter_mode == 'passed':
+            output_parts.append('filter_passed')
         output_parts.extend([_effort_name(effort), "summary"])
         output = result_dir / ("_".join(output_parts) + ".json")
         atomic_write_json(
@@ -671,8 +671,8 @@ def command_summarize(args: argparse.Namespace) -> int:
                 work_title_prefix=work_title_prefix,
                 based=based_condition,
                 video_scope=getattr(args, "video_scope", None),
-                baseline_filter=baseline_filter,
-                baseline_work_title_prefix=work_title_prefix_condition(args.group, 'video', args.with_work_title_prefix),
+                filter_mode=filter_mode,
+                filter_work_title_prefix=work_title_prefix_condition(args.group, 'video', args.with_work_title_prefix),
             ),
         )
         print(f"Wrote summary: {output}")
@@ -682,8 +682,8 @@ def command_summarize(args: argparse.Namespace) -> int:
         report_parts.append('based')
     if prefix_name is not None:
         report_parts.append(prefix_name)
-    if baseline_filter == 'passed':
-        report_parts.append('baseline_passed')
+    if filter_mode == 'passed':
+        report_parts.append('filter_passed')
     report_output = result_dir / ("_".join(report_parts) + "_report.md")
     atomic_write_text(
         report_output,
@@ -695,8 +695,8 @@ def command_summarize(args: argparse.Namespace) -> int:
             work_title_prefix=work_title_prefix,
             based=based_condition,
             video_scope=getattr(args, "video_scope", None),
-            baseline_filter=baseline_filter,
-            baseline_work_title_prefix=work_title_prefix_condition(args.group, 'video', args.with_work_title_prefix),
+            filter_mode=filter_mode,
+            filter_work_title_prefix=work_title_prefix_condition(args.group, 'video', args.with_work_title_prefix),
         ),
     )
     print(f"Wrote report: {report_output}")

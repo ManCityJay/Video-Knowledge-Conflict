@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from .integrity import (video_selected, description_is_current, qa_fingerprint, qa_is_current, require_writable_case)
-from .baselines import effective_prefix, qa_allowed
+from .integrity import (qa_fingerprint, qa_is_current, require_writable_case)
+from .filters import effective_prefix, qa_allowed
 
 import base64
 import os
@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from types import ModuleType
 from typing import Any, Callable, Iterable
-from .evidence import observed_summary
+from .selection import eligible_videos, selected_questions
 
 from .core import (
     PipelineError,
@@ -27,7 +27,6 @@ from .core import (
     qa_result_input_mode,
     require_question_only_compatible,
     resolve_video_path,
-    sha256_text,
     utc_now,
     video_case_context,
 )
@@ -816,12 +815,13 @@ def _preflight_cosmos_videos(
         return
     selected_videos = set(args.video_id or [])
     for _, case in loaded:
-        for video in case["videos"]:
-            if selected_videos and video["video_id"] not in selected_videos:
-                continue
-            if video_selected(video, args.input, getattr(args, "video_scope", None)):
-                path = resolve_video_path(video["local_path"], must_exist=True)
-                _cosmos_video_uri(path)
+        for video in eligible_videos(
+            case, input_mode=args.input, selected_video_ids=selected_videos,
+            video_scope=getattr(args, "video_scope", None),
+            based=bool(getattr(args, "based", False)),
+        ):
+            path = resolve_video_path(video["local_path"], must_exist=True)
+            _cosmos_video_uri(path)
 
 
 def _cosmos_served_model_id(timeout: int) -> str:
@@ -880,7 +880,7 @@ def command_qa(args: Any, *, cosmos_served_model_id: str | None = None) -> int:
     if args.qa_model == COSMOS_QA_MODEL and cosmos_served_model_id is None:
         cosmos_served_model_id = _cosmos_served_model_id(args.timeout)
     selected_videos = set(args.video_id or [])
-    selected_questions = set(args.question_id or [])
+    selected_question_ids = set(args.question_id or [])
     efforts = expand_thinking_efforts(args.thinking_effort, args.qa_model)
     prefix_condition = work_title_prefix_condition(
         args.group,
@@ -897,21 +897,10 @@ def command_qa(args: Any, *, cosmos_served_model_id: str | None = None) -> int:
         case = load_case(case_path)
         require_writable_case(case, case_path)
         if args.input == "question_only":
-            questions = require_question_only_compatible(case)
-            selected = [
-                question
-                for question in questions
-                if not selected_questions
-                or question["question_id"] in selected_questions
-            ]
-            missing_questions = selected_questions - {
-                question["question_id"] for question in selected
-            }
-            if missing_questions:
-                raise PipelineError(
-                    f"Question IDs not found in {case['case_id']}: "
-                    f"{', '.join(sorted(missing_questions))}"
-                )
+            selected = selected_questions(
+                {**case, "questions": require_question_only_compatible(case)},
+                selected_question_ids,
+            )
             jobs: list[tuple[dict[str, Any], list[tuple[dict[str, Any], str | None]]]] = []
             for question in selected:
                 existing = {
@@ -998,63 +987,15 @@ def command_qa(args: Any, *, cosmos_served_model_id: str | None = None) -> int:
             return case_completed, case_failures
 
         jobs: list[dict[str, Any]] = []
-        if args.input == "description" and selected_videos:
-            conflict_ids = {
-                video["video_id"]
-                for video in case["videos"]
-                if video["role"] == "conflict"
-            }
-            missing = selected_videos - conflict_ids
-            if missing:
-                raise PipelineError(
-                    f"Conflict video IDs not found in {case['case_id']}: "
-                    f"{', '.join(sorted(missing))}"
-                )
-        for video in case["videos"]:
-            if selected_videos and video["video_id"] not in selected_videos:
-                continue
-            if not video_selected(video, args.input, getattr(args, "video_scope", None)):
-                continue
-            path: Path | None = None
-            context_text: str | None = None
-            if args.input == "description":
-                if video["role"] != "conflict":
-                    continue
-                description = video.get("description")
-                if not isinstance(description, dict):
-                    raise PipelineError(
-                        f"Context is missing for {case['case_id']}/{video['video_id']}. "
-                        "Run description first."
-                    )
-                if not description_is_current(video):
-                    raise PipelineError(
-                        f"Context is stale for {case['case_id']}/{video['video_id']}. "
-                        "Run description again."
-                    )
-                context_text = description["context_en"]
-            else:
-                if video["status"] != "ready":
-                    continue
-                observed_summary(video)  # Blocks stale annotations after regeneration.
-                path = resolve_video_path(video["local_path"], must_exist=True)
+        for video in eligible_videos(
+            case, input_mode=args.input, selected_video_ids=selected_videos,
+            video_scope=getattr(args, "video_scope", None), based=based_condition,
+        ):
+            path = (resolve_video_path(video["local_path"], must_exist=True)
+                    if args.input == "video" else None)
+            context_text = video["description"]["context_en"] if args.input == "description" else None
             context = video_case_context(case, video)
-            if not context["questions"]:
-                raise PipelineError(
-                    f"Case {case['case_id']} has no questions. Run questions first."
-                )
-            questions = [
-                question
-                for question in context["questions"]
-                if not selected_questions or question["question_id"] in selected_questions
-            ]
-            missing_questions = selected_questions - {
-                question["question_id"] for question in questions
-            }
-            if missing_questions:
-                raise PipelineError(
-                    f"Question IDs not found in {case['case_id']}: "
-                    f"{', '.join(sorted(missing_questions))}"
-                )
+            questions = selected_questions(context, selected_question_ids)
 
             existing = {
                 qa_result_key(
