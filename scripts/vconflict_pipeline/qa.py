@@ -397,22 +397,17 @@ def _description_prompt(context: str, question: str, *, based: bool = False) -> 
 
 
 def extract_final_answer(raw_answer: str) -> str:
+    """Accept the final-answer marker anywhere on the last non-empty line."""
     lines = raw_answer.splitlines()
     while lines and not lines[-1].strip():
         lines.pop()
-    if not lines:
+    final_line = lines[-1].strip() if lines else ""
+    _, marker, final_answer = final_line.rpartition(FINAL_ANSWER_PREFIX)
+    final_answer = final_answer.strip()
+    if not marker or not final_answer:
         raise PipelineError(
-            f"QA response must end with a non-empty '{FINAL_ANSWER_PREFIX} ...' line."
-        )
-    final_line = lines[-1].strip()
-    if not final_line.startswith(FINAL_ANSWER_PREFIX):
-        raise PipelineError(
-            f"QA response must end with a non-empty '{FINAL_ANSWER_PREFIX} ...' line."
-        )
-    final_answer = final_line[len(FINAL_ANSWER_PREFIX) :].strip()
-    if not final_answer:
-        raise PipelineError(
-            f"QA response must end with a non-empty '{FINAL_ANSWER_PREFIX} ...' line."
+            f"QA response's last non-empty line must contain "
+            f"'{FINAL_ANSWER_PREFIX}' followed by a non-empty answer."
         )
     return final_answer
 

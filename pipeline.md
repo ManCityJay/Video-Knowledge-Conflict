@@ -325,9 +325,12 @@ input + question_id + qa_model + thinking_effort + based + work_title_prefix
 Conclude with exactly one final line in this format: Final answer: <your clear, direct answer in one sentence>.
 ```
 
-模型可以在此前输出分析，但最后一个非空行必须严格以 `Final answer:` 开头，且
-标记后必须有内容。Pipeline 将完整响应保存为 `raw_answer`，并将标记后的内容
-单独保存为 `final_answer`。缺少有效末行时，该 question/effort 立即失败，不保存
+提示词仍要求最终答案单独一行；解析时允许最后一个非空行在 `Final answer:` 前
+包含解释文字，例如 `Explanation. Final answer: Red.`，提取结果为 `Red.`。
+解析规则适用于所有 QA 模型及两层 filter，标记仍须大小写完全匹配；取该行最后
+一次 `Final answer:` 后的内容，去除首尾空白。标记缺失、标记后的答案为空，或
+标记仅出现在更早的行中时仍然失败。Pipeline 将完整响应保存为 `raw_answer`，
+并将提取的内容单独保存为 `final_answer`。缺少有效末行时，该 question/effort 立即失败，不保存
 QA 记录、不额外重试；同批其他 QA 和已有成功回答的 Judge 继续执行。
 
 重复运行不会追加相同输入的重复结果。视频、description 或 questions 由 pipeline 重建时，相应 QA 会被自动清理。
