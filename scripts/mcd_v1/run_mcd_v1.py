@@ -7,12 +7,18 @@ import argparse
 import copy
 import json
 import math
+import re
 import sys
 import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
+# Allow both the documented file entry point and package imports in tests.
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from mcd_v1.storage import write_json
 from vconflict_pipeline.core import PipelineError, resolve_video_path, video_case_context
 from vconflict_pipeline.qa import _cosmos_prompt, _video_question_prompt, extract_final_answer
 from vconflict_pipeline.settings import COSMOS_QA_MODEL, PROJECT_ROOT
@@ -83,7 +89,90 @@ def messages_for(prompt, video_path=None):
             {"role": "user", "content": content}]
 
 
-def main(argv=None):
+def prepare_video_inputs(processor, prompt, video_path, fps):
+    """Use PyAV with the processor's own frame-selection callback.
+
+    Transformers 5.11 defaults to TorchCodec whenever it is installed, even if
+    its native libraries cannot load. Override only a private processor copy;
+    do not uninstall packages or mutate the shared/global processor class.
+    """
+    from types import MethodType
+    from transformers.video_utils import load_video
+
+    video_processor = copy.copy(processor.video_processor)
+
+    def fetch_pyav(self, paths, sample_indices_fn=None):
+        if isinstance(paths, list):
+            return list(zip(*[
+                fetch_pyav(self, path, sample_indices_fn) for path in paths
+            ]))
+        return load_video(paths, backend="pyav", sample_indices_fn=sample_indices_fn)
+
+    video_processor.fetch_videos = MethodType(fetch_pyav, video_processor)
+    local_processor = copy.copy(processor)
+    local_processor.video_processor = video_processor
+    return local_processor.apply_chat_template(
+        messages_for(prompt, video_path), tokenize=True, add_generation_prompt=True,
+        return_dict=True, return_tensors="pt",
+        processor_kwargs={"fps": fps, "do_sample_frames": True},
+    )
+
+def parse_mcd_answer(raw_answer, finish_reason):
+    """Allow a single terminal inline answer marker outside closed think blocks."""
+    visible = re.sub(r"<think>.*?</think>", "", raw_answer, flags=re.DOTALL)
+    parsed, error, warning = None, None, None
+    try:
+        if "<think>" in visible or "</think>" in visible:
+            raise PipelineError("Unclosed or unmatched think tag in QA response.")
+        parsed = extract_final_answer(visible)
+    except PipelineError as exc:
+        error = str(exc)
+        # A missing newline is recoverable. Missing/empty/ambiguous markers,
+        # reasoning-only markers, and a separate trailing paragraph are not.
+        markers = list(re.finditer(r"(?<!\S)Final answer:", visible))
+        match = re.search(r"(?<!\S)Final answer:[ \t]*([^\r\n]+?)\s*\Z", visible)
+        if ("<think>" not in visible and "</think>" not in visible
+                and len(markers) == 1 and match and match.group(1).strip()):
+            parsed = match.group(1).strip()
+            warning = "Final answer marker was inline instead of on a separate final line."
+            error = None
+    fallback = (
+        error is not None and finish_reason == "eos" and bool(visible.strip())
+        and "<think>" not in visible and "</think>" not in visible
+        and "final answer" not in visible.lower()
+    )
+    if fallback:
+        warning = "Missing Final answer marker; full visible response requires manual evaluation."
+    status = ("truncated" if finish_reason == "length" else
+              "format_fallback" if fallback else "parse_error" if error else "ok")
+    return {
+        "final_answer": parsed, "parse_error": error, "format_warning": warning,
+        "evaluation_answer": visible.strip() if fallback else parsed,
+        "requires_manual_review": fallback,
+        "answer_parser_version": "mcd_v1_fallback_v2",
+        "status": status,
+    }
+
+
+def cached_model(args, dtype, processor_class, model_class, runtime):
+    """Reuse one checkpoint across sequential questions in the batch runner."""
+    key = (args.model, args.revision, args.device, args.dtype)
+    if runtime is not None and runtime:
+        if runtime["key"] != key:
+            raise ValueError("Cannot reuse runtime with a different model/device/dtype/revision")
+        return runtime["processor"], runtime["model"]
+    checkpoint = {"revision": args.revision} if args.revision else {}
+    print(f"Loading {args.model} on {args.device} ...", flush=True)
+    processor = processor_class.from_pretrained(args.model, **checkpoint)
+    model = model_class.from_pretrained(
+        args.model, dtype=dtype, device_map=args.device, attn_implementation="sdpa", **checkpoint
+    ).eval()
+    if runtime is not None:
+        runtime.update(key=key, processor=processor, model=model)
+    return processor, model
+
+
+def main(argv=None, *, runtime=None):
     parser = build_parser()
     args = parser.parse_args(argv)
     if not math.isfinite(args.weight) or args.weight < 0:
@@ -106,21 +195,17 @@ def main(argv=None):
         import torch
         import transformers
         from transformers import AutoProcessor, Cosmos3OmniForConditionalGeneration, GenerationConfig
-        from vconflict_pipeline.mcd_v1 import TextPriorContrastiveProcessor
+        from mcd_v1.decoding import TextPriorContrastiveProcessor
     except ImportError as exc:
-        parser.error(f"Install requirements-mcd-v1.txt in the server environment: {exc}")
+        parser.error(f"Install scripts/mcd_v1/requirements.txt in the server environment: {exc}")
 
     torch.manual_seed(0)
     dtype = getattr(torch, args.dtype)
-    checkpoint = {"revision": args.revision} if args.revision else {}
-    print(f"Loading {args.model} on {args.device} ...", flush=True)
-    processor = AutoProcessor.from_pretrained(args.model, **checkpoint)
-    model = Cosmos3OmniForConditionalGeneration.from_pretrained(
-        args.model, dtype=dtype, device_map=args.device, attn_implementation="sdpa", **checkpoint
-    ).eval()
-    video_inputs = processor.apply_chat_template(
-        messages_for(prompt, video), tokenize=True, add_generation_prompt=True,
-        return_dict=True, return_tensors="pt", fps=args.fps, do_sample_frames=True,
+    processor, model = cached_model(
+        args, dtype, AutoProcessor, Cosmos3OmniForConditionalGeneration, runtime,
+    )
+    video_inputs = prepare_video_inputs(
+        processor, prompt, video, args.fps,
     ).to(model.device, dtype)
     text_inputs = processor.apply_chat_template(
         messages_for(prompt), tokenize=True, add_generation_prompt=True,
@@ -151,7 +236,7 @@ def main(argv=None):
         "lambda": args.weight, "beta": args.beta, "fps": args.fps,
         "thinking_effort": "none", "dtype": args.dtype, "device": args.device,
         "max_new_tokens": args.max_new_tokens, "torch_version": torch.__version__,
-        "transformers_version": transformers.__version__, "negative_branch_cache": False,
+        "transformers_version": transformers.__version__, "negative_branch_cache": False, "video_backend": "pyav",
         "video_prompt_tokens": prompt_length,
         "text_prompt_tokens": text_inputs["input_ids"].shape[1],
         "video_grid_thw": video_inputs["video_grid_thw"].tolist(), "runs": {},
@@ -172,14 +257,9 @@ def main(argv=None):
         raw = processor.tokenizer.decode(token_ids, skip_special_tokens=True,
                                          clean_up_tokenization_spaces=False)
         finish = "eos" if token_ids and token_ids[-1] in eos_ids else "length"
-        parsed, parse_error = None, None
-        try:
-            parsed = extract_final_answer(raw)
-        except PipelineError as exc:
-            parse_error = str(exc)
-        return {"lambda": weight, "raw_answer": raw, "final_answer": parsed,
-                "parse_error": parse_error, "finish_reason": finish,
-                "status": "truncated" if finish == "length" else "parse_error" if parse_error else "ok",
+        answer_fields = parse_mcd_answer(raw, finish)
+        return {"lambda": weight, "raw_answer": raw, **answer_fields,
+                "finish_reason": finish,
                 "generated_token_ids": token_ids, "generated_tokens": len(token_ids),
                 "seconds": round(time.perf_counter() - start, 3)}
 
@@ -205,10 +285,7 @@ def main(argv=None):
         failed = True
         print(f"Generation failed: {exc}", file=sys.stderr)
     finally:
-        # Exclusive creation prevents replacing an existing experiment file.
-        with output_path.open("x", encoding="utf-8") as handle:
-            json.dump(result, handle, ensure_ascii=False, indent=2)
-            handle.write("\n")
+        write_json(output_path, result)
         print(f"Saved: {output_path}", flush=True)
     return 1 if failed else 0
 

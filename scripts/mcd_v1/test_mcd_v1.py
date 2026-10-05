@@ -1,12 +1,17 @@
-"""Small CPU checks to run on Chenmd: python scripts/test_mcd_v1.py"""
+"""CPU checks: python scripts/mcd_v1/test_mcd_v1.py."""
 
+import sys
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 
 import torch
 
-from vconflict_pipeline.mcd_v1 import TextPriorContrastiveProcessor, contrastive_scores
-from run_mcd_v1 import messages_for
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from mcd_v1.decoding import TextPriorContrastiveProcessor, contrastive_scores
+from mcd_v1.run_mcd_v1 import messages_for, parse_mcd_answer
 
 
 class FakeModel:
@@ -92,6 +97,61 @@ class MCDV1Tests(unittest.TestCase):
         text_messages = messages_for("same question")
         self.assertEqual(video_messages[0], text_messages[0])
         self.assertEqual(video_messages[1]["content"][1:], text_messages[1]["content"])
+
+
+    def test_inline_final_answer_recovered_with_warning(self):
+        result = parse_mcd_answer("The strip changed color. Final answer: Blue.  ", "eos")
+        self.assertEqual(result["final_answer"], "Blue.")
+        self.assertEqual(result["status"], "ok")
+        self.assertIsNone(result["parse_error"])
+        self.assertIsNotNone(result["format_warning"])
+
+    def test_standard_answer_unchanged(self):
+        result = parse_mcd_answer("<think></think>\nExplanation.\nFinal answer: Blue.\n", "eos")
+        self.assertEqual(result["final_answer"], "Blue.")
+        self.assertIsNone(result["format_warning"])
+
+    def test_invalid_final_answers_still_fail(self):
+        examples = ["", "Explanation. Final answer:   ",
+                    "Explanation. Final answer: Blue.\nMore explanation.",
+                    "<think>Final answer: Blue.</think>",
+                    "<think>Final answer: Blue.",
+                    "Example Final answer: Red. Actual Final answer: Blue."]
+        for raw in examples:
+            with self.subTest(raw=raw):
+                result = parse_mcd_answer(raw, "eos")
+                self.assertEqual(result["status"], "parse_error")
+                self.assertIsNone(result["final_answer"])
+
+    def test_missing_marker_requires_manual_evaluation(self):
+        result = parse_mcd_answer("<think>private reasoning</think> Blue.", "eos")
+        self.assertEqual(result["status"], "format_fallback")
+        self.assertEqual(result["evaluation_answer"], "Blue.")
+        self.assertIsNone(result["final_answer"])
+        self.assertTrue(result["requires_manual_review"])
+        self.assertIsNotNone(result["parse_error"])
+
+    def test_missing_marker_truncated_is_not_fallback(self):
+        result = parse_mcd_answer("The ball falls", "length")
+        self.assertEqual(result["status"], "truncated")
+        self.assertIsNone(result["evaluation_answer"])
+
+    def test_fallback_report_is_not_standard_success(self):
+        from mcd_v1.run_mcd_v1_batch import result_status, successful
+        result = {"runs": {"baseline": {"status": "ok"},
+                           "mcd_v1": {"status": "format_fallback"}}}
+        self.assertEqual(result_status(result), "format_fallback")
+        self.assertFalse(successful(result))
+
+    def test_reasoning_marker_ignored(self):
+        result = parse_mcd_answer("<think>Final answer: Red.</think> Saw blue. Final answer: Blue.", "eos")
+        self.assertEqual(result["final_answer"], "Blue.")
+
+    def test_truncation_not_hidden_by_recovery(self):
+        result = parse_mcd_answer("Explanation. Final answer: Blue.", "length")
+        self.assertEqual(result["status"], "truncated")
+        self.assertIsNotNone(result["format_warning"])
+
 
 
 if __name__ == "__main__":

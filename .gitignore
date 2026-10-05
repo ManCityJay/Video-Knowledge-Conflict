@@ -4,10 +4,12 @@
 /dataset/
 
 # Local working files and experiment backups
+/vllm
 /backups/
 /artifacts/
 /docs/
 /tests/
+/human_eval/
 
 # Local configuration and credentials
 /.vscode/

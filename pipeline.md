@@ -281,6 +281,14 @@ Cosmos 服务在仓库根目录运行 `./scripts/start_cosmos_vllm.sh` 启动；
 `--allowed-local-media-path` 下的 MP4。预检从 `/v1/models` 获取实际请求模型 ID；
 视频请求会自动采用 `plan.md` 中的全帧加载和 4 fps 处理器采样配置。
 已有 Cosmos QA 需用 `--force-qa` 重跑，才能使用新的处理路径。
+
+`scripts/start_gemma4_vllm.sh` 提供独立的 Gemma 4 服务入口，默认双卡、BF16、
+32K 上下文、端口 8001；`DRY_RUN=1 bash scripts/start_gemma4_vllm.sh` 可查看命令。
+可通过 `GEMMA_MODEL`、`GEMMA_REVISION`、`GEMMA_CONDA_ENV` 指定模型和环境，
+`CUDA_VISIBLE_DEVICES`、`TENSOR_PARALLEL_SIZE`、`MAX_MODEL_LEN`、`MAX_NUM_SEQS`、
+`GPU_MEMORY_UTILIZATION`、`VLLM_HOST`、`VLLM_PORT` 调整部署；`MEDIA_ROOT` 指定
+媒体目录，`TEXT_ONLY=1` 关闭多模态输入。主流水线的 `--qa-model` 尚未接入 Gemma。
+
 服务不可达、模型 ID 不明确或选中的视频格式错误时，`--force-qa` 不会清除旧回答。
 输出达到 `max_tokens` 上限时该次 QA 失败，不保存截断回答。修改输出上限后需要
 `--force-qa` 才能替换已有结果。Cosmos QA 不使用 OpenRouter RPM 限制；Judge

@@ -366,6 +366,8 @@ Report 同时展示 QA 的完整 `raw_answer`、Judge 实际使用的 `final_ans
 scripts/
 ├── pipeline.py
 ├── start_cosmos_vllm.sh
+├── start_gemma4_vllm.sh
+├── mcd_v1/              # 独立对比解码实验；见该目录 README.md
 └── vconflict_pipeline/
     ├── cli.py
     ├── settings.py
