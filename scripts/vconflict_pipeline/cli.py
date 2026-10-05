@@ -25,6 +25,9 @@ from .settings import (
     COSMOS_QA_MODEL,
     DEFAULT_COSMOS_MAX_TOKENS,
     DEFAULT_COSMOS_WORKERS,
+    GEMMA_QA_MODEL,
+    DEFAULT_GEMMA_MAX_TOKENS,
+    DEFAULT_GEMMA_WORKERS,
     DEFAULT_CASE_DIR,
     DEFAULT_CASE_WORKERS,
     DEFAULT_QA_MODEL,
@@ -208,7 +211,7 @@ def build_parser() -> argparse.ArgumentParser:
             alias for alias, model in CLI_QA_MODEL_IDS.items()
             if model == DEFAULT_QA_MODEL
         ),
-        metavar="{gemini,qwen3.8-max,kimi-k3,cosmos3-nano}",
+        metavar="{" + ",".join(CLI_QA_MODELS) + "}",
     )
     _add_input(qa_judge)
     _add_case_workers(qa_judge)
@@ -219,6 +222,8 @@ def build_parser() -> argparse.ArgumentParser:
     qa_judge.add_argument("--qa-workers", type=int)
     qa_judge.add_argument("--cosmos-workers", type=int, default=DEFAULT_COSMOS_WORKERS)
     qa_judge.add_argument("--cosmos-max-tokens", type=int, default=DEFAULT_COSMOS_MAX_TOKENS)
+    qa_judge.add_argument("--gemma-workers", type=int, default=DEFAULT_GEMMA_WORKERS)
+    qa_judge.add_argument("--gemma-max-tokens", type=int, default=DEFAULT_GEMMA_MAX_TOKENS)
     _add_retries(qa_judge, timeout=REQUEST_TIMEOUT_SECONDS)
     force = qa_judge.add_mutually_exclusive_group()
     force.add_argument("--force-qa", action="store_true")
@@ -235,7 +240,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--qa-model",
         type=_qa_model,
         required=True,
-        metavar="{gemini,qwen3.8-max,kimi-k3,cosmos3-nano}",
+        metavar="{" + ",".join(CLI_QA_MODELS) + "}",
     )
     _add_input(summarize)
     _add_thinking_effort(summarize)
@@ -272,7 +277,10 @@ def _validate(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None
     if hasattr(args, "video_scope") and args.video_scope is None:
         args.video_scope = "qualified" if args.group == "mathematics_algorithm_conflicts" else "all"
     if args.command == "qa-judge" and args.qa_workers is None:
-        args.qa_workers = 4 if args.qa_model == COSMOS_QA_MODEL else 3
+        args.qa_workers = {
+            COSMOS_QA_MODEL: DEFAULT_COSMOS_WORKERS,
+            GEMMA_QA_MODEL: DEFAULT_GEMMA_WORKERS,
+        }.get(args.qa_model, 3)
     if getattr(args, "audit_only", False) and (args.force or args.repair_variant_context):
         parser.error("--audit-only cannot be combined with --force or --repair-variant-context")
     if getattr(args, "repair_variant_context", False):
@@ -309,6 +317,8 @@ def _validate(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None
         "qa_workers",
         "cosmos_workers",
         "cosmos_max_tokens",
+        "gemma_workers",
+        "gemma_max_tokens",
     ):
         if hasattr(args, field) and getattr(args, field) <= 0:
             parser.error(f"--{field.replace('_', '-')} must be greater than zero")

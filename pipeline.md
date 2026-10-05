@@ -274,7 +274,11 @@ description 或 human review。
   `nvidia/Cosmos3-Nano`；支持 `none` 和 `default`，视频以 4 fps 采样，
   `max_tokens` 默认 4096。`--cosmos-max-tokens` 可调整输出上限，
   `--cosmos-workers` 默认 4；
-  Cosmos 的 `--qa-workers` 默认也为 4，其他模型仍为 3。
+  Cosmos 的 `--qa-workers` 默认也为 4。
+- Gemma 4：CLI 使用 `--qa-model gemma4`，模型 ID 为 `google/gemma-4-31B-it`；
+  支持 `none` 和 `default`，省略 effort 时使用 `default`，`all` 运行两种条件。
+  `--gemma-workers` 和 Gemma 的 `--qa-workers` 均默认 2，
+  `--gemma-max-tokens` 默认 4096。其他模型的 `--qa-workers` 仍默认 3。
 
 Cosmos 服务在仓库根目录运行 `./scripts/start_cosmos_vllm.sh` 启动；完整启动参数
 和架构说明见 `plan.md` 的「模型配置」。视频路径须是服务端可读取、位于
@@ -287,11 +291,42 @@ Cosmos 服务在仓库根目录运行 `./scripts/start_cosmos_vllm.sh` 启动；
 可通过 `GEMMA_MODEL`、`GEMMA_REVISION`、`GEMMA_CONDA_ENV` 指定模型和环境，
 `CUDA_VISIBLE_DEVICES`、`TENSOR_PARALLEL_SIZE`、`MAX_MODEL_LEN`、`MAX_NUM_SEQS`、
 `GPU_MEMORY_UTILIZATION`、`VLLM_HOST`、`VLLM_PORT` 调整部署；`MEDIA_ROOT` 指定
-媒体目录，`TEXT_ONLY=1` 关闭多模态输入。主流水线的 `--qa-model` 尚未接入 Gemma。
+媒体目录，`TEXT_ONLY=1` 关闭多模态输入。Pipeline 使用 `GEMMA_BASE_URL`，默认
+`http://127.0.0.1:8001/v1`，服务端口改变时须同步设置该变量。
+
+Gemma 视频使用服务端可读的 MP4 `file://` 路径。启动脚本及每个视频请求均设置
+`video_backend=opencv,num_frames=32,fps=-1`，对整段视频均匀采样最多 32 帧，
+不足 32 帧时保留全部帧；视频处理路径使用每帧最多 70 个视觉 token。
+这与[官方处理器的默认配置](https://huggingface.co/google/gemma-4-31B-it/blob/main/processor_config.json)
+对齐，替换了旧脚本额外的 `fps=1` 限制；不使用 Cosmos 的 4 fps 处理器采样。
+Gemma 固定使用实验生成参数 `temperature=0,seed=0`。
+请求通过 `chat_template_kwargs.enable_thinking` 显式控制推理开关。
+回答正文保存到 `raw_answer`，返回的推理文本另存为可选 `reasoning_content`；
+Judge 只读取从正文提取的 `final_answer`。
+
+```bash
+bash scripts/start_gemma4_vllm.sh
+# 在另一个终端中运行；Judge 仍需 OPENROUTER_API_KEY。
+python scripts/pipeline.py qa-judge --group <group> --qa-model gemma4 \
+  --input video --thinking-effort all
+python scripts/pipeline.py qa-judge --group <group> --qa-model gemma4 \
+  --input description --thinking-effort all
+python scripts/pipeline.py qa-judge --group <group> --qa-model gemma4 \
+  --input question_only --thinking-effort all
+python scripts/pipeline.py qa-judge --group <group> --qa-model gemma4 \
+  --input video --thinking-effort all --filter-only
+python scripts/pipeline.py summarize --group <group> --qa-model gemma4 \
+  --input video --thinking-effort all --filter passed
+```
+
+Gemma 的 video/description 自动运行 question-only → control-video 两层 filter，
+因此 description 同样需要启用视频的服务；`TEXT_ONLY=1` 仅适用于独立的
+question-only QA。`--based`、Fairy `--with-work-title-prefix`、私有数学题目、
+续跑和 force 规则均沿用现有流程，filter 使用相同 Gemma 参数。
 
 服务不可达、模型 ID 不明确或选中的视频格式错误时，`--force-qa` 不会清除旧回答。
 输出达到 `max_tokens` 上限时该次 QA 失败，不保存截断回答。修改输出上限后需要
-`--force-qa` 才能替换已有结果。Cosmos QA 不使用 OpenRouter RPM 限制；Judge
+`--force-qa` 才能替换已有结果。Cosmos/Gemma QA 不使用 OpenRouter RPM 限制；Judge
 仍使用原有 OpenRouter 限制。
 
 Video 和 Description QA 新结果都记录布尔字段 `based`；旧结果缺失时视为
@@ -506,7 +541,7 @@ python scripts/pipeline.py summarize \
   --thinking-effort all
 ```
 
-模型短名映射为 `qwen`、`kimi`、`gemini` 和 `cosmos`。以上命令自动生成：
+模型短名映射为 `qwen`、`kimi`、`gemini`、`cosmos` 和 `gemma`。以上命令自动生成：
 
 ```text
 results/classic_fairy_tale_film_conflicts/qwen/qwen_description_none_summary.json

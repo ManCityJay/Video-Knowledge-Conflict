@@ -27,7 +27,7 @@ prefix 隔离，不按 case 或 video 整体筛掉。
 control 视频，并为每个独立语义目标生成一个中性问题。
 
 Luna Pro 负责 case authoring、问题生成、文字 context 生成和答案判定；
-Seedance 负责生成视频；Gemini、Qwen、Kimi 或本地 Cosmos3-Nano 负责视频、
+Seedance 负责生成视频；Gemini、Qwen、Kimi 或本地 Cosmos3-Nano、Gemma 4 负责视频、
 文字 context 或 question-only QA。
 
 ## 数据结构
@@ -113,6 +113,7 @@ $env:ARK_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3"
 $env:DASHSCOPE_BASE_HTTP_API_URL = "https://dashscope.aliyuncs.com/api/v1"
 $env:MOONSHOT_BASE_URL = "https://api.moonshot.cn/v1"
 $env:COSMOS_BASE_URL = "http://127.0.0.1:8000/v1"
+$env:GEMMA_BASE_URL = "http://127.0.0.1:8001/v1"
 ```
 
 历史 `QWEN_BASE_URL` 仍兼容；`/compatible-mode/v1` 后缀会自动转换为
@@ -127,6 +128,9 @@ $env:COSMOS_BASE_URL = "http://127.0.0.1:8000/v1"
 - Kimi QA：`kimi-k3`，有效温度为 `1.0`。
 - Cosmos3-Nano QA：`nvidia/Cosmos3-Nano`，本地 vLLM 服务，固定
   `temperature=0`、`seed=0`；请求使用 `/v1/models` 返回的模型 ID。
+- Gemma 4 QA：CLI 使用 `--qa-model gemma4`，结果记录
+  `google/gemma-4-31B-it`；本地 vLLM 默认端口 8001，固定
+  `temperature=0`、`seed=0`，请求使用 `/v1/models` 返回的模型 ID。
 
 Gemini 和 Kimi 把本地视频编码为 Base64 Data URL。Qwen 使用中国大陆
 DashScope endpoint，并把本地绝对路径转换为 `file:///...` URI 交给 SDK。
@@ -173,6 +177,26 @@ Cosmos 视频的实验采样协议是先保留原始视频帧，再由模型配�
 `media_io_kwargs={"video":{"video_backend":"opencv","num_frames":-1,"fps":-1}}`
 和 `mm_processor_kwargs={"fps":4,"do_sample_frames":true}`。全帧解码会增加
 CPU 内存占用。
+
+Gemma 4 服务通过 `bash scripts/start_gemma4_vllm.sh` 启动，默认双卡 BF16、
+32K 上下文。视频同样使用服务端可读的 MP4 `file://` 路径，须位于
+`MEDIA_ROOT`（默认仓库 `videos/`）内。视频请求显式传入
+`media_io_kwargs={"video":{"video_backend":"opencv","num_frames":32,"fps":-1}}`，
+由加载器对整段视频均匀采样最多 32 帧（不足 32 帧时保留全部帧），Gemma 的
+vLLM 视频处理路径使用每帧最多 70 个视觉 token，不再叠加处理器 fps 采样。
+这是对齐官方 HF 处理器的 32 帧均匀采样默认；旧启动脚本额外设置的 `fps=1`
+会减少短视频帧数，本次移除该限制及多余的全局视觉预算覆盖。
+来源：[官方处理器配置](https://huggingface.co/google/gemma-4-31B-it/blob/main/processor_config.json)、
+[vLLM Gemma 视频实现](https://github.com/vllm-project/vllm/blob/v0.29.0/vllm/model_executor/models/gemma4_mm.py)。
+
+Gemma 支持 `--thinking-effort none|default|all`，省略时使用 `default`；
+请求以 `chat_template_kwargs.enable_thinking` 显式关闭或开启推理，不依赖服务端
+默认值。`--gemma-workers` 和 Gemma 的 `--qa-workers` 均默认 2；
+`--gemma-max-tokens` 默认 4096。文字请求不含视频或采样参数。
+主 QA 和两层 filter 共用同一模型配置，本地 QA 不使用 OpenRouter RPM 限制。
+`raw_answer` 保存回答正文，可选 `reasoning_content` 保存服务返回的推理文本；
+`final_answer` 仅从正文提取，Judge 不读取推理内容。生成温度 0 是本实验选择，
+区别于模型卡推荐的随机生成参数。完整命令见 `pipeline.md`。
 
 ## 判断与指标
 
@@ -321,13 +345,38 @@ video/context 依据指令并使用独立指纹，`Final answer:` 指令仍在�
 后者只清空 judgment。Force 会先预检全部选中 case 和依赖，再统一清理并写回
 所有 case；全部清理成功前禁止调用模型，避免不同 case 中新旧结果混合。
 
-命令结束打印 QA 和 Judge 各自的完成数/总数。部分 QA 失败时仍判定其他已完成
-回答，最终以非零状态退出。
+命令结束打印 QA 和 Judge 各自的完成数/总数。Video/description 的终端完成比例
+仅包含通过双层 filter 的 conflict 目标，不包含 control；QA 单位为 video ×
+question × thinking effort，Judge 统计对应有效 QA 记录。独立运行
+`--input question_only` 时仍统计 question × thinking effort。已有可复用结果计为
+完成，summary/report 继续保留独立的 control 对照统计。执行调度、force 和退出码
+的完成校验范围不因终端显示调整而改变。部分 QA 失败时仍判定其他已完成回答，
+最终以非零状态退出。
+
+每次运行还会按三个阶段分别打印 QA 输出诊断。本地 Cosmos/Gemma 的格式为：
+
+```text
+QA output diagnostics (main, this run): max_tokens_truncated=<数量>, missing_final_answer=<数量>
+QA output diagnostics (question_only filter, this run): max_tokens_truncated=<数量>, missing_final_answer=<数量>
+QA output diagnostics (control filter, this run): max_tokens_truncated=<数量>, missing_final_answer=<数量>
+```
+
+`main` 表示 conflict video/description QA，或独立运行的 question-only QA。
+两层 filter 分别统计，不混入主实验。只有 Cosmos/Gemma 根据
+`finish_reason == "length"` 统计截断；截断优先，同一回答不再重复计为缺少
+final answer。Gemini/Qwen/Kimi 等闭源模型不检测截断，诊断行仅显示
+`missing_final_answer`。
+
+缺少有效 final answer 包括有效响应正文为空、仅有 reasoning，以及不满足现有
+末行 `Final answer:` 规则的回答。网络错误或响应结构损坏不计入该类。计数仅覆盖
+本次实际执行的 QA，缓存复用和历史失败不计入，不持久化失败明细。正常结束、
+`--filter-only`、无目标或无问题通过 filter 等正常提前返回路径都输出三组诊断，
+未执行或没有这两类问题时显示零值；其他请求失败仍按原逻辑报错。
 
 `summarize` 为每个实际 effort 生成：
 
 ```text
-results/<group>/<qwen|kimi|gemini|cosmos>_<video|description>_<none|default>_summary.json
+results/<group>/<qwen|kimi|gemini|cosmos|gemma>_<video|description>_<none|default>_summary.json
 ```
 
 Question-only 产物为：
@@ -352,7 +401,7 @@ results/classic_fairy_tale_film_conflicts/<model>_video_with_prefix_<effort>_sum
 同一模型和 input 的不同 effort 合并到：
 
 ```text
-results/<group>/<qwen|kimi|gemini|cosmos>_<video|description>_report.md
+results/<group>/<qwen|kimi|gemini|cosmos|gemma>_<video|description>_report.md
 ```
 
 Fairy video report 同样分别使用 `_video_no_prefix_report.md` 和

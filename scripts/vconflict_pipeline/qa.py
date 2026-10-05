@@ -17,6 +17,7 @@ from pathlib import Path
 from types import ModuleType
 from typing import Any, Callable, Iterable
 from .selection import eligible_videos, selected_questions
+from .qa_diagnostics import QADiagnostics, QADiagnosticStage
 
 from .core import (
     PipelineError,
@@ -34,12 +35,16 @@ from .settings import (
     COSMOS_QA_MODEL,
     DEFAULT_COSMOS_BASE_URL,
     DEFAULT_COSMOS_MAX_TOKENS,
+    DEFAULT_GEMMA_BASE_URL,
+    DEFAULT_GEMMA_MAX_TOKENS,
+    GEMMA_QA_MODEL,
     FAIRY_TALE_GROUP,
     GEMINI_QA_MODEL,
     KIMI_QA_MODEL,
     QWEN_QA_MODEL,
 )
 from .transport import (
+    EmptyResponseTextError,
     OPENROUTER_URL,
     RequestLimiter,
     TransportError,
@@ -62,6 +67,16 @@ FINAL_ANSWER_INSTRUCTION = (
     "Conclude with exactly one final line in this format: "
     "Final answer: <your clear, direct answer in one sentence>."
 )
+
+
+class MissingFinalAnswerError(PipelineError):
+    """Answer text does not contain a valid final-answer line."""
+
+
+class TruncatedAnswerError(PipelineError):
+    """A local QA response stopped at its output token limit."""
+
+
 VIDEO_MIME_TYPES = {
     ".mp4": "video/mp4",
     ".m4v": "video/mp4",
@@ -136,24 +151,25 @@ def _compatible_endpoint(variable: str, default: str) -> str:
     return f"{base_url}/chat/completions"
 
 
-def _cosmos_base_url() -> str:
+def _local_base_url(model: str) -> str:
+    config = LOCAL_QA_CONFIGS[model]
     return (
-        os.environ.get("COSMOS_BASE_URL", "").strip().rstrip("/")
-        or DEFAULT_COSMOS_BASE_URL
+        os.environ.get(config.base_url_variable, "").strip().rstrip("/")
+        or config.default_base_url
     )
 
 
-def _cosmos_video_uri(video_path: Path) -> str:
+def _local_video_uri(video_path: Path, service: str) -> str:
     if video_path.suffix.lower() != ".mp4":
-        raise PipelineError(f"Cosmos3-Nano requires an MP4 video: {video_path}")
+        raise PipelineError(f"{service} requires an MP4 video: {video_path}")
     try:
         resolved = video_path.resolve(strict=True)
         if not resolved.is_file():
-            raise PipelineError(f"Cosmos3-Nano video is not a file: {video_path}")
+            raise PipelineError(f"{service} video is not a file: {video_path}")
         return resolved.as_uri()
     except (OSError, ValueError) as exc:
         raise PipelineError(
-            f"Could not create a file URI for Cosmos3-Nano video {video_path}: {exc}"
+            f"Could not create a file URI for {service} video {video_path}: {exc}"
         ) from exc
 
 
@@ -257,6 +273,10 @@ def _normalize_dashscope_response(response: Any) -> dict[str, Any]:
     if not isinstance(choices, (list, tuple)) or not choices:
         raise TransportError("Qwen response did not contain an answer choice.")
     message = _response_field(choices[0], "message")
+    if not isinstance(message, Mapping) and not any(
+        hasattr(message, field) for field in ("content", "role", "reasoning_content")
+    ):
+        raise TransportError("Qwen response did not contain a message.")
     content = _response_field(message, "content")
     if isinstance(content, str):
         answer = content
@@ -266,10 +286,19 @@ def _normalize_dashscope_response(response: Any) -> dict[str, Any]:
             for part in content
             if isinstance((text := _response_field(part, "text")), str)
         )
+        if not answer.strip() and any(
+            (not isinstance(part, Mapping) and not hasattr(part, "text"))
+            or (_response_field(part, "text") is not None
+                and not isinstance(_response_field(part, "text"), str))
+            for part in content
+        ):
+            raise TransportError("Qwen response did not contain textual content.")
     else:
+        if content is not None:
+            raise TransportError("Qwen response did not contain textual content.")
         answer = ""
     if not answer.strip():
-        raise TransportError("Qwen response did not contain textual content.")
+        raise EmptyResponseTextError("Qwen response did not contain textual content.")
 
     normalized: dict[str, Any] = {
         "choices": [{"message": {"content": answer}}],
@@ -405,7 +434,7 @@ def extract_final_answer(raw_answer: str) -> str:
     _, marker, final_answer = final_line.rpartition(FINAL_ANSWER_PREFIX)
     final_answer = final_answer.strip()
     if not marker or not final_answer:
-        raise PipelineError(
+        raise MissingFinalAnswerError(
             f"QA response's last non-empty line must contain "
             f"'{FINAL_ANSWER_PREFIX}' followed by a non-empty answer."
         )
@@ -497,6 +526,77 @@ def _cosmos_payload(
     return payload
 
 
+def _gemma_payload(
+    *,
+    prompt_text: str,
+    video_uri: str | None,
+    thinking_effort: str | None,
+    served_model_id: str,
+    max_tokens: int,
+) -> dict[str, Any]:
+    if thinking_effort not in (None, "default"):
+        raise PipelineError("Gemma 4 thinking effort must be none or default.")
+    content: str | list[dict[str, Any]] = prompt_text
+    if video_uri is not None:
+        content = [
+            {"type": "video_url", "video_url": {"url": video_uri}},
+            {"type": "text", "text": prompt_text},
+        ]
+    payload: dict[str, Any] = {
+        "model": served_model_id,
+        "temperature": 0.0,
+        "seed": 0,
+        "max_tokens": max_tokens,
+        "stream": False,
+        "chat_template_kwargs": {"enable_thinking": thinking_effort == "default"},
+        "messages": [
+            {"role": "system", "content": "You are a helpful assistant."},
+            {"role": "user", "content": content},
+        ],
+    }
+    if video_uri is not None:
+        # Sample the whole video once. Gemma's vLLM processor uses 70 tokens
+        # per frame; no Cosmos fps resampling or image-budget override applies.
+        payload["media_io_kwargs"] = {
+            "video": {"video_backend": "opencv", "num_frames": 32, "fps": -1}
+        }
+    return payload
+
+
+@dataclass(frozen=True)
+class LocalQAConfig:
+    base_url_variable: str
+    default_base_url: str
+    workers_argument: str
+    max_tokens_argument: str
+    default_max_tokens: int
+    build_payload: Callable[..., dict[str, Any]]
+
+
+LOCAL_QA_CONFIGS = {
+    COSMOS_QA_MODEL: LocalQAConfig(
+        "COSMOS_BASE_URL", DEFAULT_COSMOS_BASE_URL, "cosmos_workers",
+        "cosmos_max_tokens", DEFAULT_COSMOS_MAX_TOKENS, _cosmos_payload,
+    ),
+    GEMMA_QA_MODEL: LocalQAConfig(
+        "GEMMA_BASE_URL", DEFAULT_GEMMA_BASE_URL, "gemma_workers",
+        "gemma_max_tokens", DEFAULT_GEMMA_MAX_TOKENS, _gemma_payload,
+    ),
+}
+
+
+def make_qa_request_limiter(args: Any) -> RequestLimiter:
+    config = LOCAL_QA_CONFIGS.get(args.qa_model)
+    if config is not None:
+        return RequestLimiter(getattr(args, config.workers_argument))
+    return make_request_limiter(args)
+
+
+def local_qa_max_tokens(args: Any) -> int | None:
+    config = LOCAL_QA_CONFIGS.get(args.qa_model)
+    return getattr(args, config.max_tokens_argument) if config is not None else None
+
+
 GEMINI_BACKEND = QABackend(
     model=GEMINI_QA_MODEL,
     thinking_efforts=("default",),
@@ -537,12 +637,22 @@ COSMOS_BACKEND = QABackend(
     temperature=0.0,
     api_key_variable=None,
     service="Cosmos3-Nano",
-    endpoint=lambda: f"{_cosmos_base_url()}/chat/completions",
+    endpoint=lambda: f"{_local_base_url(COSMOS_QA_MODEL)}/chat/completions",
+    build_payload=None,
+)
+GEMMA_BACKEND = QABackend(
+    model=GEMMA_QA_MODEL,
+    thinking_efforts=(None, "default"),
+    default_thinking_effort="default",
+    temperature=0.0,
+    api_key_variable=None,
+    service="Gemma 4",
+    endpoint=lambda: f"{_local_base_url(GEMMA_QA_MODEL)}/chat/completions",
     build_payload=None,
 )
 QA_BACKENDS = {
     backend.model: backend
-    for backend in (GEMINI_BACKEND, QWEN_BACKEND, KIMI_BACKEND, COSMOS_BACKEND)
+    for backend in (GEMINI_BACKEND, QWEN_BACKEND, KIMI_BACKEND, COSMOS_BACKEND, GEMMA_BACKEND)
 }
 
 
@@ -667,9 +777,11 @@ def run_qa_batch(
     timeout: int,
     max_retries: int,
     request_limiter: RequestLimiter,
-    cosmos_served_model_id: str | None = None,
-    cosmos_max_tokens: int = DEFAULT_COSMOS_MAX_TOKENS,
+    local_served_model_id: str | None = None,
+    local_max_tokens: int | None = None,
     based: bool = False,
+    diagnostics: QADiagnostics | None = None,
+    diagnostic_stage: QADiagnosticStage = "main",
 ) -> tuple[list[dict[str, Any]], list[tuple[str, str | None, str]]]:
     backend = get_backend(qa_model)
     if input_mode == "video":
@@ -681,8 +793,8 @@ def run_qa_batch(
             )
         if qa_model == QWEN_QA_MODEL:
             video_input = _qwen_video_uri(video_path)
-        elif qa_model == COSMOS_QA_MODEL:
-            video_input = _cosmos_video_uri(video_path)
+        elif qa_model in LOCAL_QA_CONFIGS:
+            video_input = _local_video_uri(video_path, backend.service)
         else:
             video_input = backend.encode_video(video_path)
     elif input_mode == "description":
@@ -727,15 +839,17 @@ def run_qa_batch(
                     max_retries=max_retries,
                 )
             else:
-                if qa_model == COSMOS_QA_MODEL:
-                    if cosmos_served_model_id is None:
-                        raise PipelineError("Cosmos3-Nano served model ID is missing.")
-                    payload = _cosmos_payload(
+                if qa_model in LOCAL_QA_CONFIGS:
+                    if local_served_model_id is None:
+                        raise PipelineError(f"{backend.service} served model ID is missing.")
+                    config = LOCAL_QA_CONFIGS[qa_model]
+                    payload = config.build_payload(
                         prompt_text=prompt_text,
                         video_uri=video_input,
                         thinking_effort=thinking_effort,
-                        served_model_id=cosmos_served_model_id,
-                        max_tokens=cosmos_max_tokens,
+                        served_model_id=local_served_model_id,
+                        max_tokens=(local_max_tokens if local_max_tokens is not None
+                                    else config.default_max_tokens),
                     )
                 elif input_mode != "video" and qa_model == GEMINI_QA_MODEL:
                     payload = _gemini_description_payload(prompt_text, thinking_effort)
@@ -756,7 +870,7 @@ def run_qa_batch(
                     request_limiter=request_limiter,
                     max_retries=max_retries,
                 )
-            if qa_model == COSMOS_QA_MODEL:
+            if qa_model in LOCAL_QA_CONFIGS:
                 choices = response.get("choices")
                 if (
                     isinstance(choices, list)
@@ -764,13 +878,19 @@ def run_qa_batch(
                     and isinstance(choices[0], dict)
                     and choices[0].get("finish_reason") == "length"
                 ):
-                    raise PipelineError(
-                        "Cosmos3-Nano answer was truncated at max_tokens; "
-                        "increase --cosmos-max-tokens and rerun this QA."
+                    raise TruncatedAnswerError(
+                        f"{backend.service} answer was truncated at max_tokens; "
+                        f"increase --{LOCAL_QA_CONFIGS[qa_model].max_tokens_argument.replace('_', '-')} "
+                        "and rerun this QA."
                     )
             raw_answer = backend.extract_answer(response)
             final_answer = extract_final_answer(raw_answer)
         except PipelineError as exc:
+            if diagnostics is not None:
+                if isinstance(exc, TruncatedAnswerError):
+                    diagnostics.record(diagnostic_stage, "max_tokens_truncated")
+                elif isinstance(exc, (MissingFinalAnswerError, EmptyResponseTextError)):
+                    diagnostics.record(diagnostic_stage, "missing_final_answer")
             failures.append(
                 (question["question_id"], thinking_effort, str(exc))
             )
@@ -797,13 +917,20 @@ def run_qa_batch(
             result["based"] = based
         if backend.effective_reasoning_effort is not None:
             result["effective_reasoning_effort"] = backend.effective_reasoning_effort
+        if qa_model == GEMMA_QA_MODEL:
+            message = response["choices"][0]["message"]
+            for field in ("reasoning", "reasoning_content"):
+                reasoning = message.get(field)
+                if isinstance(reasoning, str) and reasoning.strip():
+                    result["reasoning_content"] = reasoning
+                    break
         if isinstance(response.get("usage"), dict):
             result["usage"] = response["usage"]
         results.append(result)
     return results, failures
 
 
-def _preflight_cosmos_videos(
+def _preflight_local_videos(
     args: Any, loaded: list[tuple[Path, dict[str, Any]]]
 ) -> None:
     if args.input != "video":
@@ -816,18 +943,19 @@ def _preflight_cosmos_videos(
             based=bool(getattr(args, "based", False)),
         ):
             path = resolve_video_path(video["local_path"], must_exist=True)
-            _cosmos_video_uri(path)
+            _local_video_uri(path, get_backend(args.qa_model).service)
 
 
-def _cosmos_served_model_id(timeout: int) -> str:
+def _local_served_model_id(model: str, timeout: int) -> str:
+    service = get_backend(model).service
     response = get_json(
-        url=f"{_cosmos_base_url()}/models",
+        url=f"{_local_base_url(model)}/models",
         timeout=min(timeout, 10),
-        service="Cosmos3-Nano",
+        service=service,
     )
     models = response.get("data")
     if not isinstance(models, list) or not models:
-        raise PipelineError("Cosmos3-Nano /models returned no served models.")
+        raise PipelineError(f"{service} /models returned no served models.")
     ids = [
         item.get("id")
         for item in models
@@ -836,14 +964,14 @@ def _cosmos_served_model_id(timeout: int) -> str:
         and item["id"].strip()
     ]
     if len(ids) != len(models):
-        raise PipelineError("Cosmos3-Nano /models returned an invalid model ID.")
-    if COSMOS_QA_MODEL in ids:
-        return COSMOS_QA_MODEL
+        raise PipelineError(f"{service} /models returned an invalid model ID.")
+    if model in ids:
+        return model
     if len(ids) == 1:
         return ids[0]
     raise PipelineError(
-        "Cosmos3-Nano /models returned multiple models without a unique "
-        f"{COSMOS_QA_MODEL} entry: {', '.join(ids)}."
+        f"{service} /models returned multiple models without a unique "
+        f"{model} entry: {', '.join(ids)}."
     )
 
 
@@ -855,25 +983,24 @@ def preflight_qa_backend(
     if args.qa_model == QWEN_QA_MODEL:
         _require_dashscope_sdk()
     backend.require_api_key()
-    if args.qa_model == COSMOS_QA_MODEL:
+    if args.qa_model in LOCAL_QA_CONFIGS:
         if loaded is not None:
-            _preflight_cosmos_videos(args, loaded)
-        return _cosmos_served_model_id(args.timeout)
+            _preflight_local_videos(args, loaded)
+        return _local_served_model_id(args.qa_model, args.timeout)
     return None
 
 
-def command_qa(args: Any, *, cosmos_served_model_id: str | None = None) -> int:
+def command_qa(
+    args: Any, *, local_served_model_id: str | None = None,
+    diagnostics: QADiagnostics | None = None,
+) -> int:
     backend = get_backend(args.qa_model)
     if args.qa_model == QWEN_QA_MODEL:
         _require_dashscope_sdk()
     api_key = backend.require_api_key()
-    request_limiter = (
-        RequestLimiter(args.cosmos_workers)
-        if args.qa_model == COSMOS_QA_MODEL
-        else make_request_limiter(args)
-    )
-    if args.qa_model == COSMOS_QA_MODEL and cosmos_served_model_id is None:
-        cosmos_served_model_id = _cosmos_served_model_id(args.timeout)
+    request_limiter = make_qa_request_limiter(args)
+    if args.qa_model in LOCAL_QA_CONFIGS and local_served_model_id is None:
+        local_served_model_id = _local_served_model_id(args.qa_model, args.timeout)
     selected_videos = set(args.video_id or [])
     selected_question_ids = set(args.question_id or [])
     efforts = expand_thinking_efforts(args.thinking_effort, args.qa_model)
@@ -934,8 +1061,9 @@ def command_qa(args: Any, *, cosmos_served_model_id: str | None = None) -> int:
                     timeout=args.timeout,
                     max_retries=args.max_retries,
                     request_limiter=request_limiter,
-                    cosmos_served_model_id=cosmos_served_model_id,
-                    cosmos_max_tokens=args.cosmos_max_tokens,
+                    local_served_model_id=local_served_model_id,
+                    local_max_tokens=local_qa_max_tokens(args),
+                    diagnostics=diagnostics,
                 )
 
             case_completed = 0
@@ -1052,9 +1180,13 @@ def command_qa(args: Any, *, cosmos_served_model_id: str | None = None) -> int:
                 timeout=args.timeout,
                 max_retries=args.max_retries,
                 request_limiter=request_limiter,
-                cosmos_served_model_id=cosmos_served_model_id,
-                cosmos_max_tokens=args.cosmos_max_tokens,
+                local_served_model_id=local_served_model_id,
+                local_max_tokens=local_qa_max_tokens(args),
                 based=based_condition,
+                diagnostics=diagnostics,
+                diagnostic_stage=(
+                    "control filter" if job["video"]["role"] == "control" else "main"
+                ),
             )
             # Bind to inputs from before the provider request. If files change
             # during the request, the returned result will immediately be stale.

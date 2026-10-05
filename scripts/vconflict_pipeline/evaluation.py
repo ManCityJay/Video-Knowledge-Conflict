@@ -27,6 +27,7 @@ from .core import (
     utc_now,
 )
 from .qa import (
+    LOCAL_QA_CONFIGS,
     command_qa,
     expand_thinking_efforts,
     preflight_qa_backend,
@@ -37,7 +38,8 @@ from .qa import (
     qa_run_key,
     work_title_prefix_condition,
 )
-from .settings import AUTHOR_JUDGE_MODEL, COSMOS_QA_MODEL
+from .settings import AUTHOR_JUDGE_MODEL
+from .qa_diagnostics import QADiagnostics
 from .transport import (
     make_openrouter_limiter,
     openrouter_json,
@@ -143,7 +145,7 @@ def _question_result_selected(
 def _preflight_cases(
     args: argparse.Namespace,
     efforts: tuple[str | None, ...],
-    *, enforce_gate: bool = True,
+    *, enforce_gate: bool = True, include_control: bool = True,
 ) -> tuple[list[tuple[Path, dict[str, Any]]], int]:
     dataset_dir = grouped_dir(args.dataset_dir, args.group)
     selected_question_ids = set(args.question_id or [])
@@ -169,6 +171,8 @@ def _preflight_cases(
             based=bool(getattr(args, "based", False)),
         )
         for video in videos:
+            if not include_control and video["role"] == "control":
+                continue
             questions = selected_questions(video_case_context(case, video), selected_question_ids)
             target_total += sum(
                 not enforce_gate or qa_allowed(case, video, question, args.qa_model, effort,
@@ -542,9 +546,12 @@ def command_judge(args: argparse.Namespace) -> int:
 def _completion_counts(
     args: argparse.Namespace,
     efforts: tuple[str | None, ...],
+    *, include_control: bool = True,
 ) -> tuple[int, int, int, int]:
-    loaded, qa_total = _preflight_cases(args, efforts)
-    qa_completed = _qa_completed_from_loaded(loaded, args=args, efforts=efforts)
+    loaded, qa_total = _preflight_cases(args, efforts, include_control=include_control)
+    qa_completed = _qa_completed_from_loaded(
+        loaded, args=args, efforts=efforts, include_control=include_control,
+    )
     effort_set = set(efforts)
     judge_total = 0
     judge_completed = 0
@@ -561,6 +568,8 @@ def _completion_counts(
                     judge_completed += isinstance(result.get("judgment"), dict)
             continue
         for video in case["videos"]:
+            if not include_control and video["role"] == "control":
+                continue
             for result in video["qa_results"]:
                 if not _gate_result(case, video, result, args):
                     continue
@@ -580,6 +589,7 @@ def _qa_completed_from_loaded(
     *,
     args: argparse.Namespace,
     efforts: tuple[str | None, ...],
+    include_control: bool = True,
 ) -> int:
     selected_question_ids = set(args.question_id or [])
     selected_videos = set(args.video_id or [])
@@ -619,6 +629,8 @@ def _qa_completed_from_loaded(
             based=bool(getattr(args, "based", False)),
         )
         for video in videos:
+            if not include_control and video["role"] == "control":
+                continue
             questions = selected_questions(video_case_context(case, video), selected_question_ids)
             existing = {
                 qa_result_key(
@@ -650,18 +662,22 @@ def command_qa_judge(args: argparse.Namespace) -> int:
     # All dependency, credential, selection, file, and context checks happen
     # before force mode is allowed to clear persisted results.
     efforts = expand_thinking_efforts(args.thinking_effort, args.qa_model)
+    diagnostics = QADiagnostics(include_truncation=args.qa_model in LOCAL_QA_CONFIGS)
     loaded, qa_total = _preflight_cases(args, efforts, enforce_gate=False)
     if qa_total == 0:
         print("No eligible question/video targets in the selected scope.")
+        diagnostics.print_summary()
         return 0
     filter_status = 0
     if args.input in ("video", "description"):
-        filter_status = prepare_filters(args, loaded, efforts)
+        filter_status = prepare_filters(args, loaded, efforts, diagnostics=diagnostics)
         if getattr(args, "filter_only", False):
+            diagnostics.print_summary()
             return filter_status
         loaded, qa_total = _preflight_cases(args, efforts)
         if qa_total == 0:
             print("No questions passed the required filter gates in the selected scope.")
+            diagnostics.print_summary()
             return filter_status
     if not args.force_qa:
         _require_selected_prefix_metadata(
@@ -676,21 +692,27 @@ def command_qa_judge(args: argparse.Namespace) -> int:
         )
     qa_done = _qa_completed_from_loaded(loaded, args=args, efforts=efforts)
     qa_needed = qa_total > 0 and (args.force_qa or qa_done != qa_total)
-    cosmos_served_model_id = None
-    if qa_needed or (args.force_qa and args.qa_model == COSMOS_QA_MODEL):
-        cosmos_served_model_id = preflight_qa_backend(args, loaded)
+    local_served_model_id = None
+    if qa_needed or (args.force_qa and args.qa_model in LOCAL_QA_CONFIGS):
+        local_served_model_id = preflight_qa_backend(args, loaded)
     require_openrouter_api_key()
     if args.force_qa or args.force_judge:
         _preclear_force(loaded, args=args, efforts=set(efforts))
 
     qa_status = (
-        command_qa(args, cosmos_served_model_id=cosmos_served_model_id)
+        command_qa(args, local_served_model_id=local_served_model_id, diagnostics=diagnostics)
         if qa_needed
         else 0
     )
     judge_status = command_judge(args)
+    # Keep execution completeness unchanged; exclude controls only from display.
     qa_done, qa_total, judge_done, judge_total = _completion_counts(args, efforts)
+    incomplete = qa_done != qa_total or judge_done != judge_total
+    if args.input == "video":
+        qa_done, qa_total, judge_done, judge_total = _completion_counts(
+            args, efforts, include_control=False,
+        )
     print(f"QA: {qa_done}/{qa_total}")
     print(f"Judge: {judge_done}/{judge_total}")
-    incomplete = qa_done != qa_total or judge_done != judge_total
+    diagnostics.print_summary()
     return 1 if filter_status or qa_status or judge_status or incomplete else 0

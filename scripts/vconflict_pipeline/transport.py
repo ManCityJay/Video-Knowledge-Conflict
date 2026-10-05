@@ -31,6 +31,10 @@ class TransportError(PipelineError):
         self.retry_after = retry_after
 
 
+class EmptyResponseTextError(TransportError):
+    """A response message exists, but contains no answer text."""
+
+
 class RequestLimiter:
     """Bound concurrent calls and optionally pace their start times."""
 
@@ -222,7 +226,16 @@ def extract_response_text(response: dict[str, Any], service: str) -> str:
         answer = "".join(parts)
         if answer.strip():
             return answer
-    raise TransportError(f"{service} response did not contain textual content.")
+        if any(
+            not isinstance(part, dict)
+            or not isinstance(part.get("type"), str)
+            or (part["type"] == "text" and not isinstance(part.get("text"), str))
+            for part in content
+        ):
+            raise TransportError(f"{service} response did not contain textual content.")
+    if content is not None and not isinstance(content, (str, list)):
+        raise TransportError(f"{service} response did not contain textual content.")
+    raise EmptyResponseTextError(f"{service} response did not contain textual content.")
 
 
 def _is_retryable(error: Exception) -> bool:

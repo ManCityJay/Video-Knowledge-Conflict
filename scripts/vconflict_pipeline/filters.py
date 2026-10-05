@@ -16,7 +16,8 @@ from .core import (FILTER_RESULT_FIELDS, PipelineError, atomic_write_json, canon
 from .evidence import observed_summary, video_sha256
 from .integrity import digest, judgment_is_current, qa_is_current, question_content
 from .selection import eligible_videos, selected_questions
-from .settings import COSMOS_QA_MODEL, FAIRY_TALE_GROUP, AUTHOR_JUDGE_MODEL
+from .settings import FAIRY_TALE_GROUP, AUTHOR_JUDGE_MODEL
+from .qa_diagnostics import QADiagnostics
 
 
 def scope_id(video):
@@ -158,7 +159,7 @@ def qa_allowed(case, video, question, model, effort, prefix, input_mode='video')
     return question_gate(case, video, question, model, effort, prefix)['passed']
 
 
-def prepare_filters(args, loaded, efforts):
+def prepare_filters(args, loaded, efforts, *, diagnostics: QADiagnostics | None = None):
     """Run both stages in order; incorrect answers are exclusions, errors are failures.
 
     Saves after each answer/judgment so an interrupted invocation resumes safely.
@@ -166,14 +167,14 @@ def prepare_filters(args, loaded, efforts):
     """
     from .evaluation import JUDGE_SYSTEM_PROMPT
     from .core import JUDGMENT_SCHEMA
-    from .qa import get_backend, preflight_qa_backend, run_qa_batch
-    from .transport import (RequestLimiter, make_request_limiter, make_openrouter_limiter,
+    from .qa import (get_backend, preflight_qa_backend, run_qa_batch,
+                     make_qa_request_limiter, local_qa_max_tokens)
+    from .transport import (make_openrouter_limiter,
                             openrouter_json, require_openrouter_api_key)
     from .integrity import qa_fingerprint, judgment_fingerprint
 
     prefix = effective_prefix(args.group, args.with_work_title_prefix)
-    qa_limiter = (RequestLimiter(args.cosmos_workers) if args.qa_model == COSMOS_QA_MODEL
-                  else make_request_limiter(args))
+    qa_limiter = make_qa_request_limiter(args)
     judge_limiter = make_openrouter_limiter(args)
     backend_ready = False
     served = None
@@ -213,7 +214,7 @@ def prepare_filters(args, loaded, efforts):
                                              if control is not None and scope_id(video) == 'case' else None)
                             if force_qa or state['status'] in ('missing', 'stale'):
                                 if not backend_ready:
-                                    # Cosmos video constraints are also checked by run_qa_batch.
+                                    # Local video constraints are also checked by run_qa_batch.
                                     served = preflight_qa_backend(argparse.Namespace(**{**vars(args), 'input': 'question_only'}))
                                     backend_ready = True
                                 require_openrouter_api_key()  # before incurring a QA request
@@ -224,8 +225,9 @@ def prepare_filters(args, loaded, efforts):
                                     work_title_prefix=stage_prefix, question_runs=[(question, effort)],
                                     qa_model=args.qa_model, api_key=get_backend(args.qa_model).require_api_key(),
                                     timeout=args.timeout, max_retries=args.max_retries, request_limiter=qa_limiter,
-                                    cosmos_served_model_id=served, cosmos_max_tokens=args.cosmos_max_tokens,
-                                    based=False)
+                                    local_served_model_id=served, local_max_tokens=local_qa_max_tokens(args),
+                                    based=False, diagnostics=diagnostics,
+                                    diagnostic_stage='question_only filter' if stage == 'question_only' else 'control filter')
                                 if errors or len(answers) != 1:
                                     raise PipelineError(f'Filter QA failed: {errors}')
                                 result = answers[0]
