@@ -90,6 +90,10 @@ Seedance 负责生成视频；Gemini、Qwen、Kimi 或本地 Cosmos3-Nano 负责
 case JSON 是运行状态的唯一持久化单元。视频状态、任务 ID、description、QA
 完整回答 `raw_answer`、明确末行 `final_answer`、usage 与 judgment 均直接写回，
 写入使用临时文件替换。
+例外的诊断输出：Cosmos 已返回文本但末行 `Final answer:` 格式校验失败时，完整
+响应追加到 `artifacts/qa_failures/cosmos_invalid_final_answer.jsonl`。它不属于实验
+结果，不写入 case JSON、不送审、不计为完成；覆盖目标 QA 和两层 filter。
+其他模型及 Cosmos 长度截断、空内容、响应结构异常、网络错误不纳入该诊断文件。
 `description` 是仅用于 conflict 视频的可选扩展。
 `question_only_results` 是 case 顶层 question 的可选扩展；结果不依附任何视频，
 不包含 `context_text_en`、`work_title_prefix` 或 `based`。现有 case 无需迁移。
@@ -378,6 +382,7 @@ scripts/
     ├── filters.py
     ├── selection.py
     ├── qa.py
+    ├── qa_diagnostics.py
     ├── evaluation.py
     ├── evidence.py
     ├── integrity.py

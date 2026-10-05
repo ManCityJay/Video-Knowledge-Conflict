@@ -224,6 +224,13 @@ def prepare_filters(args, loaded, efforts):
                                     work_title_prefix=stage_prefix, question_runs=[(question, effort)],
                                     qa_model=args.qa_model, api_key=get_backend(args.qa_model).require_api_key(),
                                     timeout=args.timeout, max_retries=args.max_retries, request_limiter=qa_limiter,
+                                    diagnostic_context={
+                                        'case_path': str(path.resolve()),
+                                        'case_id': case['case_id'],
+                                        'video_id': control['video_id'] if control else None,
+                                        'question_scope': scope_id(video),
+                                        'filter_stage': stage,
+                                    },
                                     cosmos_served_model_id=served, cosmos_max_tokens=args.cosmos_max_tokens,
                                     based=False)
                                 if errors or len(answers) != 1:

@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from .integrity import (qa_fingerprint, qa_is_current, require_writable_case)
-from .filters import effective_prefix, qa_allowed
+from .filters import effective_prefix, qa_allowed, scope_id
+from .qa_diagnostics import COSMOS_FORMAT_FAILURES_PATH, append_cosmos_format_failure
 
 import base64
 import os
@@ -672,6 +673,7 @@ def run_qa_batch(
     timeout: int,
     max_retries: int,
     request_limiter: RequestLimiter,
+    diagnostic_context: dict[str, Any],
     cosmos_served_model_id: str | None = None,
     cosmos_max_tokens: int = DEFAULT_COSMOS_MAX_TOKENS,
     based: bool = False,
@@ -774,7 +776,39 @@ def run_qa_batch(
                         "increase --cosmos-max-tokens and rerun this QA."
                     )
             raw_answer = backend.extract_answer(response)
-            final_answer = extract_final_answer(raw_answer)
+            try:
+                final_answer = extract_final_answer(raw_answer)
+            except PipelineError as exc:
+                if qa_model != COSMOS_QA_MODEL:
+                    raise
+                record_id = uuid.uuid4().hex
+                record = {
+                    **diagnostic_context,
+                    "record_id": record_id,
+                    "timestamp": utc_now(),
+                    "input_mode": input_mode,
+                    "question_id": question["question_id"],
+                    "question": question["text_en"],
+                    "model": qa_model,
+                    "thinking_effort": thinking_effort,
+                    "based": based,
+                    "work_title_prefix": work_title_prefix,
+                    "video_path": str(video_path) if video_path is not None else None,
+                    "raw_answer": raw_answer,
+                    "error": str(exc),
+                    "response": response,
+                }
+                try:
+                    diagnostic_path = append_cosmos_format_failure(record)
+                except OSError as write_error:
+                    raise PipelineError(
+                        f"{exc} Could not save rejected response to "
+                        f"{COSMOS_FORMAT_FAILURES_PATH}: {write_error}"
+                    ) from write_error
+                raise PipelineError(
+                    f"{exc} Full response saved to {diagnostic_path} "
+                    f"(record_id={record_id})."
+                ) from exc
         except PipelineError as exc:
             failures.append(
                 (question["question_id"], thinking_effort, str(exc))
@@ -939,6 +973,13 @@ def command_qa(args: Any, *, cosmos_served_model_id: str | None = None) -> int:
                     timeout=args.timeout,
                     max_retries=args.max_retries,
                     request_limiter=request_limiter,
+                    diagnostic_context={
+                        "case_path": str(case_path.resolve()),
+                        "case_id": case["case_id"],
+                        "video_id": None,
+                        "question_scope": "case",
+                        "filter_stage": None,
+                    },
                     cosmos_served_model_id=cosmos_served_model_id,
                     cosmos_max_tokens=args.cosmos_max_tokens,
                 )
@@ -1057,6 +1098,13 @@ def command_qa(args: Any, *, cosmos_served_model_id: str | None = None) -> int:
                 timeout=args.timeout,
                 max_retries=args.max_retries,
                 request_limiter=request_limiter,
+                diagnostic_context={
+                    "case_path": str(case_path.resolve()),
+                    "case_id": case["case_id"],
+                    "video_id": job["video"]["video_id"],
+                    "question_scope": scope_id(job["video"]),
+                    "filter_stage": None,
+                },
                 cosmos_served_model_id=cosmos_served_model_id,
                 cosmos_max_tokens=args.cosmos_max_tokens,
                 based=based_condition,
