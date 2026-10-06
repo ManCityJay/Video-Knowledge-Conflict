@@ -1,49 +1,22 @@
-"""Combined QA and judgment execution with global force pre-clearing."""
+"""QA/Judge selection, force pre-clearing and completion accounting."""
 
 from __future__ import annotations
 
-from .integrity import (qa_is_current, judgment_fingerprint, judgment_is_current, require_writable_case)
-from .filters import effective_prefix, qa_allowed, prepare_filters
+from .integrity import qa_is_current, judgment_is_current, require_writable_case
+from .filters import effective_prefix, qa_allowed
 
 import argparse
-import json
-import sys
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 from .selection import eligible_videos, selected_questions, target_video_selected
 
 from .core import (
-    JUDGMENT_SCHEMA,
-    PipelineError,
-    atomic_write_json,
-    grouped_dir,
-    iter_case_paths,
-    load_case,
-    video_case_context,
-    qa_result_input_mode,
-    require_question_only_compatible,
-    require_nonempty_string,
-    utc_now,
+    PipelineError, atomic_write_json, grouped_dir, iter_case_paths, load_case,
+    video_case_context, qa_result_input_mode, require_question_only_compatible,
 )
 from .qa import (
-    LOCAL_QA_CONFIGS,
-    command_qa,
-    expand_thinking_efforts,
-    preflight_qa_backend,
-    qa_result_based,
-    qa_result_key,
-    qa_result_thinking_effort,
-    qa_result_work_title_prefix,
-    qa_run_key,
-    work_title_prefix_condition,
-)
-from .settings import AUTHOR_JUDGE_MODEL
-from .qa_diagnostics import QADiagnostics
-from .transport import (
-    make_openrouter_limiter,
-    openrouter_json,
-    require_openrouter_api_key,
+    qa_result_based, qa_result_key, qa_result_thinking_effort,
+    qa_result_work_title_prefix, qa_run_key, work_title_prefix_condition,
 )
 
 JUDGE_SYSTEM_PROMPT = """Evaluate the supplied final_answer against the context
@@ -146,14 +119,16 @@ def _preflight_cases(
     args: argparse.Namespace,
     efforts: tuple[str | None, ...],
     *, enforce_gate: bool = True, include_control: bool = True,
+    snapshot: list[tuple[Path, dict[str, Any]]] | None = None,
 ) -> tuple[list[tuple[Path, dict[str, Any]]], int]:
     dataset_dir = grouped_dir(args.dataset_dir, args.group)
     selected_question_ids = set(args.question_id or [])
     selected_videos = set(args.video_id or [])
     loaded: list[tuple[Path, dict[str, Any]]] = []
     target_total = 0
-    for path in iter_case_paths(dataset_dir, args.case_id):
-        case = load_case(path)
+    source = snapshot if snapshot is not None else (
+        (path, load_case(path)) for path in iter_case_paths(dataset_dir, args.case_id))
+    for path, case in source:
         require_writable_case(case, path)
         if args.input == "question_only":
             questions = selected_questions(
@@ -365,190 +340,13 @@ def _find_question(case: dict[str, Any], question_id: str) -> dict[str, Any]:
     )
 
 
-def command_judge(args: argparse.Namespace) -> int:
-    api_key = require_openrouter_api_key()
-    request_limiter = make_openrouter_limiter(args)
-    efforts = set(expand_thinking_efforts(args.thinking_effort, args.qa_model))
-    dataset_dir = grouped_dir(args.dataset_dir, args.group)
-    case_paths = iter_case_paths(dataset_dir, args.case_id)
-    completed = 0
-    failures = 0
-
-    def run_case(case_path: Path) -> tuple[int, int]:
-        case = load_case(case_path)
-        require_writable_case(case, case_path)
-        case_completed = 0
-        case_failures = 0
-        if args.input == "question_only":
-            for question in require_question_only_compatible(case):
-                for qa_result in question.get("question_only_results", []):
-                    if not _question_result_selected(
-                        question, qa_result, args=args, efforts=efforts
-                    ) or qa_result.get("judgment") is not None:
-                        continue
-                    try:
-                        final_answer = require_nonempty_string(
-                            qa_result.get("final_answer"), "final_answer"
-                        )
-                        judge_input = {
-                            "video_role": "control",
-                            "question": question["text_en"],
-                            "final_answer": final_answer,
-                            "normal_fact": case["conflict_spec"]["normal_fact_en"],
-                            "intended_video_fact": case["conflict_spec"][
-                                "intended_video_fact_en"
-                            ],
-                            "conflict_video_reference": question[
-                                "conflict_video_reference_en"
-                            ],
-                            "normal_control_reference": question[
-                                "normal_control_reference_en"
-                            ],
-                        }
-                        result, response = openrouter_json(
-                            messages=[
-                                {"role": "system", "content": JUDGE_SYSTEM_PROMPT},
-                                {
-                                    "role": "user",
-                                    "content": json.dumps(
-                                        judge_input, ensure_ascii=False
-                                    ),
-                                },
-                            ],
-                            model=AUTHOR_JUDGE_MODEL,
-                            schema_name="knowledge_conflict_judgment",
-                            schema=JUDGMENT_SCHEMA,
-                            api_key=api_key,
-                            timeout=args.timeout,
-                            max_retries=args.max_retries,
-                            request_limiter=request_limiter,
-                        )
-                        if result.get("verdict") == "knowledge_trapped":
-                            raise PipelineError(
-                                "Luna Pro returned knowledge_trapped for a "
-                                "question-only control input."
-                            )
-                        qa_result["judgment"] = {
-                            "timestamp": utc_now(),
-                            "verdict": result["verdict"],
-                            "confidence": float(result["confidence"]),
-                            "judge_model": AUTHOR_JUDGE_MODEL,
-                            "judge_request_id": response.get("id"),
-                        }
-                        atomic_write_json(case_path, case)
-                        case_completed += 1
-                        print(
-                            f"Judged {case['case_id']}/"
-                            f"{question['question_id']}: {result['verdict']}"
-                        )
-                    except PipelineError as exc:
-                        case_failures += 1
-                        print(
-                            f"Error judging {case['case_id']}/"
-                            f"{question['question_id']}: {exc}",
-                            file=sys.stderr,
-                        )
-            return case_completed, case_failures
-
-        for video in case["videos"]:
-            for qa_result in video["qa_results"]:
-                if not _gate_result(case, video, qa_result, args):
-                    continue
-                if not _result_selected(
-                    video, qa_result, args=args, efforts=efforts
-                ) or not qa_is_current(case, video, qa_result) or judgment_is_current(case, video, qa_result):
-                    continue
-                try:
-                    context = video_case_context(case, video)
-                    question = _find_question(context, qa_result["question_id"])
-                    final_answer = require_nonempty_string(
-                        qa_result.get("final_answer"), "final_answer"
-                    )
-                    judge_input = {
-                        "video_role": video["role"],
-                        "question": question["text_en"],
-                        "final_answer": final_answer,
-                        "normal_fact": context["conflict_spec"]["normal_fact_en"],
-                        "intended_video_fact": context["conflict_spec"][
-                            "intended_video_fact_en"
-                        ],
-                        "conflict_video_reference": question[
-                            "conflict_video_reference_en"
-                        ],
-                        "normal_control_reference": question[
-                            "normal_control_reference_en"
-                        ],
-                    }
-                    result, response = openrouter_json(
-                        messages=[
-                            {"role": "system", "content": JUDGE_SYSTEM_PROMPT},
-                            {
-                                "role": "user",
-                                "content": json.dumps(
-                                    judge_input, ensure_ascii=False
-                                ),
-                            },
-                        ],
-                        model=AUTHOR_JUDGE_MODEL,
-                        schema_name="knowledge_conflict_judgment",
-                        schema=JUDGMENT_SCHEMA,
-                        api_key=api_key,
-                        timeout=args.timeout,
-                        max_retries=args.max_retries,
-                        request_limiter=request_limiter,
-                    )
-                    if video["role"] == "control" and result.get(
-                        "verdict"
-                    ) == "knowledge_trapped":
-                        raise PipelineError(
-                            "Luna Pro returned knowledge_trapped for a control video."
-                        )
-                    qa_result["judgment"] = {
-                        "timestamp": utc_now(),
-                        "verdict": result["verdict"],
-                        "confidence": float(result["confidence"]),
-                        "judge_model": AUTHOR_JUDGE_MODEL,
-                        "judge_request_id": response.get("id"),
-                        "input_fingerprint": judgment_fingerprint(case, video, qa_result),
-                    }
-                    atomic_write_json(case_path, case)
-                    case_completed += 1
-                    print(
-                        f"Judged {case['case_id']}/{video['video_id']}/"
-                        f"{question['question_id']}: {result['verdict']}"
-                    )
-                except PipelineError as exc:
-                    case_failures += 1
-                    print(
-                        f"Error judging {case['case_id']}/{video['video_id']}/"
-                        f"{qa_result['question_id']}: {exc}",
-                        file=sys.stderr,
-                    )
-        return case_completed, case_failures
-
-    workers = min(args.case_workers, len(case_paths))
-    with ThreadPoolExecutor(max_workers=workers) as executor:
-        futures = {executor.submit(run_case, path): path for path in case_paths}
-        for future in as_completed(futures):
-            case_path = futures[future]
-            try:
-                done, failed = future.result()
-            except PipelineError as exc:
-                failures += 1
-                print(f"Error judging case {case_path.stem}: {exc}", file=sys.stderr)
-                continue
-            completed += done
-            failures += failed
-    print(f"Wrote {completed} judgment(s) into case JSON files.")
-    return 1 if failures else 0
-
-
 def _completion_counts(
     args: argparse.Namespace,
     efforts: tuple[str | None, ...],
     *, include_control: bool = True,
+    snapshot: list[tuple[Path, dict[str, Any]]] | None = None,
 ) -> tuple[int, int, int, int]:
-    loaded, qa_total = _preflight_cases(args, efforts, include_control=include_control)
+    loaded, qa_total = _preflight_cases(args, efforts, include_control=include_control, snapshot=snapshot)
     qa_completed = _qa_completed_from_loaded(
         loaded, args=args, efforts=efforts, include_control=include_control,
     )
@@ -659,60 +457,6 @@ def _qa_completed_from_loaded(
 
 
 def command_qa_judge(args: argparse.Namespace) -> int:
-    # All dependency, credential, selection, file, and context checks happen
-    # before force mode is allowed to clear persisted results.
-    efforts = expand_thinking_efforts(args.thinking_effort, args.qa_model)
-    diagnostics = QADiagnostics(include_truncation=args.qa_model in LOCAL_QA_CONFIGS)
-    loaded, qa_total = _preflight_cases(args, efforts, enforce_gate=False)
-    if qa_total == 0:
-        print("No eligible question/video targets in the selected scope.")
-        diagnostics.print_summary()
-        return 0
-    filter_status = 0
-    if args.input in ("video", "description"):
-        filter_status = prepare_filters(args, loaded, efforts, diagnostics=diagnostics)
-        if getattr(args, "filter_only", False):
-            diagnostics.print_summary()
-            return filter_status
-        loaded, qa_total = _preflight_cases(args, efforts)
-        if qa_total == 0:
-            print("No questions passed the required filter gates in the selected scope.")
-            diagnostics.print_summary()
-            return filter_status
-    if not args.force_qa:
-        _require_selected_prefix_metadata(
-            loaded,
-            args=args,
-            efforts=set(efforts),
-        )
-        _require_selected_final_answers(
-            loaded,
-            args=args,
-            efforts=set(efforts),
-        )
-    qa_done = _qa_completed_from_loaded(loaded, args=args, efforts=efforts)
-    qa_needed = qa_total > 0 and (args.force_qa or qa_done != qa_total)
-    local_served_model_id = None
-    if qa_needed or (args.force_qa and args.qa_model in LOCAL_QA_CONFIGS):
-        local_served_model_id = preflight_qa_backend(args, loaded)
-    require_openrouter_api_key()
-    if args.force_qa or args.force_judge:
-        _preclear_force(loaded, args=args, efforts=set(efforts))
-
-    qa_status = (
-        command_qa(args, local_served_model_id=local_served_model_id, diagnostics=diagnostics)
-        if qa_needed
-        else 0
-    )
-    judge_status = command_judge(args)
-    # Keep execution completeness unchanged; exclude controls only from display.
-    qa_done, qa_total, judge_done, judge_total = _completion_counts(args, efforts)
-    incomplete = qa_done != qa_total or judge_done != judge_total
-    if args.input == "video":
-        qa_done, qa_total, judge_done, judge_total = _completion_counts(
-            args, efforts, include_control=False,
-        )
-    print(f"QA: {qa_done}/{qa_total}")
-    print(f"Judge: {judge_done}/{judge_total}")
-    diagnostics.print_summary()
-    return 1 if filter_status or qa_status or judge_status or incomplete else 0
+    """Compatibility entry for callers importing the former stage orchestrator."""
+    from .scheduler import command_qa_judge as run
+    return run(args)

@@ -291,6 +291,11 @@ def send_with_retry(
     raise AssertionError("unreachable")
 
 
+def send_once(callback, **_):
+    """Scheduler entry: no worker-owned limiter, sleep, or nested retries."""
+    return callback()
+
+
 def send_openrouter_with_retry(
     payload: dict[str, Any],
     request_limiter: RequestLimiter | None = None,
@@ -322,6 +327,7 @@ def openrouter_json(
     timeout: int,
     max_retries: int = 4,
     request_limiter: RequestLimiter | None = None,
+    single_attempt: bool = False,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     payload = {
         "model": model,
@@ -333,13 +339,14 @@ def openrouter_json(
         },
         "provider": {"require_parameters": True},
     }
-    response = send_openrouter_with_retry(
-        payload,
-        request_limiter,
-        api_key=api_key,
-        timeout=timeout,
-        max_retries=max_retries,
-    )
+    if single_attempt:
+        response = post_json(url=OPENROUTER_URL, payload=payload, api_key=api_key,
+                             timeout=timeout, service="OpenRouter")
+    else:
+        response = send_openrouter_with_retry(
+            payload, request_limiter, api_key=api_key, timeout=timeout,
+            max_retries=max_retries,
+        )
     try:
         parsed = json.loads(extract_response_text(response, "OpenRouter"))
     except json.JSONDecodeError as exc:

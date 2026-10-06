@@ -1,36 +1,19 @@
-"""QA backends and bounded parallel execution."""
+"""QA backends, request construction and answer validation."""
 
 from __future__ import annotations
 
-from .integrity import (qa_fingerprint, qa_is_current, require_writable_case)
-from .filters import effective_prefix, qa_allowed
-
 import base64
 import os
-import sys
-import threading
 import uuid
 from collections.abc import Mapping
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from types import ModuleType
 from typing import Any, Callable, Iterable
-from .selection import eligible_videos, selected_questions
+from .selection import eligible_videos
 from .qa_diagnostics import QADiagnostics, QADiagnosticStage
 
-from .core import (
-    PipelineError,
-    atomic_write_json,
-    grouped_dir,
-    iter_case_paths,
-    load_case,
-    qa_result_input_mode,
-    require_question_only_compatible,
-    resolve_video_path,
-    utc_now,
-    video_case_context,
-)
+from .core import PipelineError, qa_result_input_mode, resolve_video_path, utc_now
 from .settings import (
     COSMOS_QA_MODEL,
     DEFAULT_COSMOS_BASE_URL,
@@ -44,17 +27,9 @@ from .settings import (
     QWEN_QA_MODEL,
 )
 from .transport import (
-    EmptyResponseTextError,
-    OPENROUTER_URL,
-    RequestLimiter,
-    TransportError,
-    extract_response_text,
-    get_json,
-    make_request_limiter,
-    post_json,
-    redact,
-    require_api_key,
-    send_with_retry,
+    EmptyResponseTextError, OPENROUTER_URL, RequestLimiter, TransportError,
+    extract_response_text, get_json, post_json, redact, require_api_key,
+    send_with_retry, send_once,
 )
 
 REQUEST_TIMEOUT_SECONDS = 600
@@ -324,11 +299,13 @@ def _send_qwen_request(
     thinking_effort: str | None,
     api_key: str,
     timeout: int,
+    initialized: bool = False,
 ) -> dict[str, Any]:
     if thinking_effort not in (None, "default"):
         raise PipelineError("Qwen thinking effort must be none or default.")
     dashscope = _require_dashscope_sdk()
-    dashscope.base_http_api_url = _dashscope_base_http_api_url()
+    if not initialized:
+        dashscope.base_http_api_url = _dashscope_base_http_api_url()
     content: list[dict[str, Any]] = []
     if video_uri is not None:
         content.append({"video": video_uri, "fps": 2})
@@ -585,13 +562,6 @@ LOCAL_QA_CONFIGS = {
 }
 
 
-def make_qa_request_limiter(args: Any) -> RequestLimiter:
-    config = LOCAL_QA_CONFIGS.get(args.qa_model)
-    if config is not None:
-        return RequestLimiter(getattr(args, config.workers_argument))
-    return make_request_limiter(args)
-
-
 def local_qa_max_tokens(args: Any) -> int | None:
     config = LOCAL_QA_CONFIGS.get(args.qa_model)
     return getattr(args, config.max_tokens_argument) if config is not None else None
@@ -776,12 +746,14 @@ def run_qa_batch(
     api_key: str,
     timeout: int,
     max_retries: int,
-    request_limiter: RequestLimiter,
+    request_limiter: RequestLimiter | None,
     local_served_model_id: str | None = None,
     local_max_tokens: int | None = None,
     based: bool = False,
     diagnostics: QADiagnostics | None = None,
     diagnostic_stage: QADiagnosticStage = "main",
+    single_attempt: bool = False,
+    prepared_video_input: str | None = None,
 ) -> tuple[list[dict[str, Any]], list[tuple[str, str | None, str]]]:
     backend = get_backend(qa_model)
     if input_mode == "video":
@@ -791,7 +763,9 @@ def run_qa_batch(
             raise PipelineError(
                 "Video input requires a work title when its prefix is enabled."
             )
-        if qa_model == QWEN_QA_MODEL:
+        if prepared_video_input is not None:
+            video_input = prepared_video_input
+        elif qa_model == QWEN_QA_MODEL:
             video_input = _qwen_video_uri(video_path)
         elif qa_model in LOCAL_QA_CONFIGS:
             video_input = _local_video_uri(video_path, backend.service)
@@ -827,13 +801,14 @@ def run_qa_batch(
             prompt_text = _question_prompt(question["text_en"])
         try:
             if qa_model == QWEN_QA_MODEL:
-                response = send_with_retry(
+                response = (send_once if single_attempt else send_with_retry)(
                     lambda thinking_effort=thinking_effort: _send_qwen_request(
                         prompt_text=prompt_text,
                         video_uri=video_input,
                         thinking_effort=thinking_effort,
                         api_key=api_key,
                         timeout=timeout,
+                        initialized=single_attempt,
                     ),
                     request_limiter=request_limiter,
                     max_retries=max_retries,
@@ -863,7 +838,7 @@ def run_qa_batch(
                     payload = backend.build_payload(
                         prompt_text, video_input, thinking_effort
                     )
-                response = send_with_retry(
+                response = (send_once if single_attempt else send_with_retry)(
                     lambda payload=payload: backend.send_request(
                         payload, api_key, timeout
                     ),
@@ -891,6 +866,8 @@ def run_qa_batch(
                     diagnostics.record(diagnostic_stage, "max_tokens_truncated")
                 elif isinstance(exc, (MissingFinalAnswerError, EmptyResponseTextError)):
                     diagnostics.record(diagnostic_stage, "missing_final_answer")
+            if single_attempt:
+                raise
             failures.append(
                 (question["question_id"], thinking_effort, str(exc))
             )
@@ -988,258 +965,3 @@ def preflight_qa_backend(
             _preflight_local_videos(args, loaded)
         return _local_served_model_id(args.qa_model, args.timeout)
     return None
-
-
-def command_qa(
-    args: Any, *, local_served_model_id: str | None = None,
-    diagnostics: QADiagnostics | None = None,
-) -> int:
-    backend = get_backend(args.qa_model)
-    if args.qa_model == QWEN_QA_MODEL:
-        _require_dashscope_sdk()
-    api_key = backend.require_api_key()
-    request_limiter = make_qa_request_limiter(args)
-    if args.qa_model in LOCAL_QA_CONFIGS and local_served_model_id is None:
-        local_served_model_id = _local_served_model_id(args.qa_model, args.timeout)
-    selected_videos = set(args.video_id or [])
-    selected_question_ids = set(args.question_id or [])
-    efforts = expand_thinking_efforts(args.thinking_effort, args.qa_model)
-    prefix_condition = work_title_prefix_condition(
-        args.group,
-        args.input,
-        args.with_work_title_prefix,
-    )
-    based_condition = bool(getattr(args, "based", False))
-    dataset_dir = grouped_dir(args.dataset_dir, args.group)
-    case_paths = iter_case_paths(dataset_dir, args.case_id)
-    completed = 0
-    failures = 0
-
-    def run_case(case_path: Path) -> tuple[int, int]:
-        case = load_case(case_path)
-        require_writable_case(case, case_path)
-        if args.input == "question_only":
-            selected = selected_questions(
-                {**case, "questions": require_question_only_compatible(case)},
-                selected_question_ids,
-            )
-            jobs: list[tuple[dict[str, Any], list[tuple[dict[str, Any], str | None]]]] = []
-            for question in selected:
-                existing = {
-                    qa_result_key(result)
-                    for result in question.get("question_only_results", [])
-                }
-                pending = [
-                    (question, effort)
-                    for effort in efforts
-                    if qa_run_key(
-                        "question_only",
-                        question["question_id"],
-                        args.qa_model,
-                        effort,
-                    )
-                    not in existing
-                ]
-                if pending:
-                    jobs.append((question, pending))
-
-            if not jobs:
-                return 0, 0
-
-            def run_question(
-                pending: list[tuple[dict[str, Any], str | None]],
-            ) -> tuple[list[dict[str, Any]], list[tuple[str, str | None, str]]]:
-                return run_qa_batch(
-                    input_mode="question_only",
-                    video_path=None,
-                    context_text=None,
-                    work_title=None,
-                    work_title_prefix=None,
-                    question_runs=pending,
-                    qa_model=args.qa_model,
-                    api_key=api_key,
-                    timeout=args.timeout,
-                    max_retries=args.max_retries,
-                    request_limiter=request_limiter,
-                    local_served_model_id=local_served_model_id,
-                    local_max_tokens=local_qa_max_tokens(args),
-                    diagnostics=diagnostics,
-                )
-
-            case_completed = 0
-            case_failures = 0
-            write_lock = threading.Lock()
-            with ThreadPoolExecutor(
-                max_workers=min(args.qa_workers, len(jobs))
-            ) as executor:
-                futures = {
-                    executor.submit(run_question, pending): question
-                    for question, pending in jobs
-                }
-                for future in as_completed(futures):
-                    question = futures[future]
-                    try:
-                        results, run_failures = future.result()
-                    except PipelineError as exc:
-                        case_failures += 1
-                        print(
-                            f"Error in QA {case['case_id']}/"
-                            f"{question['question_id']}: {exc}",
-                            file=sys.stderr,
-                        )
-                        continue
-                    for question_id, effort, error in run_failures:
-                        effort_name = "none" if effort is None else effort
-                        print(
-                            f"Error in QA {case['case_id']}/{question_id}/"
-                            f"{effort_name}: {error}",
-                            file=sys.stderr,
-                        )
-                    case_failures += len(run_failures)
-                    if results:
-                        with write_lock:
-                            question.setdefault("question_only_results", []).extend(
-                                results
-                            )
-                            atomic_write_json(case_path, case)
-                    case_completed += len(results)
-                    print(
-                        f"QA question_only {case['case_id']}/"
-                        f"{question['question_id']}: wrote {len(results)} result(s)"
-                    )
-            return case_completed, case_failures
-
-        jobs: list[dict[str, Any]] = []
-        for video in eligible_videos(
-            case, input_mode=args.input, selected_video_ids=selected_videos,
-            video_scope=getattr(args, "video_scope", None), based=based_condition,
-        ):
-            path = (resolve_video_path(video["local_path"], must_exist=True)
-                    if args.input == "video" else None)
-            context_text = video["description"]["context_en"] if args.input == "description" else None
-            context = video_case_context(case, video)
-            questions = selected_questions(context, selected_question_ids)
-
-            existing = {
-                qa_result_key(
-                    result,
-                    include_work_title_prefix=prefix_condition is not None,
-                )
-                for result in video["qa_results"]
-                if qa_is_current(case, video, result)
-            }
-            pending = [
-                (question, effort)
-                for effort in efforts
-                for question in questions
-                if qa_allowed(case, video, question, args.qa_model, effort,
-                              effective_prefix(args.group, args.with_work_title_prefix), args.input)
-                if qa_run_key(
-                    args.input,
-                    question["question_id"],
-                    args.qa_model,
-                    effort,
-                    based=based_condition,
-                    work_title_prefix=prefix_condition,
-                )
-                not in existing
-            ]
-            if pending:
-                jobs.append(
-                    {
-                        "video": video,
-                        "path": path,
-                        "context_text": context_text,
-                        "pending": pending,
-                    }
-                )
-
-        if not jobs:
-            return 0, 0
-
-        def run(
-            job: dict[str, Any],
-        ) -> tuple[list[dict[str, Any]], list[tuple[str, str | None, str]]]:
-            context = video_case_context(case, job["video"])
-            fingerprints = {q["question_id"]: qa_fingerprint(
-                case, job["video"], q, args.input, prefix_condition,
-                based=based_condition) for q, _ in job["pending"]}
-            results, failures = run_qa_batch(
-                input_mode=args.input,
-                video_path=job["path"],
-                context_text=job["context_text"],
-                work_title=(
-                    context["title"].split(":", 1)[0].strip()
-                    if prefix_condition is True
-                    else None
-                ),
-                work_title_prefix=prefix_condition,
-                question_runs=job["pending"],
-                qa_model=args.qa_model,
-                api_key=api_key,
-                timeout=args.timeout,
-                max_retries=args.max_retries,
-                request_limiter=request_limiter,
-                local_served_model_id=local_served_model_id,
-                local_max_tokens=local_qa_max_tokens(args),
-                based=based_condition,
-                diagnostics=diagnostics,
-                diagnostic_stage=(
-                    "control filter" if job["video"]["role"] == "control" else "main"
-                ),
-            )
-            # Bind to inputs from before the provider request. If files change
-            # during the request, the returned result will immediately be stale.
-            for result in results:
-                result["input_fingerprint"] = fingerprints[result["question_id"]]
-            return results, failures
-
-        case_completed = 0
-        case_failures = 0
-        write_lock = threading.Lock()
-        with ThreadPoolExecutor(max_workers=min(args.qa_workers, len(jobs))) as executor:
-            futures = {executor.submit(run, job): job["video"] for job in jobs}
-            for future in as_completed(futures):
-                video = futures[future]
-                try:
-                    results, run_failures = future.result()
-                except PipelineError as exc:
-                    case_failures += 1
-                    print(
-                        f"Error in QA {case['case_id']}/{video['video_id']}: {exc}",
-                        file=sys.stderr,
-                    )
-                    continue
-                for question_id, effort, error in run_failures:
-                    effort_name = "none" if effort is None else effort
-                    print(
-                        f"Error in QA {case['case_id']}/{video['video_id']}/"
-                        f"{question_id}/{effort_name}: {error}",
-                        file=sys.stderr,
-                    )
-                case_failures += len(run_failures)
-                if results:
-                    with write_lock:
-                        video["qa_results"].extend(results)
-                        atomic_write_json(case_path, case)
-                case_completed += len(results)
-                print(
-                    f"QA {args.input} {case['case_id']}/{video['video_id']}: "
-                    f"wrote {len(results)} result(s)"
-                )
-        return case_completed, case_failures
-
-    with ThreadPoolExecutor(max_workers=min(args.case_workers, len(case_paths))) as executor:
-        futures = {executor.submit(run_case, path): path for path in case_paths}
-        for future in as_completed(futures):
-            path = futures[future]
-            try:
-                done, failed = future.result()
-            except PipelineError as exc:
-                failures += 1
-                print(f"Error in QA case {path.stem}: {exc}", file=sys.stderr)
-                continue
-            completed += done
-            failures += failed
-    print(f"Wrote {completed} QA result(s) into case JSON files.")
-    return 1 if failures else 0

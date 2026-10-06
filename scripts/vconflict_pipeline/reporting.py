@@ -40,6 +40,35 @@ from .settings import (
 )
 
 
+class ReportIndex:
+    """Immutable case snapshot and provenance/gate decisions shared by all outputs."""
+
+    def __init__(self, cases):
+        self.cases = dict(cases)
+        self.decisions = {}
+
+    def load(self, path):
+        return self.cases[path]
+
+    def qa_current(self, case, video, result):
+        key = ('qa', id(case), id(video), id(result))
+        if key not in self.decisions:
+            self.decisions[key] = qa_is_current(case, video, result)
+        return self.decisions[key]
+
+    def judgment_current(self, case, video, result):
+        key = ('judge', id(case), id(video), id(result))
+        if key not in self.decisions:
+            self.decisions[key] = judgment_is_current(case, video, result)
+        return self.decisions[key]
+
+    def gate(self, case, video, question, model, effort, prefix):
+        key = ('gate', id(case), scope_id(video), question['question_id'], model, effort, prefix)
+        if key not in self.decisions:
+            self.decisions[key] = question_gate(case, video, question, model, effort, prefix)
+        return self.decisions[key]
+
+
 def aggregate_video_verdict(verdicts: Iterable[str]) -> str:
     observed = {canonical_verdict(verdict) for verdict in verdicts}
     if "context_grounded" in observed and "knowledge_trapped" not in observed:
@@ -153,11 +182,13 @@ def build_summary(
     video_scope: str | None = None,
     filter_mode: str = "all",
     filter_work_title_prefix: bool | None = None,
+    index: ReportIndex | None = None,
 ) -> dict[str, Any]:
+    index = index or ReportIndex((p, load_case(p)) for p in case_paths)
     if input_mode == "question_only":
         latest_questions: dict[tuple[str, str], dict[str, Any]] = {}
         for case_path in case_paths:
-            case = load_case(case_path)
+            case = index.load(case_path)
             for question in require_question_only_compatible(case):
                 for result in question.get("question_only_results", []):
                     if (
@@ -223,7 +254,7 @@ def build_summary(
     excluded_answers = set()
     gate_prefix = work_title_prefix if input_mode == 'video' else filter_work_title_prefix
     for case_path in case_paths:
-        case = load_case(case_path)
+        case = index.load(case_path)
         for video in case["videos"]:
             if not video_selected(video, input_mode, video_scope):
                 continue
@@ -232,7 +263,7 @@ def build_summary(
                 for question in questions.values():
                     key = (case['case_id'], scope_id(video), question['question_id'])
                     if key not in gates:
-                        gates[key] = question_gate(case, video, question, qa_model, effort, gate_prefix)
+                        gates[key] = index.gate(case, video, question, qa_model, effort, gate_prefix)
             for result in video["qa_results"]:
                 if not _result_matches(
                     result,
@@ -241,7 +272,7 @@ def build_summary(
                     efforts={effort},
                     work_title_prefix=work_title_prefix,
                     based=based,
-                ) or not judgment_is_current(case, video, result):
+                ) or not index.judgment_current(case, video, result):
                     continue
                 key = (case["case_id"], video["video_id"], result["question_id"])
                 if filter_mode == "passed":
@@ -356,7 +387,10 @@ def build_markdown(
     video_scope: str | None = None,
     filter_mode: str = "all",
     filter_work_title_prefix: bool | None = None,
+    index: ReportIndex | None = None,
+    summaries: dict | None = None,
 ) -> str:
+    index = index or ReportIndex((p, load_case(p)) for p in case_paths)
     gate_prefix = work_title_prefix if input_mode == 'video' else filter_work_title_prefix
     effort_names = ", ".join(
         _effort_name(item) for item in sorted(efforts, key=str)
@@ -381,15 +415,16 @@ def build_markdown(
     if filter_mode == 'passed':
         lines.extend(['**Question filter:** both stages must pass for each question/model/effort.', ''])
         for effort in sorted(efforts, key=str):
-            stats = build_summary(case_paths, qa_model=qa_model, input_mode=input_mode,
+            summary = summaries[effort] if summaries is not None else build_summary(case_paths, qa_model=qa_model, input_mode=input_mode,
                                   effort=effort, work_title_prefix=work_title_prefix,
                                   based=based,
                                   video_scope=video_scope, filter_mode='passed',
-                                  filter_work_title_prefix=filter_work_title_prefix)['filter_gate']
+                                  filter_work_title_prefix=filter_work_title_prefix, index=index)
+            stats = summary['filter_gate']
             lines.extend([f"- {_effort_name(effort)}: {stats['passed_questions']}/{stats['total_questions']} questions passed; "
                           f"{stats['excluded_judged_answers']} judged answers excluded. Reasons: {stats['reasons']}", ''])
     for path in case_paths:
-        case = load_case(path)
+        case = index.load(path)
         title = _markdown_value(case["title"]).replace("#", r"\#")
         lines.extend([f"## {title}", ""])
         if input_mode == "question_only":
@@ -456,15 +491,15 @@ def build_markdown(
                     group = (question, [])
                     question_groups.append(group)
                 group[1].append(video)
-        for index, (question, question_videos) in enumerate(question_groups, start=1):
+        for question_index, (question, question_videos) in enumerate(question_groups, start=1):
             if filter_mode == 'passed' and not any(
-                question_gate(case, v, question, qa_model, effort, gate_prefix)['passed']
+                index.gate(case, v, question, qa_model, effort, gate_prefix)['passed']
                 for v in question_videos for effort in efforts
             ):
                 continue
             lines.extend(
                 [
-                    f"### Question {index}",
+                    f"### Question {question_index}",
                     "",
                     f"**Question:** {_markdown_value(question['text_en'])}",
                     "",
@@ -475,10 +510,10 @@ def build_markdown(
                     result
                     for result in video["qa_results"]
                     if result.get("question_id") == question["question_id"]
-                    and qa_is_current(case, video, result)
+                    and index.qa_current(case, video, result)
                     and (filter_mode != 'passed' or (
-                        judgment_is_current(case, video, result)
-                        and question_gate(case, video, question, qa_model,
+                        index.judgment_current(case, video, result)
+                        and index.gate(case, video, question, qa_model,
                                           qa_result_thinking_effort(result), gate_prefix)['passed']))
                     and _result_matches(
                         result,
@@ -505,7 +540,7 @@ def build_markdown(
                         [f"**Local file:** {_local_video_link(video['local_path'])}", ""]
                     )
                 for result_index, result in enumerate(matching or [{}], start=1):
-                    judgment = result.get("judgment") if judgment_is_current(case, video, result) else None
+                    judgment = result.get("judgment") if index.judgment_current(case, video, result) else None
                     judgment = judgment if isinstance(judgment, dict) else {}
                     verdict = canonical_verdict(judgment.get("verdict", ""))
                     effort_display = (
@@ -546,11 +581,13 @@ def _discover_efforts(
     input_mode: str,
     work_title_prefix: bool | None,
     based: bool = False,
+    index: ReportIndex | None = None,
 ) -> tuple[str | None, ...]:
+    index = index or ReportIndex((p, load_case(p)) for p in case_paths)
     backend = get_backend(qa_model)
     observed: set[str | None] = set()
     for path in case_paths:
-        case = load_case(path)
+        case = index.load(path)
         if input_mode == "question_only":
             for question in require_question_only_compatible(case):
                 for result in question.get("question_only_results", []):
@@ -596,9 +633,11 @@ def _require_video_prefix_metadata(
     *,
     qa_model: str,
     based: bool,
+    index: ReportIndex | None = None,
 ) -> None:
+    index = index or ReportIndex((p, load_case(p)) for p in case_paths)
     for path in case_paths:
-        case = load_case(path)
+        case = index.load(path)
         for video in case["videos"]:
             for result in video["qa_results"]:
                 if (
@@ -622,19 +661,23 @@ def _fairy_video_prefix_name(args: argparse.Namespace) -> str | None:
 
 
 def command_summarize(args: argparse.Namespace) -> int:
+    from .runtime import Runtime
     dataset_dir = grouped_dir(args.dataset_dir, args.group)
     paths = iter_case_paths(dataset_dir, args.case_id)
+    with Runtime(paths) as runtime:
+        index = ReportIndex(runtime.snapshot(paths, workers=args.summary_workers))
+    print('Report uses a consistent case snapshot; concurrent QA may still be incomplete.')
     based_condition = bool(getattr(args, "based", False))
     if args.input == "question_only":
         for path in paths:
-            require_question_only_compatible(load_case(path))
+            require_question_only_compatible(index.load(path))
     work_title_prefix = work_title_prefix_condition(
         args.group,
         args.input,
         args.with_work_title_prefix,
     )
     if work_title_prefix is not None:
-        _require_video_prefix_metadata(paths, qa_model=args.qa_model, based=based_condition)
+        _require_video_prefix_metadata(paths, qa_model=args.qa_model, based=based_condition, index=index)
     requested = list(args.thinking_effort or [])
     efforts = (
         expand_thinking_efforts(requested, args.qa_model)
@@ -645,12 +688,14 @@ def command_summarize(args: argparse.Namespace) -> int:
             input_mode=args.input,
             work_title_prefix=work_title_prefix,
             based=based_condition,
+            index=index,
         )
     )
     model_slug = QA_MODEL_SLUGS[args.qa_model]
     result_dir = grouped_dir(RESULTS_DIR, args.group) / model_slug
     prefix_name = _fairy_video_prefix_name(args)
     filter_mode = getattr(args, 'filter_mode', 'all')
+    summaries = {}
     for effort in efforts:
         output_parts = [model_slug, args.input]
         if based_condition:
@@ -661,9 +706,7 @@ def command_summarize(args: argparse.Namespace) -> int:
             output_parts.append('filter_passed')
         output_parts.extend([_effort_name(effort), "summary"])
         output = result_dir / ("_".join(output_parts) + ".json")
-        atomic_write_json(
-            output,
-            build_summary(
+        summaries[effort] = build_summary(
                 paths,
                 qa_model=args.qa_model,
                 input_mode=args.input,
@@ -673,8 +716,9 @@ def command_summarize(args: argparse.Namespace) -> int:
                 video_scope=getattr(args, "video_scope", None),
                 filter_mode=filter_mode,
                 filter_work_title_prefix=work_title_prefix_condition(args.group, 'video', args.with_work_title_prefix),
-            ),
+                index=index,
         )
+        atomic_write_json(output, summaries[effort])
         print(f"Wrote summary: {output}")
 
     report_parts = [model_slug, args.input]
@@ -697,6 +741,8 @@ def command_summarize(args: argparse.Namespace) -> int:
             video_scope=getattr(args, "video_scope", None),
             filter_mode=filter_mode,
             filter_work_title_prefix=work_title_prefix_condition(args.group, 'video', args.with_work_title_prefix),
+            index=index,
+            summaries=summaries,
         ),
     )
     print(f"Wrote report: {report_output}")

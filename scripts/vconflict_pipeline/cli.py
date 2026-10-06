@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import math
 import sys
 from pathlib import Path
 from typing import Any
@@ -13,7 +14,7 @@ from .audit import command_audit
 from .core import PipelineError, validate_group, validate_id
 from .deletion import command_delete
 from .descriptions import command_description
-from .evaluation import command_qa_judge
+from .scheduler import command_qa_judge
 from .generation import command_generate, command_review
 from .qa import REQUEST_TIMEOUT_SECONDS
 from .reporting import command_summarize
@@ -214,15 +215,17 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="{" + ",".join(CLI_QA_MODELS) + "}",
     )
     _add_input(qa_judge)
-    _add_case_workers(qa_judge)
-    _add_request_limits(qa_judge)
+    qa_judge.add_argument("--qa-concurrency", type=int)
+    qa_judge.add_argument("--judge-concurrency", type=int, default=24)
+    qa_judge.add_argument("--qa-service-concurrency", type=int)
+    qa_judge.add_argument("--qa-rpm", type=float)
+    qa_judge.add_argument("--judge-rpm", type=float, default=20)
+    qa_judge.add_argument("--openrouter-concurrency", type=int, default=24)
+    qa_judge.add_argument("--openrouter-rpm", type=float, default=20)
     _add_thinking_effort(qa_judge)
     _add_work_title_prefix(qa_judge)
     _add_based(qa_judge)
-    qa_judge.add_argument("--qa-workers", type=int)
-    qa_judge.add_argument("--cosmos-workers", type=int, default=DEFAULT_COSMOS_WORKERS)
     qa_judge.add_argument("--cosmos-max-tokens", type=int, default=DEFAULT_COSMOS_MAX_TOKENS)
-    qa_judge.add_argument("--gemma-workers", type=int, default=DEFAULT_GEMMA_WORKERS)
     qa_judge.add_argument("--gemma-max-tokens", type=int, default=DEFAULT_GEMMA_MAX_TOKENS)
     _add_retries(qa_judge, timeout=REQUEST_TIMEOUT_SECONDS)
     force = qa_judge.add_mutually_exclusive_group()
@@ -246,6 +249,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_thinking_effort(summarize)
     _add_work_title_prefix(summarize)
     _add_based(summarize)
+    summarize.add_argument("--summary-workers", type=int, default=4)
     summarize.add_argument("--video-scope", choices=("qualified", "all"))
     summarize.add_argument("--filter", dest="filter_mode", choices=("all", "passed"), default="all",
                            help="Require both question filters to pass; write separate reports.")
@@ -276,11 +280,17 @@ def _validate(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None
         parser.error("--video-id cannot be combined with --input question_only")
     if hasattr(args, "video_scope") and args.video_scope is None:
         args.video_scope = "qualified" if args.group == "mathematics_algorithm_conflicts" else "all"
-    if args.command == "qa-judge" and args.qa_workers is None:
-        args.qa_workers = {
+    if args.command == "qa-judge":
+        concurrency = {
             COSMOS_QA_MODEL: DEFAULT_COSMOS_WORKERS,
             GEMMA_QA_MODEL: DEFAULT_GEMMA_WORKERS,
-        }.get(args.qa_model, 3)
+        }.get(args.qa_model, 24)
+        if args.qa_concurrency is None:
+            args.qa_concurrency = concurrency
+        if args.qa_service_concurrency is None:
+            args.qa_service_concurrency = concurrency
+        if args.qa_rpm is None:
+            args.qa_rpm = 0 if args.qa_model in (COSMOS_QA_MODEL, GEMMA_QA_MODEL) else 20
     if getattr(args, "audit_only", False) and (args.force or args.repair_variant_context):
         parser.error("--audit-only cannot be combined with --force or --repair-variant-context")
     if getattr(args, "repair_variant_context", False):
@@ -314,16 +324,19 @@ def _validate(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None
         "openrouter_workers",
         "seedance_workers",
         "seedance_total_workers",
-        "qa_workers",
-        "cosmos_workers",
+        "qa_concurrency",
+        "judge_concurrency",
+        "qa_service_concurrency",
+        "openrouter_concurrency",
+        "summary_workers",
         "cosmos_max_tokens",
-        "gemma_workers",
         "gemma_max_tokens",
     ):
         if hasattr(args, field) and getattr(args, field) <= 0:
             parser.error(f"--{field.replace('_', '-')} must be greater than zero")
-    if hasattr(args, "openrouter_rpm") and args.openrouter_rpm < 0:
-        parser.error("--openrouter-rpm must not be negative")
+    for field in ("openrouter_rpm", "qa_rpm", "judge_rpm"):
+        if hasattr(args, field) and (not math.isfinite(getattr(args, field)) or getattr(args, field) < 0):
+            parser.error(f"--{field.replace('_', '-')} must be finite and nonnegative")
     for field in ("max_repairs", "max_retries"):
         if hasattr(args, field) and getattr(args, field) < 0:
             parser.error(f"--{field.replace('_', '-')} must not be negative")
@@ -338,6 +351,16 @@ def _validate(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     arguments = list(sys.argv[1:] if argv is None else argv)
+    if arguments and arguments[0] == "qa-judge":
+        replacements = {"--case-workers": "--qa-concurrency / --judge-concurrency",
+                        "--qa-workers": "--qa-concurrency",
+                        "--cosmos-workers": "--qa-service-concurrency",
+                        "--gemma-workers": "--qa-service-concurrency",
+                        "--openrouter-workers": "--openrouter-concurrency"}
+        for argument in arguments[1:]:
+            option = argument.split("=", 1)[0]
+            if option in replacements:
+                parser.error(f"{option} was removed from qa-judge; use {replacements[option]}")
     forbidden = [value for value in arguments if value in ("-h", "--help")]
     if forbidden:
         parser.error(f"unrecognized arguments: {' '.join(forbidden)}")

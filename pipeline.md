@@ -169,7 +169,9 @@ case 预检失败时不会删除其中任何一个。预检成功后，它会删
 
 ## QA 与 Judge
 
-`qa-judge` 先运行 QA，再用 Luna Pro 判定本次筛选范围内尚未判定的回答：
+`qa-judge` 按请求流水化执行：每条 QA 保存后即由 Luna Pro 判分，两层 filter
+逐题放行。单 case 内也可并发，多个普通命令可安全合并写入同一 case。
+新并发参数、共享服务额度和 force 互斥规则见 [concurrency.md](concurrency.md)。
 
 ```bash
 python scripts/pipeline.py qa-judge \
@@ -272,13 +274,13 @@ description 或 human review。
   `medium`。
 - Cosmos3-Nano：CLI 使用 `--qa-model cosmos3-nano`，调用单卡本地 vLLM 上的
   `nvidia/Cosmos3-Nano`；支持 `none` 和 `default`，视频以 4 fps 采样，
-  `max_tokens` 默认 4096。`--cosmos-max-tokens` 可调整输出上限，
-  `--cosmos-workers` 默认 4；
-  Cosmos 的 `--qa-workers` 默认也为 4。
+  `max_tokens` 默认 8192。`--cosmos-max-tokens` 可调整输出上限，
+  `--qa-concurrency` 和 `--qa-service-concurrency` 默认均为 8。
 - Gemma 4：CLI 使用 `--qa-model gemma4`，模型 ID 为 `google/gemma-4-31B-it`；
   支持 `none` 和 `default`，省略 effort 时使用 `default`，`all` 运行两种条件。
-  `--gemma-workers` 和 Gemma 的 `--qa-workers` 均默认 2，
-  `--gemma-max-tokens` 默认 4096。其他模型的 `--qa-workers` 仍默认 3。
+  `--qa-concurrency` 和 `--qa-service-concurrency` 默认均为 4，
+  `--gemma-max-tokens` 默认 2048。云端模型 QA 并发默认 24，Judge 并发默认 24；
+  实际在途请求还受跨命令共享额度和 RPM 限制。本地服务端容量没有自动调整。
 
 Cosmos 服务在仓库根目录运行 `./scripts/start_cosmos_vllm.sh` 启动；完整启动参数
 和架构说明见 `plan.md` 的「模型配置」。视频路径须是服务端可读取、位于
@@ -387,16 +389,18 @@ python scripts/pipeline.py qa-judge ... --force-qa
 python scripts/pipeline.py qa-judge ... --force-judge
 ```
 
-- `--force-qa` 删除筛选范围内全部 QA 记录及其中的 judgment，再重新执行。
+- `--force-qa` 删除当前选中且通过 filter 的主实验 QA 及 judgment，再重新执行。
 - `--force-judge` 保留 QA 回答，只清空全部匹配 judgment，再重新判定。
 
-两种 force 对 video/description 仅处理当前 `--based` 条件，保留另一条件的结果。
+两种普通 force 不清理 control、question-only filter 或未通过题目的历史。
+对 video/description 仅处理当前 `--based` 条件，保留另一条件的结果。
 
 Question-only 的 force 只作用于匹配的 `question_only_results`；不会清理视频 QA。
 
-Force 会先加载和验证全部选中 case、依赖、凭据、视频或 description，然后统一
-计算并写回所有清理。只有全部 case 清理完成后才会发出第一个模型请求。不会执行
-一个 case 后再清理下一个 case。若清理失败，本次运行不发出任何新请求。
+Force 在任何请求和清理前独占登记全部所选 case；与 QA、其他 force 或 summarize
+冲突时立即报错。Video/description 随后先准备 filter，缺失或过期时可发出 filter
+请求，再预检并统一清理主实验结果。只有全部清理成功后才会发出第一个主实验请求。
+若清理失败，不启动主实验请求；已完成的部分清理不会自动回滚。
 
 部分 QA 请求失败时，Judge 仍会处理其余已完成回答，最终返回非零退出码。命令
 结束打印：

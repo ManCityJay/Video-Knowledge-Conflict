@@ -191,8 +191,8 @@ vLLM 视频处理路径使用每帧最多 70 个视觉 token，不再叠加处�
 
 Gemma 支持 `--thinking-effort none|default|all`，省略时使用 `default`；
 请求以 `chat_template_kwargs.enable_thinking` 显式关闭或开启推理，不依赖服务端
-默认值。`--gemma-workers` 和 Gemma 的 `--qa-workers` 均默认 2；
-`--gemma-max-tokens` 默认 4096。文字请求不含视频或采样参数。
+默认值。Gemma 的 `--qa-concurrency` 和 `--qa-service-concurrency` 均默认 4；
+`--gemma-max-tokens` 默认 2048。文字请求不含视频或采样参数。
 主 QA 和两层 filter 共用同一模型配置，本地 QA 不使用 OpenRouter RPM 限制。
 `raw_answer` 保存回答正文，可选 `reasoning_content` 保存服务返回的推理文本；
 `final_answer` 仅从正文提取，Judge 不读取推理内容。生成温度 0 是本实验选择，
@@ -290,8 +290,11 @@ conflict。删除问题会同时清除其全部 QA/Judge 历史。
 video/description 配对 `compare`。Source cases 必须预先按每个 case 一个 Markdown
 文件准备，各阶段显式执行。文字 context stage 名称为 `description`。
 
-`qa-judge` 使用 case 层与输入层两级并发，所有请求共享 limiter、RPM pacing 和
-retry 策略。Video 和 Description QA 新记录均保存布尔字段 `based`；旧记录缺少时
+`qa-judge` 使用请求级流水线：两层 filter 和目标 QA 的每条回答保存后立即进入
+对应 Judge；每层 filter 通过后立即释放下游。单 case 内的问题和 effort 可并行。
+同一工作区多个普通命令可共享 case，通过 SQLite 协调任务认领、服务额度和重试；
+写回时短暂加锁、重读最新 JSON 并仅合并当前结果。Force 独占所选 case。
+完整参数、故障恢复及限制见 `concurrency.md`。Video 和 Description QA 新记录均保存布尔字段 `based`；旧记录缺少时
 按 `false` 处理。Description QA 在当前 video 对象中按以下键去重：
 
 ```text
@@ -341,9 +344,13 @@ video/context 依据指令并使用独立指纹，`Final answer:` 指令仍在�
 `--force-judge` 选中旧格式记录时，会在任何模型请求前要求先执行
 `--force-qa`。
 
-`--force-qa` 和 `--force-judge` 互斥。前者删除匹配的全部 QA 和 judgment，
-后者只清空 judgment。Force 会先预检全部选中 case 和依赖，再统一清理并写回
-所有 case；全部清理成功前禁止调用模型，避免不同 case 中新旧结果混合。
+`--force-qa` 和 `--force-judge` 互斥。普通 video/description force 仅清理当前
+选中且通过 filter 的主实验 QA/Judge，不清理 control、question-only filter
+或未通过题目的历史。Force 在任何模型请求前独占登记全部所选 case；冲突则报错。
+随后先准备 filter（可补充模型请求），再预检并统一清理主实验结果。全部清理
+成功前禁止主实验模型请求；清理并非跨文件事务，中断时可能已有部分清理落盘。
+独立 question-only force 清理所选 question-only 结果；`--filter-only` force
+单独强制执行 filter，仍保留历史并按第一层新判定决定是否执行第二层。
 
 命令结束打印 QA 和 Judge 各自的完成数/总数。Video/description 的终端完成比例
 仅包含通过双层 filter 的 conflict 目标，不包含 control；QA 单位为 video ×
@@ -432,6 +439,8 @@ scripts/
     ├── filters.py
     ├── selection.py
     ├── qa.py
+    ├── scheduler.py       # 请求级依赖调度、重试与短锁合并
+    ├── runtime.py         # 同机跨进程认领、锁及共享额度
     ├── evaluation.py
     ├── evidence.py
     ├── integrity.py

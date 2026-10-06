@@ -1,23 +1,18 @@
 """Question-scoped knowledge filters shared by execution and reporting.
 
-No model calls occur while checking a gate. Only prepare_filters makes requests.
+Gate checks are read-only; scheduler.py owns all filter requests and commits.
 Private variant questions own their own records and matched control video.
 """
 from __future__ import annotations
 
-import argparse
-import copy
-import json
-from collections import Counter
 
-from .core import (FILTER_RESULT_FIELDS, PipelineError, atomic_write_json, canonical_verdict,
-                   filter_field, set_filter_field,
-                   qa_result_input_mode, resolve_video_path, utc_now, video_case_context)
+from .core import (
+    FILTER_RESULT_FIELDS, PipelineError, canonical_verdict, filter_field,
+    qa_result_input_mode, resolve_video_path, video_case_context,
+)
 from .evidence import observed_summary, video_sha256
 from .integrity import digest, judgment_is_current, qa_is_current, question_content
-from .selection import eligible_videos, selected_questions
-from .settings import FAIRY_TALE_GROUP, AUTHOR_JUDGE_MODEL
-from .qa_diagnostics import QADiagnostics
+from .settings import FAIRY_TALE_GROUP
 
 
 def scope_id(video):
@@ -157,133 +152,3 @@ def qa_allowed(case, video, question, model, effort, prefix, input_mode='video')
     if input_mode == 'video' and video['role'] == 'control':
         return stage_state(case, video, question, 'question_only', model, effort, None)['status'] == 'passed'
     return question_gate(case, video, question, model, effort, prefix)['passed']
-
-
-def prepare_filters(args, loaded, efforts, *, diagnostics: QADiagnostics | None = None):
-    """Run both stages in order; incorrect answers are exclusions, errors are failures.
-
-    Saves after each answer/judgment so an interrupted invocation resumes safely.
-    Force on a target QA run does not clear filters or excluded historical results.
-    """
-    from .evaluation import JUDGE_SYSTEM_PROMPT
-    from .core import JUDGMENT_SCHEMA
-    from .qa import (get_backend, preflight_qa_backend, run_qa_batch,
-                     make_qa_request_limiter, local_qa_max_tokens)
-    from .transport import (make_openrouter_limiter,
-                            openrouter_json, require_openrouter_api_key)
-    from .integrity import qa_fingerprint, judgment_fingerprint
-
-    prefix = effective_prefix(args.group, args.with_work_title_prefix)
-    qa_limiter = make_qa_request_limiter(args)
-    judge_limiter = make_openrouter_limiter(args)
-    backend_ready = False
-    served = None
-    failures = 0
-    counts = Counter()
-    for path, case in loaded:
-        videos = eligible_videos(case, input_mode=args.input,
-                                  selected_video_ids=set(args.video_id or []),
-                                  video_scope=getattr(args, 'video_scope', None),
-                                  based=bool(getattr(args, 'based', False)))
-        seen = set()
-        for video in videos:
-            context = video_case_context(case, video)
-            for question in selected_questions(context, set(args.question_id or [])):
-                for effort in efforts:
-                    key = (scope_id(video), question['question_id'], effort)
-                    if key in seen:
-                        continue
-                    seen.add(key)
-                    for stage in ('question_only', 'control_video'):
-                        stage_prefix = None if stage == 'question_only' else prefix
-                        state = stage_state(case, video, question, stage, args.qa_model, effort, stage_prefix)
-                        force_qa = getattr(args, 'filter_only', False) and args.force_qa
-                        force_judge = getattr(args, 'filter_only', False) and args.force_judge
-                        if state['status'] in ('passed', 'failed') and not (force_qa or force_judge):
-                            if state['status'] == 'failed':
-                                break
-                            continue
-                        if state['status'] == 'unavailable':
-                            print(f"Filter unavailable {case['case_id']}/{scope_id(video)}/{question['question_id']}: {state['reason']}")
-                            failures += 1
-                            break
-                        try:
-                            result = state['result']
-                            control = control_video(case, video) if stage == 'control_video' else None
-                            control_input = (qa_fingerprint(case, control, question, 'video', prefix)
-                                             if control is not None and scope_id(video) == 'case' else None)
-                            if force_qa or state['status'] in ('missing', 'stale'):
-                                if not backend_ready:
-                                    # Local video constraints are also checked by run_qa_batch.
-                                    served = preflight_qa_backend(argparse.Namespace(**{**vars(args), 'input': 'question_only'}))
-                                    backend_ready = True
-                                require_openrouter_api_key()  # before incurring a QA request
-                                answers, errors = run_qa_batch(
-                                    input_mode='question_only' if control is None else 'video',
-                                    video_path=resolve_video_path(control['local_path'], must_exist=True) if control else None,
-                                    context_text=None, work_title=context['title'].split(':', 1)[0].strip() if stage_prefix else None,
-                                    work_title_prefix=stage_prefix, question_runs=[(question, effort)],
-                                    qa_model=args.qa_model, api_key=get_backend(args.qa_model).require_api_key(),
-                                    timeout=args.timeout, max_retries=args.max_retries, request_limiter=qa_limiter,
-                                    local_served_model_id=served, local_max_tokens=local_qa_max_tokens(args),
-                                    based=False, diagnostics=diagnostics,
-                                    diagnostic_stage='question_only filter' if stage == 'question_only' else 'control filter')
-                                if errors or len(answers) != 1:
-                                    raise PipelineError(f'Filter QA failed: {errors}')
-                                result = answers[0]
-                            else:
-                                result = copy.deepcopy(result)
-                            set_filter_field(result, 'stage', stage)
-                            set_filter_field(result, 'fingerprint', state['fingerprint'])
-                            result['judgment'] = None
-                            # Each answer has one authoritative storage location;
-                            # rejudging through an existing command must not leave
-                            # a second, contradictory copy of the filter verdict.
-                            if scope_id(video) != 'case':
-                                # Resume in the owning container; never copy a legacy run
-                                # into the new container just because its name changed.
-                                records = next((question[field] for field in FILTER_RESULT_FIELDS
-                                                if any(r.get('run_id') == result['run_id']
-                                                       for r in question.get(field, []))), None)
-                                if records is None:
-                                    records = question.setdefault('filter_results', [])
-                            elif stage == 'question_only':
-                                records = question.setdefault('question_only_results', [])
-                            else:
-                                records = control['qa_results']
-                                result['input_fingerprint'] = control_input
-                            # Replace the same run on resume; retain other runs/configurations.
-                            records[:] = [r for r in records if r.get('run_id') != result['run_id']]
-                            records.append(result)
-                            atomic_write_json(path, case)
-                            payload = {'video_role': 'control', 'question': question['text_en'],
-                                       'final_answer': result['final_answer'],
-                                       'normal_fact': context['conflict_spec']['normal_fact_en'],
-                                       'intended_video_fact': context['conflict_spec']['intended_video_fact_en'],
-                                       'conflict_video_reference': question['conflict_video_reference_en'],
-                                       'normal_control_reference': question['normal_control_reference_en']}
-                            verdict, response = openrouter_json(
-                                messages=[{'role': 'system', 'content': JUDGE_SYSTEM_PROMPT},
-                                          {'role': 'user', 'content': json.dumps(payload, ensure_ascii=False)}],
-                                model=AUTHOR_JUDGE_MODEL, schema_name='knowledge_conflict_judgment',
-                                schema=JUDGMENT_SCHEMA, api_key=require_openrouter_api_key(),
-                                timeout=args.timeout, max_retries=args.max_retries, request_limiter=judge_limiter)
-                            if verdict['verdict'] not in ('context_grounded', 'ambiguous_or_unjudgeable'):
-                                raise PipelineError('Invalid filter judgment verdict')
-                            result['judgment'] = {**verdict, 'timestamp': utc_now(),
-                                'judge_model': AUTHOR_JUDGE_MODEL, 'judge_request_id': response.get('id'),
-                                'filter_fingerprint': digest({'input': state['fingerprint'], 'final_answer': result['final_answer']})}
-                            if scope_id(video) == 'case' and stage == 'control_video':
-                                result['judgment']['input_fingerprint'] = judgment_fingerprint(case, control, result)
-                            atomic_write_json(path, case)
-                            print(f"Filter {stage} {case['case_id']}/{scope_id(video)}/{question['question_id']}/{effort}: {verdict['verdict']}")
-                            if verdict['verdict'] != 'context_grounded':
-                                break
-                        except (PipelineError, OSError) as exc:
-                            failures += 1
-                            print(f"Filter error {case['case_id']}/{scope_id(video)}/{question['question_id']}: {exc}")
-                            break
-                    gate = question_gate(case, video, question, args.qa_model, effort, prefix)
-                    counts[gate['reason']] += 1
-    print('Question filter gates: ' + json.dumps(dict(counts), sort_keys=True))
-    return 1 if failures else 0
