@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>人工评测</title><link rel="stylesheet" href="/style.css"><script src="/app.js" defer></script></head>
+<body>
+<header><a href="/" class="brand">Conflict 人工评测</a><nav><a href="/qa">1 · 回答 QA</a><a href="/judge">2 · 人工 Judge</a></nav></header>
+<section class="identity" aria-label="评测者设置">
+<div>当前评测者：<strong id="current-annotator"></strong></div>
+<form id="identity-form"><label for="annotator-input">姓名或编号</label> <input id="annotator-input" maxlength="64" required placeholder="例如：张三 / reviewer01"> <button id="use-annotator" type="submit">使用此编号</button> <button id="rename-annotator" type="button">将当前进度改名</button></form>
+<small>支持中文、字母、数字、下划线、短横线和点。相同编号恢复同一份进度；首次给已有进度填写姓名，请点“将当前进度改名”。编号不是密码，请勿共用。</small>
+</section>
+<main id="home" class="home" hidden><h1>选择任务</h1><div class="choices"><a class="choice" href="/qa"><span>01</span><h2>回答 conflict QA</h2><p>看视频和问题，填写 answer。</p></a><a class="choice" href="/judge"><span>02</span><h2>人工 Judge</h2><p>阅读与 LLM Judge 相同的文本材料，选择判定答案。</p></a></div></main>
+<main id="workspace" hidden>
+<div class="top"><h1 id="title"></h1><span id="progress"></span></div>
+<div id="groups" class="groups"></div>
+<div class="layout"><aside><div id="task-list"></div></aside><article>
+<div class="item-nav"><strong id="position"></strong><div><button id="prev" type="button">上一条</button><button id="next" type="button">下一条</button></div></div>
+<div id="empty" hidden>暂无样本。</div><section id="task" hidden>
+<div id="missing" class="missing" hidden></div>
+<div id="materials"></div>
+<form id="answer-form"><label for="answer">Answer</label><textarea id="answer" rows="4" placeholder="填写你的回答"></textarea><select id="judge-answer" aria-label="Answer" hidden><option value="">选择判定答案</option><option value="context_grounded">context_grounded · 回答符合冲突情境</option><option value="knowledge_trapped">knowledge_trapped · 回答被常识带偏</option><option value="ambiguous_or_unjudgeable">ambiguous_or_unjudgeable · 回答模糊或无法归类</option></select><div class="submit"><button id="submit" type="submit">提交并下一条</button><span id="save-state"></span></div></form>
+<div id="more-materials"></div>
+</section></article></div>
+</main><div id="notice" role="status" hidden></div>
+</body></html>
