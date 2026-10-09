@@ -124,7 +124,12 @@ def parse_mcd_answer(raw_answer, finish_reason):
     try:
         if "<think>" in visible or "</think>" in visible:
             raise PipelineError("Unclosed or unmatched think tag in QA response.")
+        markers = list(re.finditer(r"(?<!\S)Final answer:", visible))
+        if len(markers) > 1:
+            raise PipelineError("Multiple Final answer markers in MCD response.")
         parsed = extract_final_answer(visible)
+        if markers and visible[:markers[0].start()].split("\n")[-1].strip():
+            warning = "Final answer marker was inline instead of on a separate final line."
     except PipelineError as exc:
         error = str(exc)
         # A missing newline is recoverable. Missing/empty/ambiguous markers,

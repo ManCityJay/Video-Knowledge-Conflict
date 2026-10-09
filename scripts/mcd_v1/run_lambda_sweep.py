@@ -24,9 +24,9 @@ def result_path(output, item, weight):
     return output / ("lambda_" + format(weight, "g")) / (item["id"] + ".json")
 
 
-def make_report(manifest, output):
+def make_report(manifest, output, weights=WEIGHTS):
     rows, summary = [], {}
-    for weight in WEIGHTS:
+    for weight in weights:
         counts = collections.Counter()
         seconds = 0.0
         for item in manifest["items"]:
@@ -44,17 +44,17 @@ def make_report(manifest, output):
     atomic_write_text(output / "report.json", json.dumps(rows, ensure_ascii=False, indent=2) + "\n")
     atomic_write_text(output / "summary.json", json.dumps(summary, indent=2) + "\n")
     lines = ["# Lambda sweep", "",
-             "Same 20-item pilot when using the original manifest. Lambda 0 is the shared greedy baseline.",
+             manifest.get("note", "Lambda 0 is the shared greedy baseline."),
              "Status is format/completion only, not correctness. format_fallback needs manual review.",
              "Compare final answer and explanation separately; references are unverified and are never model inputs.", "",
-             "| Item | Role | Reference | lambda=0 | 0.1 | 0.2 | 0.3 | 0.5 |",
-             "|---|---|---|---|---|---|---|---|"]
+             "| Item | Role | Reference | " + " | ".join(f"lambda={w:g}" for w in weights) + " |",
+             "|" + "---|" * (3 + len(weights))]
     def cell(value):
         return str(value or "").replace("|", "\\|").replace("\n", "<br>")
     by_key = {(r["id"], r["lambda"]): r for r in rows}
     for item in manifest["items"]:
         values = [item["id"], item["role"], item["reference"]]
-        for weight in WEIGHTS:
+        for weight in weights:
             row = by_key[item["id"], weight]
             answer = row["answer"]
             values.append("[" + row["status"] + "] " + (answer.get("evaluation_answer") or answer.get("final_answer") or ""))
@@ -64,10 +64,11 @@ def make_report(manifest, output):
 
 
 def execute(args, manifest, output):
+    weights = args.lambdas
     fingerprints = code_fingerprints()
     fingerprints["mcd_v1/run_lambda_sweep.py"] = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
     config = {k: getattr(args, k) for k in ("model", "revision", "device", "dtype", "beta", "fps", "max_new_tokens")}
-    config.update(weights=list(WEIGHTS), thinking_effort="none",
+    config.update(weights=list(weights), thinking_effort="none",
                   manifest_sha256=hashlib.sha256(json.dumps(manifest, sort_keys=True).encode()).hexdigest(),
                   code_sha256=fingerprints)
     config_path = output / "config.json"
@@ -81,17 +82,17 @@ def execute(args, manifest, output):
             raise ValueError("New sweep requires an empty output directory.")
         write_json(output / "manifest.json", manifest)
         write_json(config_path, config)
-    for weight in WEIGHTS:
+    for weight in weights:
         result_path(output, manifest["items"][0], weight).parent.mkdir(exist_ok=True)
     if args.prepare_only:
-        make_report(manifest, output)
-        print(f"Prepared {len(manifest['items'])} items x {len(WEIGHTS)} lambdas; no model loaded.")
+        make_report(manifest, output, weights)
+        print(f"Prepared {len(manifest['items'])} items x {len(weights)} lambdas; no model loaded.")
         return 0
     runtime = {}
-    total = len(manifest["items"]) * len(WEIGHTS)
+    total = len(manifest["items"]) * len(weights)
     index = 0
     for item in manifest["items"]:
-        for weight in WEIGHTS:
+        for weight in weights:
             index += 1
             target = result_path(output, item, weight)
             if target.exists():
@@ -112,10 +113,10 @@ def execute(args, manifest, output):
                     write_json(target, {"error": {"type": type(exc).__name__, "message": str(exc)}, "runs": {}})
                 raise
             finally:
-                make_report(manifest, output)
+                make_report(manifest, output, weights)
             if read_json(target).get("error"):
                 raise RuntimeError(f"Generation error saved in {target}; inspect before continuing.")
-    summary = make_report(manifest, output)
+    summary = make_report(manifest, output, weights)
     print(json.dumps(summary, indent=2), flush=True)
     print(f"Report: {output / 'report.md'}", flush=True)
     return int(any(any(k not in ("ok", "format_fallback") and v for k, v in group["statuses"].items())
@@ -128,6 +129,7 @@ def main(argv=None):
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--model", required=True)
     parser.add_argument("--revision")
+    parser.add_argument("--lambdas", nargs="+", type=float, default=list(WEIGHTS))
     parser.add_argument("--device", default="cuda:1")
     parser.add_argument("--dtype", choices=("bfloat16", "float16", "float32"), default="bfloat16")
     parser.add_argument("--beta", type=float, default=0.1)
@@ -135,6 +137,11 @@ def main(argv=None):
     parser.add_argument("--max-new-tokens", type=int, default=512)
     parser.add_argument("--prepare-only", action="store_true")
     args = parser.parse_args(argv)
+    if (not all(math.isfinite(w) and w >= 0 for w in args.lambdas)
+            or 0 not in args.lambdas or len(set(args.lambdas)) != len(args.lambdas)
+            or len({format(w, "g") for w in args.lambdas}) != len(args.lambdas)):
+        parser.error("Lambdas must be unique, finite, nonnegative and include 0")
+    args.lambdas = sorted(args.lambdas)
     if not math.isfinite(args.beta) or not 0 <= args.beta <= 1 or not math.isfinite(args.fps) or args.fps <= 0 or args.max_new_tokens <= 0:
         parser.error("Invalid beta, fps or token limit")
     manifest = read_json(args.manifest)
