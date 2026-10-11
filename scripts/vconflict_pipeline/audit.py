@@ -4,16 +4,24 @@ from __future__ import annotations
 from collections import Counter
 from pathlib import Path
 
-from .core import (PipelineError, atomic_write_json, grouped_dir, iter_case_paths,
-                   load_case, utc_now, video_case_context)
+from .common import PipelineError, utc_now, video_case_context
 from .evidence import observed_summary
-from .integrity import (description_is_current, qa_is_current, judgment_is_current,
-                        question_scope_fingerprint, video_selected)
-from .settings import PROJECT_ROOT, DEFAULT_SOURCE_CASE_DIR
+from .integrity import (
+    description_is_current,
+    judgment_is_current,
+    qa_is_current,
+    question_scope_fingerprint,
+    video_selected,
+)
+from .paths import grouped_dir, iter_case_paths
+from .settings import DEFAULT_SOURCE_CASE_DIR, PROJECT_ROOT
+from .storage import atomic_write_json, load_case
 
 
 def audit_cases(paths: list[Path], *, group: str | None = None) -> dict:
-    from .authoring import question_case_context
+    from .authoring import (
+        question_case_context,
+    )
     counts = Counter()
     findings = []
     physical_paths = set()

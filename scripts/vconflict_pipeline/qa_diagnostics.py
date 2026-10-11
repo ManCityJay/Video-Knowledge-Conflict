@@ -6,7 +6,10 @@ import threading
 from typing import Literal
 
 QADiagnosticStage = Literal["main", "question_only filter", "control filter"]
-QADiagnosticReason = Literal["max_tokens_truncated", "missing_final_answer"]
+QADiagnosticReason = Literal[
+    "max_tokens_truncated", "missing_final_answer", "final_answer_retries",
+    "final_answer_retry_recovered", "final_answer_retry_failed",
+]
 DIAGNOSTIC_STAGES: tuple[QADiagnosticStage, ...] = (
     "main", "question_only filter", "control filter",
 )
@@ -17,7 +20,9 @@ class QADiagnostics:
         self.include_truncation = include_truncation
         self._lock = threading.Lock()
         self._counts = {
-            stage: {"max_tokens_truncated": 0, "missing_final_answer": 0}
+            stage: {"max_tokens_truncated": 0, "missing_final_answer": 0,
+                    "final_answer_retries": 0, "final_answer_retry_recovered": 0,
+                    "final_answer_retry_failed": 0}
             for stage in DIAGNOSTIC_STAGES
         }
 
@@ -33,4 +38,6 @@ class QADiagnostics:
             if self.include_truncation:
                 fields.append(f"max_tokens_truncated={counts['max_tokens_truncated']}")
             fields.append(f"missing_final_answer={counts['missing_final_answer']}")
+            for name in ("final_answer_retries", "final_answer_retry_recovered", "final_answer_retry_failed"):
+                fields.append(f"{name}={counts[name]}")
             print(f"QA output diagnostics ({stage}, this run): " + ", ".join(fields))

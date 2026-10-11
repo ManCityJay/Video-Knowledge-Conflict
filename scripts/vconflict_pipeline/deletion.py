@@ -1,8 +1,5 @@
 """Delete videos, questions, or complete cases from the local dataset."""
-
 from __future__ import annotations
-
-from .integrity import (require_writable_case)
 
 import argparse
 import copy
@@ -10,16 +7,12 @@ import sys
 from pathlib import Path
 from typing import Any, Iterable
 
-from .core import (
-    PipelineError,
-    atomic_write_json,
-    grouped_dir,
-    load_case,
-    video_case_context,
-    resolve_video_path,
-    validate_case,
-)
+from .common import PipelineError, video_case_context
+from .integrity import require_writable_case
+from .paths import grouped_dir, resolve_video_path
+from .schema import validate_case
 from .settings import PROJECT_ROOT
+from .storage import atomic_write_json, load_case
 
 
 def _unique(values: Iterable[str] | None) -> set[str]:
@@ -149,7 +142,7 @@ def _remove_selected(
 
     print(
         f"Deleted from case {case['case_id']}: {len(video_ids)} video(s), "
-        f"{len(question_ids)} question(s), {len(removed_descriptions)} "
+        f"{len(question_ids)} question(s), {removed_descriptions} "
         f"description(s), {len(removed_results)} QA result(s), and "
         f"{removed_judgments} judgment(s)."
     )
@@ -162,19 +155,10 @@ def _remove_selected(
     return 1 if cleanup_failures else 0
 
 
-def _case_video_directories(case: dict[str, Any]) -> list[Path]:
-    directories: set[Path] = set()
-    for video in case["videos"]:
-        local_path = _validated_local_video_path(video["local_path"])
-        directories.add(local_path.parent)
-    return sorted(directories, key=str)
-
-
 def _remove_entire_case(
     *,
     case_path: Path,
     case: dict[str, Any],
-    video_directories: list[Path],
 ) -> int:
     # Variant JSONs share a case directory. Never recursively delete that directory.
     video_paths = [_validated_local_video_path(v['local_path']) for v in case['videos']]
@@ -242,18 +226,17 @@ def command_delete(args: argparse.Namespace) -> int:
     dataset_dir = grouped_dir(args.dataset_dir, args.group)
     loaded = _load_selected_cases(dataset_dir, args.case_id)
     if args.delete_all:
-        prepared = [
-            (case_path, case, _case_video_directories(case))
-            for case_path, case in loaded
-        ]
+        # Validate every selected case's media before deleting the first JSON.
+        for _, case in loaded:
+            for video in case["videos"]:
+                _validated_local_video_path(video["local_path"])
         status = 0
-        for case_path, case, video_directories in prepared:
+        for case_path, case in loaded:
             status |= _remove_entire_case(
                 case_path=case_path,
                 case=case,
-                video_directories=video_directories,
             )
-        print(f"Deleted {len(prepared)} complete case(s).")
+        print(f"Deleted {len(loaded)} complete case(s).")
         return status
     case_path, case = loaded[0]
     return _remove_selected(

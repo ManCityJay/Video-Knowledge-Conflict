@@ -6,8 +6,10 @@ import json
 from pathlib import Path
 from typing import Any
 
-from .core import PipelineError, qa_result_input_mode, video_case_context
+from .common import PipelineError, video_case_context
 from .evidence import description_source_hash, observed_summary, video_sha256
+from .result_rules import qa_result_input_mode
+
 
 MATH_GROUP = "mathematics_algorithm_conflicts"
 

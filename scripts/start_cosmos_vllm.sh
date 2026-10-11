@@ -42,6 +42,7 @@ VIDEO_ROOT="$(cd -- "$VIDEO_ROOT" && pwd -P)"
 exec "$CONDA_PREFIX/bin/vllm" serve nvidia/Cosmos3-Nano \
   --tensor-parallel-size "$TENSOR_PARALLEL_SIZE" \
   --dtype bfloat16 \
+  --override-generation-config '{"max_new_tokens":8192}' \
   --mm-encoder-tp-mode data \
   --async-scheduling \
   --allowed-local-media-path "$VIDEO_ROOT" \

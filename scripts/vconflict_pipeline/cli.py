@@ -1,42 +1,44 @@
 """Argument parsing and dispatch for the unified pipeline entry point."""
-
 from __future__ import annotations
 
 import argparse
-import os
 import math
+import os
 import sys
 from pathlib import Path
 from typing import Any
 
-from .authoring import command_author, command_questions
 from .audit import command_audit
-from .core import PipelineError, validate_group, validate_id
+from .authoring import command_author, command_questions
+from .common import PipelineError, validate_group, validate_id
 from .deletion import command_delete
 from .descriptions import command_description
-from .scheduler import command_qa_judge
 from .generation import command_generate, command_review
 from .qa import REQUEST_TIMEOUT_SECONDS
 from .reporting import command_summarize
+from .scheduler import command_qa_judge
 from .settings import (
     ARK_BASE_URL,
-    CLI_QA_MODEL_IDS,
     CLI_QA_MODELS,
+    CLI_QA_MODEL_IDS,
     CLI_THINKING_EFFORTS,
     COSMOS_QA_MODEL,
-    DEFAULT_COSMOS_MAX_TOKENS,
-    DEFAULT_COSMOS_WORKERS,
-    GEMMA_QA_MODEL,
-    DEFAULT_GEMMA_MAX_TOKENS,
-    DEFAULT_GEMMA_WORKERS,
     DEFAULT_CASE_DIR,
     DEFAULT_CASE_WORKERS,
+    DEFAULT_COSMOS_MAX_TOKENS,
+    DEFAULT_COSMOS_WORKERS,
+    DEFAULT_GEMMA_MAX_TOKENS,
+    DEFAULT_GEMMA_WORKERS,
+    DEFAULT_QWEN38_MAX_TOKENS,
+    DEFAULT_QWEN38_WORKERS,
     DEFAULT_QA_MODEL,
     DEFAULT_REQUEST_RPM,
     DEFAULT_REQUEST_WORKERS,
     DEFAULT_SEEDANCE_TOTAL_WORKERS,
     DEFAULT_SOURCE_CASE_DIR,
     FAIRY_TALE_GROUP,
+    GEMMA_QA_MODEL,
+    QWEN38_QA_MODEL,
     SEEDANCE_MODEL,
 )
 
@@ -227,6 +229,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_based(qa_judge)
     qa_judge.add_argument("--cosmos-max-tokens", type=int, default=DEFAULT_COSMOS_MAX_TOKENS)
     qa_judge.add_argument("--gemma-max-tokens", type=int, default=DEFAULT_GEMMA_MAX_TOKENS)
+    qa_judge.add_argument("--qwen38-max-tokens", type=int, default=DEFAULT_QWEN38_MAX_TOKENS)
     _add_retries(qa_judge, timeout=REQUEST_TIMEOUT_SECONDS)
     force = qa_judge.add_mutually_exclusive_group()
     force.add_argument("--force-qa", action="store_true")
@@ -284,13 +287,14 @@ def _validate(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None
         concurrency = {
             COSMOS_QA_MODEL: DEFAULT_COSMOS_WORKERS,
             GEMMA_QA_MODEL: DEFAULT_GEMMA_WORKERS,
+            QWEN38_QA_MODEL: DEFAULT_QWEN38_WORKERS,
         }.get(args.qa_model, 24)
         if args.qa_concurrency is None:
             args.qa_concurrency = concurrency
         if args.qa_service_concurrency is None:
             args.qa_service_concurrency = concurrency
         if args.qa_rpm is None:
-            args.qa_rpm = 0 if args.qa_model in (COSMOS_QA_MODEL, GEMMA_QA_MODEL) else 20
+            args.qa_rpm = 0 if args.qa_model in (COSMOS_QA_MODEL, GEMMA_QA_MODEL, QWEN38_QA_MODEL) else 20
     if getattr(args, "audit_only", False) and (args.force or args.repair_variant_context):
         parser.error("--audit-only cannot be combined with --force or --repair-variant-context")
     if getattr(args, "repair_variant_context", False):
@@ -331,6 +335,7 @@ def _validate(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None
         "summary_workers",
         "cosmos_max_tokens",
         "gemma_max_tokens",
+        "qwen38_max_tokens",
     ):
         if hasattr(args, field) and getattr(args, field) <= 0:
             parser.error(f"--{field.replace('_', '-')} must be greater than zero")

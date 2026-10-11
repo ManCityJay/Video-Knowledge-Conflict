@@ -1,29 +1,29 @@
 """Seedance generation, persistence, and human review."""
-
 from __future__ import annotations
-
-from .integrity import (require_writable_case)
 
 import argparse
 import base64
-import copy
 import hashlib
+import json
 import os
 import re
+import shutil
 import sys
-import threading
 import tempfile
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
-from urllib.request import urlretrieve
+from urllib.request import ProxyHandler, build_opener
 
-from .core import *
-from .core import qa_result_input_mode
-from .settings import *
-from .transport import RequestLimiter
+from .common import PipelineError
+from .integrity import require_writable_case
+from .paths import grouped_dir, iter_case_paths, resolve_video_path
+from .result_rules import qa_result_input_mode
+from .settings import PROJECT_ROOT, VIDEO_EXTENSIONS
+from .storage import atomic_write_json, load_case
 
 
 def generation_error_detail(exc: Exception) -> str:
@@ -99,6 +99,19 @@ def object_value(value: Any, name: str, default: Any = None) -> Any:
     return value.get(name, default) if isinstance(value, dict) else getattr(
         value, name, default
     )
+
+
+def task_failure_detail(result: Any) -> str:
+    fields = ("error", "error_code", "error_message", "message", "detail", "failure_reason")
+    detail = {
+        name: object_value(result, name)
+        for name in fields
+        if object_value(result, name) not in (None, "", {}, [])
+    }
+    if not detail:
+        return ""
+    rendered = json.dumps(detail, ensure_ascii=False, default=str)
+    return ": " + rendered[:2000]
 
 
 def create_ark_client(api_key: str, base_url: str) -> Any:
@@ -275,7 +288,7 @@ def generate_one_video(
                 lock=lock,
                 status="failed",
             )
-            raise PipelineError(f"Seedance task failed: {task_id}")
+            raise PipelineError(f"Seedance task failed: {task_id}{task_failure_detail(final_result)}")
         if poll_index == args.max_polls:
             raise PipelineError(
                 f"Seedance polling timed out; task remains submitted: {task_id}"
@@ -297,7 +310,15 @@ def generate_one_video(
     try:
         with tempfile.NamedTemporaryFile(dir=output_path.parent, suffix=".part", delete=False) as tmp:
             download_path = Path(tmp.name)
-        urlretrieve(urls[0], download_path)
+        # Signed generation-result URLs can use a different host from Ark.
+        # Bypass environment proxies here as well: a dead localhost proxy must
+        # not prevent downloading an already completed task.
+        direct_opener = build_opener(ProxyHandler({}))
+        with direct_opener.open(urls[0], timeout=120) as response:
+            with download_path.open("wb") as target:
+                shutil.copyfileobj(response, target)
+        if download_path.stat().st_size == 0:
+            raise OSError("Downloaded video file is empty.")
         download_path.replace(output_path)
     except OSError as exc:
         persist_video_state(
@@ -427,7 +448,9 @@ def command_review(args: argparse.Namespace) -> int:
         resolve_video_path(video["local_path"], must_exist=True)
         video["human_review"] = args.decision
         if args.decision == "verified":
-            from .evidence import observed_summary
+            from .evidence import (
+                observed_summary,
+            )
             observed_summary(video)
             video["qualification_pending"] = False
         atomic_write_json(case_path, case)

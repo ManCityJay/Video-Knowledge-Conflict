@@ -1,5 +1,4 @@
 """HTTP transport, throttling, retries, and credential-safe errors."""
-
 from __future__ import annotations
 
 import argparse
@@ -17,7 +16,8 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
-from .core import PipelineError
+from .common import PipelineError
+
 
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 T = TypeVar("T")
@@ -238,7 +238,7 @@ def extract_response_text(response: dict[str, Any], service: str) -> str:
     raise EmptyResponseTextError(f"{service} response did not contain textual content.")
 
 
-def _is_retryable(error: Exception) -> bool:
+def is_retryable(error: Exception) -> bool:
     message = str(error).lower()
     return any(
         marker in message
@@ -271,7 +271,7 @@ def send_with_retry(
                 else request_limiter.call(callback)
             )
         except TransportError as exc:
-            if not _is_retryable(exc):
+            if not is_retryable(exc):
                 raise
             if attempt >= max_retries:
                 raise TransportError(
@@ -289,11 +289,6 @@ def send_with_retry(
             )
             time.sleep(delay)
     raise AssertionError("unreachable")
-
-
-def send_once(callback, **_):
-    """Scheduler entry: no worker-owned limiter, sleep, or nested retries."""
-    return callback()
 
 
 def send_openrouter_with_retry(

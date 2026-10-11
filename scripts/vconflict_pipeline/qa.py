@@ -1,5 +1,4 @@
 """QA backends, request construction and answer validation."""
-
 from __future__ import annotations
 
 import base64
@@ -9,28 +8,38 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from types import ModuleType
-from typing import Any, Callable, Iterable
-from .selection import eligible_videos
-from .qa_diagnostics import QADiagnostics, QADiagnosticStage
+from typing import Any, Callable
 
-from .core import PipelineError, qa_result_input_mode, resolve_video_path, utc_now
+from .common import PipelineError, utc_now
+from .paths import resolve_video_path
+from .qa_diagnostics import QADiagnosticStage, QADiagnostics
+from .result_rules import DEFAULT_THINKING_EFFORT, QA_THINKING_EFFORTS, expand_thinking_efforts
+from .selection import eligible_videos
 from .settings import (
     COSMOS_QA_MODEL,
     DEFAULT_COSMOS_BASE_URL,
     DEFAULT_COSMOS_MAX_TOKENS,
     DEFAULT_GEMMA_BASE_URL,
     DEFAULT_GEMMA_MAX_TOKENS,
-    GEMMA_QA_MODEL,
-    FAIRY_TALE_GROUP,
+    DEFAULT_QWEN38_BASE_URL,
+    DEFAULT_QWEN38_MAX_TOKENS,
     GEMINI_QA_MODEL,
+    GEMMA_QA_MODEL,
     KIMI_QA_MODEL,
     QWEN_QA_MODEL,
+    QWEN38_QA_MODEL,
 )
 from .transport import (
-    EmptyResponseTextError, OPENROUTER_URL, RequestLimiter, TransportError,
-    extract_response_text, get_json, post_json, redact, require_api_key,
-    send_with_retry, send_once,
+    EmptyResponseTextError,
+    OPENROUTER_URL,
+    TransportError,
+    extract_response_text,
+    get_json,
+    post_json,
+    redact,
+    require_api_key,
 )
+
 
 REQUEST_TIMEOUT_SECONDS = 600
 QWEN_DEFAULT_BASE_HTTP_API_URL = "https://dashscope.aliyuncs.com/api/v1"
@@ -272,11 +281,9 @@ def _normalize_dashscope_response(response: Any) -> dict[str, Any]:
         if content is not None:
             raise TransportError("Qwen response did not contain textual content.")
         answer = ""
-    if not answer.strip():
-        raise EmptyResponseTextError("Qwen response did not contain textual content.")
-
     normalized: dict[str, Any] = {
-        "choices": [{"message": {"content": answer}}],
+        "choices": [{"message": {"content": answer},
+                     "finish_reason": _response_field(choices[0], "finish_reason")}],
     }
     request_id = _response_field(response, "request_id") or _response_field(
         response, "id"
@@ -299,13 +306,10 @@ def _send_qwen_request(
     thinking_effort: str | None,
     api_key: str,
     timeout: int,
-    initialized: bool = False,
 ) -> dict[str, Any]:
     if thinking_effort not in (None, "default"):
         raise PipelineError("Qwen thinking effort must be none or default.")
     dashscope = _require_dashscope_sdk()
-    if not initialized:
-        dashscope.base_http_api_url = _dashscope_base_http_api_url()
     content: list[dict[str, Any]] = []
     if video_uri is not None:
         content.append({"video": video_uri, "fps": 2})
@@ -540,11 +544,49 @@ def _gemma_payload(
     return payload
 
 
+def _qwen38_payload(
+    *,
+    prompt_text: str,
+    video_uri: str | None,
+    thinking_effort: str | None,
+    served_model_id: str,
+    max_tokens: int,
+) -> dict[str, Any]:
+    if thinking_effort not in (None, "default"):
+        raise PipelineError("Qwen3.8-27B thinking effort must be none or default.")
+    thinking = thinking_effort == "default"
+    template_kwargs: dict[str, Any] = {"enable_thinking": thinking}
+    if thinking:
+        template_kwargs["reasoning_effort"] = "xhigh"
+    content: str | list[dict[str, Any]] = prompt_text
+    if video_uri is not None:
+        content = [
+            {"type": "video_url", "video_url": {"url": video_uri}},
+            {"type": "text", "text": prompt_text},
+        ]
+    payload: dict[str, Any] = {
+        "model": served_model_id,
+        "temperature": 0.0,
+        "seed": 0,
+        "max_tokens": max_tokens,
+        "stream": False,
+        "chat_template_kwargs": template_kwargs,
+        "messages": [{"role": "user", "content": content}],
+    }
+    if video_uri is not None:
+        # Keep original frames in the loader; the HF processor samples once at
+        # Qwen's default 2 fps, including its normal frame-count bounds.
+        payload["media_io_kwargs"] = {
+            "video": {"video_backend": "opencv", "num_frames": -1, "fps": -1}
+        }
+        payload["mm_processor_kwargs"] = {"fps": 2, "do_sample_frames": True}
+    return payload
+
+
 @dataclass(frozen=True)
 class LocalQAConfig:
     base_url_variable: str
     default_base_url: str
-    workers_argument: str
     max_tokens_argument: str
     default_max_tokens: int
     build_payload: Callable[..., dict[str, Any]]
@@ -552,12 +594,16 @@ class LocalQAConfig:
 
 LOCAL_QA_CONFIGS = {
     COSMOS_QA_MODEL: LocalQAConfig(
-        "COSMOS_BASE_URL", DEFAULT_COSMOS_BASE_URL, "cosmos_workers",
+        "COSMOS_BASE_URL", DEFAULT_COSMOS_BASE_URL,
         "cosmos_max_tokens", DEFAULT_COSMOS_MAX_TOKENS, _cosmos_payload,
     ),
     GEMMA_QA_MODEL: LocalQAConfig(
-        "GEMMA_BASE_URL", DEFAULT_GEMMA_BASE_URL, "gemma_workers",
+        "GEMMA_BASE_URL", DEFAULT_GEMMA_BASE_URL,
         "gemma_max_tokens", DEFAULT_GEMMA_MAX_TOKENS, _gemma_payload,
+    ),
+    QWEN38_QA_MODEL: LocalQAConfig(
+        "QWEN38_BASE_URL", DEFAULT_QWEN38_BASE_URL,
+        "qwen38_max_tokens", DEFAULT_QWEN38_MAX_TOKENS, _qwen38_payload,
     ),
 }
 
@@ -569,8 +615,8 @@ def local_qa_max_tokens(args: Any) -> int | None:
 
 GEMINI_BACKEND = QABackend(
     model=GEMINI_QA_MODEL,
-    thinking_efforts=("default",),
-    default_thinking_effort="default",
+    thinking_efforts=QA_THINKING_EFFORTS[GEMINI_QA_MODEL],
+    default_thinking_effort=DEFAULT_THINKING_EFFORT,
     temperature=0.0,
     api_key_variable="OPENROUTER_API_KEY",
     service="OpenRouter",
@@ -580,8 +626,8 @@ GEMINI_BACKEND = QABackend(
 )
 QWEN_BACKEND = QABackend(
     model=QWEN_QA_MODEL,
-    thinking_efforts=(None, "default"),
-    default_thinking_effort="default",
+    thinking_efforts=QA_THINKING_EFFORTS[QWEN_QA_MODEL],
+    default_thinking_effort=DEFAULT_THINKING_EFFORT,
     temperature=0.0,
     api_key_variable="DASHSCOPE_API_KEY",
     service="Qwen",
@@ -590,8 +636,8 @@ QWEN_BACKEND = QABackend(
 )
 KIMI_BACKEND = QABackend(
     model=KIMI_QA_MODEL,
-    thinking_efforts=("default",),
-    default_thinking_effort="default",
+    thinking_efforts=QA_THINKING_EFFORTS[KIMI_QA_MODEL],
+    default_thinking_effort=DEFAULT_THINKING_EFFORT,
     temperature=1.0,
     api_key_variable="MOONSHOT_API_KEY",
     service="Kimi",
@@ -602,8 +648,8 @@ KIMI_BACKEND = QABackend(
 )
 COSMOS_BACKEND = QABackend(
     model=COSMOS_QA_MODEL,
-    thinking_efforts=(None, "default"),
-    default_thinking_effort="default",
+    thinking_efforts=QA_THINKING_EFFORTS[COSMOS_QA_MODEL],
+    default_thinking_effort=DEFAULT_THINKING_EFFORT,
     temperature=0.0,
     api_key_variable=None,
     service="Cosmos3-Nano",
@@ -612,17 +658,27 @@ COSMOS_BACKEND = QABackend(
 )
 GEMMA_BACKEND = QABackend(
     model=GEMMA_QA_MODEL,
-    thinking_efforts=(None, "default"),
-    default_thinking_effort="default",
+    thinking_efforts=QA_THINKING_EFFORTS[GEMMA_QA_MODEL],
+    default_thinking_effort=DEFAULT_THINKING_EFFORT,
     temperature=0.0,
     api_key_variable=None,
     service="Gemma 4",
     endpoint=lambda: f"{_local_base_url(GEMMA_QA_MODEL)}/chat/completions",
     build_payload=None,
 )
+QWEN38_BACKEND = QABackend(
+    model=QWEN38_QA_MODEL,
+    thinking_efforts=QA_THINKING_EFFORTS[QWEN38_QA_MODEL],
+    default_thinking_effort=DEFAULT_THINKING_EFFORT,
+    temperature=0.0,
+    api_key_variable=None,
+    service="Qwen3.8-27B",
+    endpoint=lambda: f"{_local_base_url(QWEN38_QA_MODEL)}/chat/completions",
+    build_payload=None,
+)
 QA_BACKENDS = {
     backend.model: backend
-    for backend in (GEMINI_BACKEND, QWEN_BACKEND, KIMI_BACKEND, COSMOS_BACKEND, GEMMA_BACKEND)
+    for backend in (GEMINI_BACKEND, QWEN_BACKEND, KIMI_BACKEND, COSMOS_BACKEND, GEMMA_BACKEND, QWEN38_BACKEND)
 }
 
 
@@ -633,128 +689,42 @@ def get_backend(model: str) -> QABackend:
         raise PipelineError(f"Unsupported QA model: {model}") from exc
 
 
-def normalize_thinking_effort(value: str) -> str | None:
-    return None if value == "none" else value
+def qa_service_endpoint(model: str) -> str:
+    """Return the configured endpoint used to group shared service limits."""
+    backend = get_backend(model)
+    return backend.endpoint() if backend.endpoint else _dashscope_base_http_api_url()
 
 
-def expand_thinking_efforts(
-    values: Iterable[str] | None,
-    qa_model: str,
-) -> tuple[str | None, ...]:
-    backend = get_backend(qa_model)
-    requested = list(values or [])
-    if not requested:
-        return (backend.default_thinking_effort,)
-    if "all" in requested:
-        return backend.thinking_efforts
-    selected = {normalize_thinking_effort(value) for value in requested}
-    unsupported = selected - set(backend.thinking_efforts)
-    if unsupported:
-        provided = ", ".join(
-            "none" if value is None else str(value)
-            for value in sorted(unsupported, key=str)
-        )
-        available = ", ".join(
-            "none" if value is None else value
-            for value in backend.thinking_efforts
-        )
-        raise PipelineError(
-            f"Thinking effort {provided} is not supported by {qa_model}. "
-            f"Supported efforts: {available}."
-        )
-    return tuple(effort for effort in backend.thinking_efforts if effort in selected)
+def prepare_video_input(model: str, video_path: Path) -> str:
+    """Prepare the backend's existing upload URI, local URI or Base64 encoding."""
+    if model == QWEN_QA_MODEL:
+        return _qwen_video_uri(video_path)
+    backend = get_backend(model)
+    if model in LOCAL_QA_CONFIGS:
+        return _local_video_uri(video_path, backend.service)
+    return backend.encode_video(video_path)
 
 
-def canonical_thinking_effort(model: Any, value: Any) -> Any:
-    """Treat legacy Gemini medium results as the new default effort."""
-    if model == GEMINI_QA_MODEL and value == "medium":
-        return "default"
-    return value
-
-
-def qa_result_thinking_effort(result: dict[str, Any]) -> Any:
-    return canonical_thinking_effort(
-        result.get("model"), result.get("thinking_effort")
-    )
-
-
-def qa_result_work_title_prefix(result: dict[str, Any]) -> bool | None:
-    if qa_result_input_mode(result) != "video":
-        return None
-    value = result.get("work_title_prefix")
-    return value if isinstance(value, bool) else None
-
-
-def qa_result_based(result: dict[str, Any]) -> bool:
-    return result.get("based", False) is True
-
-
-def work_title_prefix_condition(
-    group: Any,
-    input_mode: str,
-    enabled: bool,
-) -> bool | None:
-    """Return the prefix condition only for the Fairy video experiment."""
-    if group == FAIRY_TALE_GROUP and input_mode == "video":
-        return bool(enabled)
-    return None
-
-
-def qa_run_key(
-    input_mode: str,
-    question_id: Any,
-    model: Any,
-    thinking_effort: Any,
-    *,
-    based: bool = False,
-    work_title_prefix: bool | None = None,
-) -> tuple[Any, ...]:
-    key = (input_mode, question_id, model, thinking_effort)
-    if input_mode != "question_only":
-        key = (*key, based)
-    return (*key, work_title_prefix) if work_title_prefix is not None else key
-
-
-def qa_result_key(
-    result: dict[str, Any],
-    *,
-    include_work_title_prefix: bool = False,
-) -> tuple[Any, ...]:
-    input_mode = qa_result_input_mode(result)
-    key = (
-        input_mode,
-        result.get("question_id"),
-        result.get("model"),
-        qa_result_thinking_effort(result),
-    )
-    if input_mode != "question_only":
-        key = (*key, qa_result_based(result))
-    if input_mode == "video" and include_work_title_prefix:
-        return (*key, qa_result_work_title_prefix(result))
-    return key
-
-
-def run_qa_batch(
+def run_qa_once(
     *,
     input_mode: str,
     video_path: Path | None,
     context_text: str | None,
     work_title: str | None,
     work_title_prefix: bool | None,
-    question_runs: list[tuple[dict[str, Any], str | None]],
+    question: dict[str, Any],
+    thinking_effort: str | None,
     qa_model: str,
     api_key: str,
     timeout: int,
-    max_retries: int,
-    request_limiter: RequestLimiter | None,
     local_served_model_id: str | None = None,
     local_max_tokens: int | None = None,
     based: bool = False,
     diagnostics: QADiagnostics | None = None,
     diagnostic_stage: QADiagnosticStage = "main",
-    single_attempt: bool = False,
     prepared_video_input: str | None = None,
-) -> tuple[list[dict[str, Any]], list[tuple[str, str | None, str]]]:
+) -> dict[str, Any]:
+    """Execute one request; the scheduler owns admission, retries and failures."""
     backend = get_backend(qa_model)
     if input_mode == "video":
         if video_path is None:
@@ -765,12 +735,8 @@ def run_qa_batch(
             )
         if prepared_video_input is not None:
             video_input = prepared_video_input
-        elif qa_model == QWEN_QA_MODEL:
-            video_input = _qwen_video_uri(video_path)
-        elif qa_model in LOCAL_QA_CONFIGS:
-            video_input = _local_video_uri(video_path, backend.service)
         else:
-            video_input = backend.encode_video(video_path)
+            video_input = prepare_video_input(qa_model, video_path)
     elif input_mode == "description":
         if context_text is None:
             raise PipelineError("Description input requires context text.")
@@ -785,126 +751,112 @@ def run_qa_batch(
         video_input = None
     else:
         raise PipelineError(f"Unsupported QA input mode: {input_mode}")
-    results: list[dict[str, Any]] = []
-    failures: list[tuple[str, str | None, str]] = []
-    for question, thinking_effort in question_runs:
-        if input_mode == "video":
-            prompt_text = _video_question_prompt(
-                question["text_en"],
-                work_title=work_title,
-                work_title_prefix=work_title_prefix is True,
-                based=based,
+    if input_mode == "video":
+        prompt_text = _video_question_prompt(
+            question["text_en"],
+            work_title=work_title,
+            work_title_prefix=work_title_prefix is True,
+            based=based,
+        )
+    elif input_mode == "description":
+        prompt_text = _description_prompt(context_text, question["text_en"], based=based)
+    else:
+        prompt_text = _question_prompt(question["text_en"])
+    try:
+        if qa_model == QWEN_QA_MODEL:
+            response = _send_qwen_request(
+                prompt_text=prompt_text,
+                video_uri=video_input,
+                thinking_effort=thinking_effort,
+                api_key=api_key,
+                timeout=timeout,
             )
-        elif input_mode == "description":
-            prompt_text = _description_prompt(context_text, question["text_en"], based=based)
         else:
-            prompt_text = _question_prompt(question["text_en"])
-        try:
-            if qa_model == QWEN_QA_MODEL:
-                response = (send_once if single_attempt else send_with_retry)(
-                    lambda thinking_effort=thinking_effort: _send_qwen_request(
-                        prompt_text=prompt_text,
-                        video_uri=video_input,
-                        thinking_effort=thinking_effort,
-                        api_key=api_key,
-                        timeout=timeout,
-                        initialized=single_attempt,
-                    ),
-                    request_limiter=request_limiter,
-                    max_retries=max_retries,
+            if qa_model in LOCAL_QA_CONFIGS:
+                if local_served_model_id is None:
+                    raise PipelineError(f"{backend.service} served model ID is missing.")
+                config = LOCAL_QA_CONFIGS[qa_model]
+                payload = config.build_payload(
+                    prompt_text=prompt_text,
+                    video_uri=video_input,
+                    thinking_effort=thinking_effort,
+                    served_model_id=local_served_model_id,
+                    max_tokens=(local_max_tokens if local_max_tokens is not None
+                                else config.default_max_tokens),
+                )
+            elif input_mode != "video" and qa_model == GEMINI_QA_MODEL:
+                payload = _gemini_description_payload(prompt_text, thinking_effort)
+            elif input_mode != "video" and qa_model == KIMI_QA_MODEL:
+                payload = _kimi_description_payload(prompt_text, thinking_effort)
+            elif backend.build_payload is None or video_input is None:
+                raise PipelineError(
+                    f"{backend.service} does not use a Base64 payload builder."
                 )
             else:
-                if qa_model in LOCAL_QA_CONFIGS:
-                    if local_served_model_id is None:
-                        raise PipelineError(f"{backend.service} served model ID is missing.")
-                    config = LOCAL_QA_CONFIGS[qa_model]
-                    payload = config.build_payload(
-                        prompt_text=prompt_text,
-                        video_uri=video_input,
-                        thinking_effort=thinking_effort,
-                        served_model_id=local_served_model_id,
-                        max_tokens=(local_max_tokens if local_max_tokens is not None
-                                    else config.default_max_tokens),
-                    )
-                elif input_mode != "video" and qa_model == GEMINI_QA_MODEL:
-                    payload = _gemini_description_payload(prompt_text, thinking_effort)
-                elif input_mode != "video" and qa_model == KIMI_QA_MODEL:
-                    payload = _kimi_description_payload(prompt_text, thinking_effort)
-                elif backend.build_payload is None or video_input is None:
-                    raise PipelineError(
-                        f"{backend.service} does not use a Base64 payload builder."
-                    )
-                else:
-                    payload = backend.build_payload(
-                        prompt_text, video_input, thinking_effort
-                    )
-                response = (send_once if single_attempt else send_with_retry)(
-                    lambda payload=payload: backend.send_request(
-                        payload, api_key, timeout
-                    ),
-                    request_limiter=request_limiter,
-                    max_retries=max_retries,
+                payload = backend.build_payload(
+                    prompt_text, video_input, thinking_effort
                 )
-            if qa_model in LOCAL_QA_CONFIGS:
-                choices = response.get("choices")
-                if (
-                    isinstance(choices, list)
-                    and choices
-                    and isinstance(choices[0], dict)
-                    and choices[0].get("finish_reason") == "length"
-                ):
-                    raise TruncatedAnswerError(
-                        f"{backend.service} answer was truncated at max_tokens; "
-                        f"increase --{LOCAL_QA_CONFIGS[qa_model].max_tokens_argument.replace('_', '-')} "
-                        "and rerun this QA."
-                    )
-            raw_answer = backend.extract_answer(response)
-            final_answer = extract_final_answer(raw_answer)
-        except PipelineError as exc:
-            if diagnostics is not None:
-                if isinstance(exc, TruncatedAnswerError):
-                    diagnostics.record(diagnostic_stage, "max_tokens_truncated")
-                elif isinstance(exc, (MissingFinalAnswerError, EmptyResponseTextError)):
-                    diagnostics.record(diagnostic_stage, "missing_final_answer")
-            if single_attempt:
-                raise
-            failures.append(
-                (question["question_id"], thinking_effort, str(exc))
+            response = backend.send_request(payload, api_key, timeout)
+        choices = response.get("choices")
+        finish_reason = (choices[0].get("finish_reason")
+                         if isinstance(choices, list) and choices
+                         and isinstance(choices[0], dict) else None)
+        if finish_reason in ("length", "max_tokens"):
+            config = LOCAL_QA_CONFIGS.get(qa_model)
+            hint = (f"increase --{config.max_tokens_argument.replace('_', '-')} "
+                    if config else "increase the service output budget ")
+            raise TruncatedAnswerError(
+                f"{backend.service} answer was truncated at max_tokens; {hint}and rerun this QA."
             )
-            continue
-        result: dict[str, Any] = {
-            "run_id": uuid.uuid4().hex,
-            "timestamp": utc_now(),
-            "input_mode": input_mode,
-            "question_id": question["question_id"],
-            "question": question["text_en"],
-            "raw_answer": raw_answer,
-            "final_answer": final_answer,
-            "model": qa_model,
-            "thinking_effort": thinking_effort,
-            "temperature": backend.temperature,
-            "request_id": response.get("id"),
-            "judgment": None,
-        }
-        if input_mode == "description":
-            result["context_text_en"] = context_text
-        elif work_title_prefix is not None:
-            result["work_title_prefix"] = work_title_prefix
-        if input_mode != "question_only":
-            result["based"] = based
-        if backend.effective_reasoning_effort is not None:
-            result["effective_reasoning_effort"] = backend.effective_reasoning_effort
-        if qa_model == GEMMA_QA_MODEL:
-            message = response["choices"][0]["message"]
-            for field in ("reasoning", "reasoning_content"):
-                reasoning = message.get(field)
-                if isinstance(reasoning, str) and reasoning.strip():
-                    result["reasoning_content"] = reasoning
-                    break
-        if isinstance(response.get("usage"), dict):
-            result["usage"] = response["usage"]
-        results.append(result)
-    return results, failures
+        if finish_reason not in (None, "stop"):
+            raise PipelineError(f"{backend.service} answer did not finish normally: {finish_reason}")
+        raw_answer = backend.extract_answer(response)
+        final_answer = extract_final_answer(raw_answer)
+    except EmptyResponseTextError as exc:
+        if diagnostics is not None:
+            diagnostics.record(diagnostic_stage, "missing_final_answer")
+        raise MissingFinalAnswerError(str(exc)) from exc
+    except PipelineError as exc:
+        if diagnostics is not None:
+            if isinstance(exc, TruncatedAnswerError):
+                diagnostics.record(diagnostic_stage, "max_tokens_truncated")
+            elif isinstance(exc, MissingFinalAnswerError):
+                diagnostics.record(diagnostic_stage, "missing_final_answer")
+        raise
+    result: dict[str, Any] = {
+        "run_id": uuid.uuid4().hex,
+        "timestamp": utc_now(),
+        "input_mode": input_mode,
+        "question_id": question["question_id"],
+        "question": question["text_en"],
+        "raw_answer": raw_answer,
+        "final_answer": final_answer,
+        "model": qa_model,
+        "thinking_effort": thinking_effort,
+        "temperature": backend.temperature,
+        "request_id": response.get("id"),
+        "judgment": None,
+    }
+    if input_mode == "description":
+        result["context_text_en"] = context_text
+    elif work_title_prefix is not None:
+        result["work_title_prefix"] = work_title_prefix
+    if input_mode != "question_only":
+        result["based"] = based
+    if backend.effective_reasoning_effort is not None:
+        result["effective_reasoning_effort"] = backend.effective_reasoning_effort
+    if qa_model == QWEN38_QA_MODEL and thinking_effort == "default":
+        result["effective_reasoning_effort"] = "xhigh"
+    if qa_model in (GEMMA_QA_MODEL, QWEN38_QA_MODEL):
+        message = response["choices"][0]["message"]
+        for field in ("reasoning", "reasoning_content"):
+            reasoning = message.get(field)
+            if isinstance(reasoning, str) and reasoning.strip():
+                result["reasoning_content"] = reasoning
+                break
+    if isinstance(response.get("usage"), dict):
+        result["usage"] = response["usage"]
+    return result
 
 
 def _preflight_local_videos(
@@ -958,7 +910,7 @@ def preflight_qa_backend(
     backend = get_backend(args.qa_model)
     expand_thinking_efforts(args.thinking_effort, args.qa_model)
     if args.qa_model == QWEN_QA_MODEL:
-        _require_dashscope_sdk()
+        _require_dashscope_sdk().base_http_api_url = _dashscope_base_http_api_url()
     backend.require_api_key()
     if args.qa_model in LOCAL_QA_CONFIGS:
         if loaded is not None:

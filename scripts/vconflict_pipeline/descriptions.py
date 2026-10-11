@@ -1,8 +1,5 @@
-"""Generate neutral text contexts from conflict Seedance prompts."""
-
+"""Generate neutral text contexts from reviewed evidence or conflict prompts."""
 from __future__ import annotations
-
-from .integrity import (description_is_current, require_writable_case)
 
 import argparse
 import json
@@ -11,25 +8,16 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
 
-from .core import (
-    video_case_context,
-    PipelineError,
-    atomic_write_json,
-    grouped_dir,
-    iter_case_paths,
-    load_case,
-    qa_result_input_mode,
-    sha256_text,
-    utc_now,
-    validate_case,
-)
-from .settings import AUTHOR_JUDGE_MODEL
+from .common import PipelineError, sha256_text, utc_now, video_case_context
 from .evidence import observed_summary, video_sha256
-from .transport import (
-    make_openrouter_limiter,
-    openrouter_json,
-    require_openrouter_api_key,
-)
+from .integrity import description_is_current, require_writable_case
+from .paths import grouped_dir, iter_case_paths
+from .result_rules import qa_result_input_mode
+from .schema import validate_case
+from .settings import AUTHOR_JUDGE_MODEL
+from .storage import atomic_write_json, load_case
+from .transport import make_openrouter_limiter, openrouter_json, require_openrouter_api_key
+
 
 CONTEXT_SCHEMA: dict[str, Any] = {
     "type": "object",
