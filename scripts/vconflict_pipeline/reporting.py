@@ -1,43 +1,26 @@
 """Generate effort-specific JSON summaries and a combined Markdown report."""
-
 from __future__ import annotations
-
-from .integrity import (video_selected, qa_is_current, judgment_is_current)
-from .filters import question_gate, scope_id
 
 import argparse
 from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any, Iterable
 
-from .core import (
-    PipelineError,
-    atomic_write_json,
-    atomic_write_text,
+from .common import PipelineError, require_question_only_compatible, utc_now, video_case_context
+from .filters import question_gate, scope_id
+from .integrity import judgment_is_current, qa_is_current, video_selected
+from .paths import grouped_dir, iter_case_paths
+from .result_rules import (
     canonical_verdict,
-    grouped_dir,
-    iter_case_paths,
-    load_case,
-    qa_result_input_mode,
-    require_question_only_compatible,
-    utc_now,
-    video_case_context,
-)
-from .qa import (
     expand_thinking_efforts,
-    get_backend,
     qa_result_based,
+    qa_result_input_mode,
     qa_result_thinking_effort,
     qa_result_work_title_prefix,
     work_title_prefix_condition,
 )
-from .settings import (
-    FAIRY_TALE_GROUP,
-    PROJECT_ROOT,
-    QA_MODEL_SLUGS,
-    RESULTS_DIR,
-    VERDICTS,
-)
+from .settings import FAIRY_TALE_GROUP, PROJECT_ROOT, QA_MODEL_SLUGS, RESULTS_DIR, VERDICTS
+from .storage import atomic_write_json, atomic_write_text, load_case
 
 
 class ReportIndex:
@@ -584,7 +567,8 @@ def _discover_efforts(
     index: ReportIndex | None = None,
 ) -> tuple[str | None, ...]:
     index = index or ReportIndex((p, load_case(p)) for p in case_paths)
-    backend = get_backend(qa_model)
+    supported_efforts = expand_thinking_efforts(["all"], qa_model)
+    default_efforts = expand_thinking_efforts(None, qa_model)
     observed: set[str | None] = set()
     for path in case_paths:
         case = index.load(path)
@@ -598,11 +582,11 @@ def _discover_efforts(
                             result,
                             qa_model=qa_model,
                             input_mode="question_only",
-                            efforts=set(backend.thinking_efforts),
+                            efforts=set(supported_efforts),
                             work_title_prefix=None,
                         )
                         and isinstance(result.get("judgment"), dict)
-                        and effort in backend.thinking_efforts
+                        and effort in supported_efforts
                     ):
                         observed.add(effort)
             continue
@@ -614,18 +598,18 @@ def _discover_efforts(
                         result,
                         qa_model=qa_model,
                         input_mode=input_mode,
-                        efforts=set(backend.thinking_efforts),
+                        efforts=set(supported_efforts),
                         work_title_prefix=work_title_prefix,
                         based=based,
                     )
                     and isinstance(result.get("judgment"), dict)
-                    and effort in backend.thinking_efforts
+                    and effort in supported_efforts
                 ):
                     observed.add(effort)
     selected = tuple(
-        effort for effort in backend.thinking_efforts if effort in observed
+        effort for effort in supported_efforts if effort in observed
     )
-    return selected or (backend.default_thinking_effort,)
+    return selected or default_efforts
 
 
 def _require_video_prefix_metadata(
@@ -661,7 +645,9 @@ def _fairy_video_prefix_name(args: argparse.Namespace) -> str | None:
 
 
 def command_summarize(args: argparse.Namespace) -> int:
-    from .runtime import Runtime
+    from .runtime import (
+        Runtime,
+    )
     dataset_dir = grouped_dir(args.dataset_dir, args.group)
     paths = iter_case_paths(dataset_dir, args.case_id)
     with Runtime(paths) as runtime:

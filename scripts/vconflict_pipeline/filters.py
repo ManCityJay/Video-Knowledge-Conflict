@@ -1,17 +1,22 @@
 """Question-scoped knowledge filters shared by execution and reporting.
 
-Gate checks are read-only; scheduler.py owns all filter requests and commits.
+Gate checks are read-only; task_execution.py owns filter requests and merges.
 Private variant questions own their own records and matched control video.
 """
 from __future__ import annotations
 
 
-from .core import (
-    FILTER_RESULT_FIELDS, PipelineError, canonical_verdict, filter_field,
-    qa_result_input_mode, resolve_video_path, video_case_context,
-)
+from .common import PipelineError, video_case_context
 from .evidence import observed_summary, video_sha256
 from .integrity import digest, judgment_is_current, qa_is_current, question_content
+from .paths import resolve_video_path
+from .result_rules import (
+    FILTER_RESULT_FIELDS,
+    canonical_verdict,
+    filter_field,
+    qa_result_input_mode,
+    qa_result_thinking_effort,
+)
 from .settings import FAIRY_TALE_GROUP
 
 
@@ -65,7 +70,6 @@ def stage_fingerprint(case, video, question, stage, prefix):
 
 
 def _matches(result, question, model, effort, mode, prefix=None):
-    from .qa import qa_result_thinking_effort
     return (result.get('question_id') == question['question_id']
             and result.get('model') == model
             and qa_result_thinking_effort(result) == effort

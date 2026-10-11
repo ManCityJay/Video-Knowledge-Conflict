@@ -1,42 +1,25 @@
 """QA/Judge selection, force pre-clearing and completion accounting."""
-
 from __future__ import annotations
-
-from .integrity import qa_is_current, judgment_is_current, require_writable_case
-from .filters import effective_prefix, qa_allowed
 
 import argparse
 from pathlib import Path
 from typing import Any
+
+from .common import PipelineError, require_question_only_compatible, video_case_context
+from .filters import effective_prefix, qa_allowed
+from .integrity import judgment_is_current, qa_is_current, require_writable_case
+from .paths import grouped_dir, iter_case_paths
+from .result_rules import (
+    qa_result_based,
+    qa_result_input_mode,
+    qa_result_key,
+    qa_result_thinking_effort,
+    qa_result_work_title_prefix,
+    qa_run_key,
+    work_title_prefix_condition,
+)
 from .selection import eligible_videos, selected_questions, target_video_selected
-
-from .core import (
-    PipelineError, atomic_write_json, grouped_dir, iter_case_paths, load_case,
-    video_case_context, qa_result_input_mode, require_question_only_compatible,
-)
-from .qa import (
-    qa_result_based, qa_result_key, qa_result_thinking_effort,
-    qa_result_work_title_prefix, qa_run_key, work_title_prefix_condition,
-)
-
-JUDGE_SYSTEM_PROMPT = """Evaluate the supplied final_answer against the context
-references. Treat final_answer as the complete answer to judge. Do not infer,
-reconstruct, or consider any reasoning or other response text that is not in
-final_answer.
-
-For video_role=conflict:
-- context_grounded means final_answer clearly reports the conflict-context fact.
-- knowledge_trapped means final_answer substitutes the normal-control answer for the
-  conflict-context fact.
-- ambiguous_or_unjudgeable covers irrelevant, unresolved, mixed, contradictory,
-  hedged, or otherwise unclassifiable final answers.
-
-For video_role=control:
-- context_grounded means final_answer clearly reports the normal-control fact.
-- never use knowledge_trapped; an answer matching the conflict reference or
-  neither reference is ambiguous_or_unjudgeable.
-
-Return only the requested structured result."""
+from .storage import atomic_write_json, load_case
 
 
 def _result_base_selected(
@@ -57,7 +40,7 @@ def _result_base_selected(
     )
 
 
-def _result_selected(
+def result_selected(
     video: dict[str, Any],
     result: dict[str, Any],
     *,
@@ -99,7 +82,7 @@ def _legacy_video_result_selected(
     )
 
 
-def _question_result_selected(
+def question_result_selected(
     question: dict[str, Any],
     result: dict[str, Any],
     *,
@@ -115,7 +98,7 @@ def _question_result_selected(
     )
 
 
-def _preflight_cases(
+def preflight_cases(
     args: argparse.Namespace,
     efforts: tuple[str | None, ...],
     *, enforce_gate: bool = True, include_control: bool = True,
@@ -168,7 +151,7 @@ def _gate_result(case, video, result, args):
         effective_prefix(args.group, args.with_work_title_prefix), args.input)
 
 
-def _require_selected_final_answers(
+def require_selected_final_answers(
     loaded: list[tuple[Path, dict[str, Any]]],
     *,
     args: argparse.Namespace,
@@ -178,7 +161,7 @@ def _require_selected_final_answers(
         if args.input == "question_only":
             for question in require_question_only_compatible(case):
                 for result in question.get("question_only_results", []):
-                    if not _question_result_selected(
+                    if not question_result_selected(
                         question, result, args=args, efforts=efforts
                     ):
                         continue
@@ -198,7 +181,7 @@ def _require_selected_final_answers(
                     continue
                 if not qa_is_current(case, video, result):
                     continue
-                if not _result_selected(
+                if not result_selected(
                     video, result, args=args, efforts=efforts
                 ):
                     continue
@@ -212,7 +195,7 @@ def _require_selected_final_answers(
                 )
 
 
-def _require_selected_prefix_metadata(
+def require_selected_prefix_metadata(
     loaded: list[tuple[Path, dict[str, Any]]],
     *,
     args: argparse.Namespace,
@@ -241,7 +224,7 @@ def _require_selected_prefix_metadata(
                 )
 
 
-def _preclear_force(
+def preclear_force(
     loaded: list[tuple[Path, dict[str, Any]]],
     *,
     args: argparse.Namespace,
@@ -259,7 +242,7 @@ def _preclear_force(
                 if args.force_qa:
                     kept = []
                     for result in results:
-                        if _question_result_selected(
+                        if question_result_selected(
                             question, result, args=args, efforts=efforts
                         ):
                             qa_cleared += 1
@@ -272,7 +255,7 @@ def _preclear_force(
                         question.pop("question_only_results", None)
                 elif args.force_judge:
                     for result in results:
-                        if not _question_result_selected(
+                        if not question_result_selected(
                             question, result, args=args, efforts=efforts
                         ) or result.get("judgment") is None:
                             continue
@@ -293,7 +276,7 @@ def _preclear_force(
                     if not _gate_result(case, video, result, args):
                         kept.append(result)
                         continue
-                    if _result_selected(
+                    if result_selected(
                         video, result, args=args, efforts=efforts
                     ) or _legacy_video_result_selected(
                         video, result, args=args, efforts=efforts
@@ -307,7 +290,7 @@ def _preclear_force(
                 for result in video["qa_results"]:
                     if not _gate_result(case, video, result, args):
                         continue
-                    if not _result_selected(
+                    if not result_selected(
                         video, result, args=args, efforts=efforts
                     ) or result.get("judgment") is None:
                         continue
@@ -331,23 +314,14 @@ def _preclear_force(
         )
 
 
-def _find_question(case: dict[str, Any], question_id: str) -> dict[str, Any]:
-    for question in case["questions"]:
-        if question["question_id"] == question_id:
-            return question
-    raise PipelineError(
-        f"Question {question_id} was not found in case {case['case_id']}."
-    )
-
-
-def _completion_counts(
+def completion_counts(
     args: argparse.Namespace,
     efforts: tuple[str | None, ...],
     *, include_control: bool = True,
     snapshot: list[tuple[Path, dict[str, Any]]] | None = None,
 ) -> tuple[int, int, int, int]:
-    loaded, qa_total = _preflight_cases(args, efforts, include_control=include_control, snapshot=snapshot)
-    qa_completed = _qa_completed_from_loaded(
+    loaded, qa_total = preflight_cases(args, efforts, include_control=include_control, snapshot=snapshot)
+    qa_completed = qa_completed_from_loaded(
         loaded, args=args, efforts=efforts, include_control=include_control,
     )
     effort_set = set(efforts)
@@ -358,7 +332,7 @@ def _completion_counts(
         if args.input == "question_only":
             for question in require_question_only_compatible(case):
                 for result in question.get("question_only_results", []):
-                    if not _question_result_selected(
+                    if not question_result_selected(
                         question, result, args=args, efforts=effort_set
                     ):
                         continue
@@ -371,7 +345,7 @@ def _completion_counts(
             for result in video["qa_results"]:
                 if not _gate_result(case, video, result, args):
                     continue
-                if not _result_selected(
+                if not result_selected(
                     video, result, args=args, efforts=effort_set
                 ):
                     continue
@@ -382,7 +356,7 @@ def _completion_counts(
     return qa_completed, qa_total, judge_completed, judge_total
 
 
-def _qa_completed_from_loaded(
+def qa_completed_from_loaded(
     loaded: list[tuple[Path, dict[str, Any]]],
     *,
     args: argparse.Namespace,
@@ -454,9 +428,3 @@ def _qa_completed_from_loaded(
                               effective_prefix(args.group, args.with_work_title_prefix), args.input)
             )
     return completed
-
-
-def command_qa_judge(args: argparse.Namespace) -> int:
-    """Compatibility entry for callers importing the former stage orchestrator."""
-    from .scheduler import command_qa_judge as run
-    return run(args)

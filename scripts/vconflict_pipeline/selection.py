@@ -3,9 +3,10 @@ from __future__ import annotations
 
 from typing import Any
 
-from .core import PipelineError, resolve_video_path
+from .common import PipelineError
 from .evidence import observed_summary
 from .integrity import description_is_current, video_selected
+from .paths import resolve_video_path
 
 
 def target_video_selected(
@@ -98,5 +99,3 @@ def eligible_videos(
             resolve_video_path(video["local_path"], must_exist=True)
         eligible.append(video)
     return eligible
-
-
