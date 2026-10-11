@@ -14,7 +14,7 @@ from .filters import effective_prefix, question_gate, scope_id
 from .integrity import digest
 from .media_cache import MediaCache
 from .paths import grouped_dir, iter_case_paths
-from .qa import LOCAL_QA_CONFIGS, preflight_qa_backend, qa_service_endpoint
+from .qa import LOCAL_QA_CONFIGS, MissingFinalAnswerError, preflight_qa_backend, qa_service_endpoint
 from .qa_diagnostics import QADiagnostics
 from .result_rules import expand_thinking_efforts
 from .runtime import Runtime, case_lock, path_key
@@ -111,6 +111,8 @@ class Engine:
 
     def claim(self, task):
         if task.token:
+            if not self.runtime.owns(task.key, task.token):
+                raise PipelineError('Task ownership changed before request admission')
             return 'owned'
         with case_lock(task.path):
             case = load_case(task.path)
@@ -138,12 +140,40 @@ class Engine:
     def fail(self, task, exc, *, write=False):
         task.prepared = None
         self.media_cache.trim()
+        if task.kind == 'qa' and task.final_answer_retry_count and task.key not in self.failed:
+            self.diagnostics.record(task.diagnostic_stage, 'final_answer_retry_failed')
         self._error(task.key, f"{task.path.stem}/{task.question_id}/{task.stage or 'main'}/{task.kind}: {exc}")
         if task.token and self.runtime.owns(task.key, task.token):
             self.runtime.finish(task.key, task.token, str(exc))
         self.main_reservations.discard((task.path, task.video_id, task.question_id, task.effort))
         if write:
             self.failed_cases.add(task.path)
+
+    def request_failed(self, task, permit, exc):
+        if task.kind == 'qa' and isinstance(exc, MissingFinalAnswerError):
+            self.runtime.release(permit)
+            if task.final_answer_retry_count == 0:
+                task.final_answer_retry_count = 1
+                task.due = time.monotonic()
+                self.diagnostics.record(task.diagnostic_stage, 'final_answer_retries')
+                print(f"Final-answer retry {task.path.stem}/{task.question_id}/{task.stage or 'main'} "
+                      "(1/1), repeating the original request", flush=True)
+            else:
+                self.fail(task, exc)
+            return
+        retryable = isinstance(exc, TransportError) and is_retryable(exc)
+        retry = retryable and task.network_retry_count < self.args.max_retries
+        delay = max(min(30, 2 ** task.network_retry_count) + random.uniform(0, .5),
+                    getattr(exc, 'retry_after', None) or 0)
+        keys = self.resource_keys[task.kind] if 'http 429' in str(exc).lower() else ()
+        self.runtime.release(permit, cooldown_keys=keys, delay=delay)
+        if retry:
+            task.network_retry_count += 1
+            task.due = time.monotonic() + delay
+            print(f"Retry {task.path.stem}/{task.question_id}/{task.kind} in {delay:.1f}s "
+                  f"(network {task.network_retry_count}/{self.args.max_retries})", flush=True)
+        else:
+            self.fail(task, exc)
 
     def ordered(self, tasks, kind):
         groups = {True: defaultdict(deque), False: defaultdict(deque)}
@@ -188,23 +218,18 @@ class Engine:
                         try:
                             output = future.result()
                         except Exception as exc:
-                            retry = isinstance(exc, TransportError) and is_retryable(exc) and task.attempts <= self.args.max_retries
-                            delay = max(min(30, 2 ** (task.attempts - 1)) + random.uniform(0, .5),
-                                        getattr(exc, 'retry_after', None) or 0)
-                            keys = self.resource_keys[task.kind] if 'http 429' in str(exc).lower() else ()
-                            self.runtime.release(permit, cooldown_keys=keys, delay=delay)
-                            if retry:
-                                task.due = time.monotonic() + delay
-                                print(f"Retry {task.path.stem}/{task.question_id}/{task.kind} in {delay:.1f}s", flush=True)
-                            else:
-                                self.fail(task, exc)
+                            self.request_failed(task, permit, exc)
                             continue
                         self.runtime.release(permit)
                         try:
                             if task.path in self.failed_cases:
                                 raise PipelineError('Case was stopped after a prior write failure')
+                            if task.kind == 'qa' and task.final_answer_retry_count:
+                                output['final_answer_retry_count'] = task.final_answer_retry_count
                             self.cases[task.path] = self.runtime.commit(
                                 task.path, task.key, task.token, lambda case: self.execution.merge(case, task, output))
+                            if task.kind == 'qa' and task.final_answer_retry_count:
+                                self.diagnostics.record(task.diagnostic_stage, 'final_answer_retry_recovered')
                             self.completed[task.kind] += 1
                             self.produced_runs[task.kind].add((path_key(task.path),
                                 output['run_id'] if task.kind == 'qa' else task.result['run_id']))
@@ -325,8 +350,12 @@ class Engine:
                 for future, (task, permit) in inflight.items():
                     try:
                         output = future.result()
+                        if task.kind == 'qa' and task.final_answer_retry_count:
+                            output['final_answer_retry_count'] = task.final_answer_retry_count
                         self.runtime.commit(task.path, task.key, task.token,
                                             lambda case, t=task, out=output: self.execution.merge(case, t, out))
+                        if task.kind == 'qa' and task.final_answer_retry_count:
+                            self.diagnostics.record(task.diagnostic_stage, 'final_answer_retry_recovered')
                     except Exception as exc:
                         self.fail(task, exc)
                     finally:

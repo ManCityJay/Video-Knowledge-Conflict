@@ -29,6 +29,7 @@ from .integrity import (
     question_content,
 )
 from .paths import resolve_video_path
+from .qa_diagnostics import QADiagnosticStage
 from .result_rules import (
     FILTER_RESULT_FIELDS,
     expand_thinking_efforts,
@@ -63,8 +64,15 @@ class Task:
     force_slot: tuple | None
     token: str | None = None
     attempts: int = 0
+    network_retry_count: int = 0
+    final_answer_retry_count: int = 0
     due: float = 0
     prepared: str | None = None
+
+    @property
+    def diagnostic_stage(self) -> QADiagnosticStage:
+        return ('question_only filter' if self.stage == 'question_only' else
+                'control filter' if self.stage == 'control_video' else 'main')
 
 
 class TaskPlanner:

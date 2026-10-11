@@ -8,7 +8,7 @@
 从仓库根目录使用 Python 3.10 或更新版本运行。按所用服务安装依赖：
 
 ```bash
-# Qwen QA
+# 云端 Qwen QA（qwen3.8-max）
 python -m pip install -U "dashscope>=1.24.6"
 # Seedance 视频生成
 python -m pip install volcengine-python-sdk[ark]
@@ -17,7 +17,7 @@ python -m pip install av Pillow
 ```
 
 Author、questions、生成式 description 和 Judge 使用 `OPENROUTER_API_KEY`；
-Seedance 使用 `ARK_API_KEY`；Qwen QA 使用 `DASHSCOPE_API_KEY`；Kimi QA 使用
+Seedance 使用 `ARK_API_KEY`；云端 Qwen QA 使用 `DASHSCOPE_API_KEY`；Kimi QA 使用
 `MOONSHOT_API_KEY`。本地 QA 不需要模型 API key，但 Judge 仍需 OpenRouter 凭据。
 PowerShell 配置示例：
 
@@ -37,8 +37,9 @@ $env:MOONSHOT_API_KEY = "<key>"
 | `MOONSHOT_BASE_URL` | `https://api.moonshot.cn/v1` |
 | `COSMOS_BASE_URL` | `http://127.0.0.1:8000/v1` |
 | `GEMMA_BASE_URL` | `http://127.0.0.1:8001/v1` |
+| `QWEN38_BASE_URL` | `http://127.0.0.1:8002/v1` |
 
-Qwen 地址须使用 HTTPS。下文命令采用 Bash 换行语法；PowerShell 中可写成单行。
+云端 Qwen 地址须使用 HTTPS。下文命令采用 Bash 换行语法；PowerShell 中可写成单行。
 
 ## 入口与执行顺序
 
@@ -174,6 +175,7 @@ python scripts/pipeline.py delete --group classic_fairy_tale_film_conflicts \
 | `kimi-k3` | `default` | 24 / 24 | 服务配置 |
 | `cosmos3-nano` | `none`、`default` | 8 / 8 | `--cosmos-max-tokens 8192` |
 | `gemma4` | `none`、`default` | 4 / 4 | `--gemma-max-tokens 2048` |
+| `qwen3.8-27b` | `none`、`default` | 1 / 1 | `--qwen38-max-tokens 32768` |
 
 省略 effort 使用 `default`；`all` 执行模型支持的全部 effort，也可重复指定该选项。
 模型 ID、温度和视频采样协议见 [plan.md](plan.md#模型配置与采样协议)。
@@ -183,8 +185,11 @@ python scripts/pipeline.py delete --group classic_fairy_tale_film_conflicts \
 ```bash
 bash scripts/start_cosmos_vllm.sh
 bash scripts/start_gemma4_vllm.sh
+bash scripts/start_qwen38_vllm.sh
 # Gemma 仅查看启动命令
 DRY_RUN=1 bash scripts/start_gemma4_vllm.sh
+# Qwen27B dry-run 无需激活 Conda 或安装 vLLM
+DRY_RUN=1 bash scripts/start_qwen38_vllm.sh
 ```
 
 Cosmos 默认激活 `vllm` 环境、GPU 0 单卡、BF16、端口 8000、`MAX_NUM_SEQS=4`。
@@ -195,10 +200,19 @@ Cosmos 默认激活 `vllm` 环境、GPU 0 单卡、BF16、端口 8000、`MAX_NUM
 Gemma 默认 `vllm` 环境、GPU 0/1 双卡、BF16、32K 上下文、`MAX_NUM_SEQS=2`、
 端口 8001。`GEMMA_MODEL`、`GEMMA_REVISION`、`GEMMA_CONDA_ENV` 可覆盖模型和环境；
 其余部署参数与 Cosmos 同名，另支持 `MAX_MODEL_LEN`、`MEDIA_ROOT` 和 `TEXT_ONLY=1`。
-两个脚本默认 `HF_HOME=/cache/huggingface`，均接受追加的 vLLM 参数。
+
+Qwen27B 默认 `vllm` 环境、GPU 0 单卡、BF16、65536 上下文、`MAX_NUM_SEQS=1`、
+端口 8002，加载视觉模块并启用 `qwen3` reasoning parser。`QWEN_MODEL` 可指定已下载
+模型目录，`QWEN_CONDA_ENV` 覆盖 Conda 环境；`TENSOR_PARALLEL_SIZE`、
+`CUDA_VISIBLE_DEVICES`、`MAX_MODEL_LEN`、`MAX_NUM_SEQS`、`GPU_MEMORY_UTILIZATION`、
+`VLLM_HOST`、`VLLM_PORT`、`MEDIA_ROOT`、`ENFORCE_EAGER` 均可覆盖。
+默认 `HF_HUB_OFFLINE=1`，也可覆盖 `HF_HOME` / `HF_HUB_CACHE`；默认只从已有缓存
+加载。所有脚本默认 `HF_HOME=/cache/huggingface`，接受追加的 vLLM 参数。
 
 视频必须是服务端可读且位于允许媒体目录内的 MP4。服务端口改变后同步配置
-`COSMOS_BASE_URL` / `GEMMA_BASE_URL`；预检从 `/v1/models` 获取实际模型 ID。
+`COSMOS_BASE_URL` / `GEMMA_BASE_URL` / `QWEN38_BASE_URL`；Qwen27B 默认
+`http://127.0.0.1:8002/v1`。预检从 `/v1/models` 获取实际模型 ID，持久化实验 ID
+始终为 `Qwen/Qwen3.8-27B`。整条 pipeline 与 vLLM 在同一服务器运行。
 Description 的 control filter 也需要视频服务，`TEXT_ONLY=1` 只适用于独立 question-only。
 
 ```bash
@@ -286,7 +300,7 @@ effort 通过的题目集合可能不同。汇总只读取快照，不发模型�
 
 省略 effort 或使用 `all` 时，只汇总已有判定中实际存在的 effort；没有结果则生成
 默认 effort 的空 summary。每个 effort 一份 JSON，不同 effort 合并到一份 Markdown。
-模型目录名为 `gemini`、`qwen`、`kimi`、`cosmos`、`gemma`。例如：
+模型目录名为 `gemini`、`qwen`、`kimi`、`cosmos`、`gemma`、`qwen38_27b`。例如：
 
 ```text
 results/<group>/qwen/qwen_description_none_summary.json
@@ -308,7 +322,9 @@ results/classic_fairy_tale_film_conflicts/qwen/qwen_video_based_with_prefix_filt
 的 conflict 目标，复用结果也计为完成；独立 question-only 按问题 × effort 统计。
 另打印 `main`、`question_only filter`、`control filter` 三组输出诊断：本地模型显示
 `max_tokens_truncated` 和 `missing_final_answer`，云端只显示后者。只统计本次实际
-请求，缓存复用不计入。部分 QA 失败时继续判定其他成功回答，最终返回非零状态。
+请求，缓存复用不计入。另显示安排格式重试的任务数 `final_answer_retries`、
+成功落盘数 `final_answer_retry_recovered`、最终失败数 `final_answer_retry_failed`。
+部分 QA 失败时继续判定其他成功回答，最终返回非零状态。
 
 | 问题 | 处理方法 |
 |---|---|
@@ -320,17 +336,14 @@ results/classic_fairy_tale_film_conflicts/qwen/qwen_video_based_with_prefix_filt
 | Filter 未通过 | 查看逐题 gate 原因；需要主动重跑时使用 filter-only force |
 | 共享服务配额冲突或 force 占用冲突 | 对齐活跃命令配置，等待占用命令结束；恢复机制见 concurrency.md |
 
-缺少有效最终答案或截断不触发语义重试，也不保存失败回答；网络请求默认最多重试
-4 次，QA/Judge 超时默认 600 秒，其他模型阶段默认 900 秒。用 `--max-retries` 和
-`--timeout` 调整。解析允许最后一行在标记前有解释文字，取该行最后一次标记后的
-答案；标记只出现在更早的行仍会失败。
+全部 QA 模型、输入和 effort（含两层 filter）正常结束但缺少有效最终答案时，
+调度器完整重试原请求一次，输入、提示词、生成参数完全一致，不传回首次回答或
+增加纠错提示。解析允许最后一个非空行在标记前有解释，取该行最后一次标记后的
+非空答案；标记缺失、答案为空、标记只在更早行、正常结束但正文为空均触发此规则。
+第二次有效才保存该回答并进入 Judge，结果增加 `final_answer_retry_count: 1`；
+第二次仍格式失败则终止任务，不保存成功 QA，也不执行下游。截断和判分错误不触发
+格式重试，已有有效结果不自动重跑。这取代此前缺少 final answer 直接失败的约定。
 
-离线检查结构、来源和审核回执：
-
-```bash
-python scripts/pipeline.py audit --group mathematics_algorithm_conflicts \
-  --output artifacts/math_pipeline_audit.json
-```
-
-`audit` 不调用模型，也不替代内容审核；存在错误时返回非零，`--strict` 将警告也
-视为失败。未完成审核、缺少回执或视频观察时，按报告逐项处理。
+每次重试重新申请并发和 RPM 额度，沿用同一任务认领。网络请求默认最多重试
+4 次，与一次格式重试分别计数，不因格式重试重置额度。QA/Judge 超时默认
+600 秒，其他模型阶段默认 900 秒。用 `--max-retries` 和 `--timeout` 调整。

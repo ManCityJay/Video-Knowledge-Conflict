@@ -68,8 +68,16 @@ control，也不会自动生成匹配视频。缺少映射、视频不可用、�
 所有 QA 提示都要求末行使用 `Final answer:`。保存完整 `raw_answer` 供核查，但
 Judge 只读取从正文提取的 `final_answer`，不从解释或 reasoning 中推断答案。
 解析取最后一个非空行最后一次大小写匹配标记之后的非空文本，允许标记前有解释。
-标记缺失、答案为空或仅出现在更早的行时拒绝该回答；本地输出截断同样拒绝。
-格式失败不触发额外语义重试，不保存 QA 记录，其他成功回答继续判分。
+正常结束但标记缺失、答案为空或仅出现在更早的行时，由调度器完整重试原请求一次；
+正文为空或只有 reasoning 也属于格式失败。重试的输入、提示词和生成参数完全相同，
+不添加纠错提示，也不传回第一次回答。第二次有效时只保存第二次并进入 Judge，记录
+可选 `final_answer_retry_count: 1`；第二次仍格式失败则终止该任务，不保存成功 QA，
+不释放下游。输出截断直接拒绝，不进入格式重试；其他成功回答继续判分。
+
+此规则统一用于全部 QA 模型、输入和 effort，包括主实验及两层 filter。判分错误
+不触发 QA 重试，已有有效历史结果不自动重跑。每次格式重试重新申请共享并发和
+RPM 额度，沿用同一任务认领；格式重试与网络重试分别计数，网络错误仍遵循
+`--max-retries`，格式重试不会重置或占用其额度。
 
 Judge 根据问题、最终答案、输入角色、事实和两类 reference 分类：
 
@@ -109,7 +117,7 @@ trapped_video_rate  = conflict trapped videos  / all conflict videos
 | question | `question_id`、`text_en`、两类 reference，可选 `question_only_results` |
 | video | `video_id`、`role`、`seedance_prompt_en`、`task_id`、`status`、`local_path`、`human_review`、`qa_results` |
 | description | `context_en`、可选 `context_prefix_en`、来源、来源 SHA-256、生成模型、时间和请求 ID |
-| QA | `run_id`、时间、输入模式、问题 ID/正文、模型、effort、温度、`raw_answer`、`final_answer`、可选 usage/reasoning、judgment |
+| QA | `run_id`、时间、输入模式、问题 ID/正文、模型、effort、温度、`raw_answer`、`final_answer`、可选 usage/reasoning、`final_answer_retry_count: 1`、judgment |
 | variant_context | 私有 facts/questions、可选标题、`matched_control_path` |
 | 审核证据 | `video_observation`、`question_audit`、审核/资格状态和来源指纹 |
 
@@ -169,14 +177,20 @@ video 缺少 prefix 元数据时，须按 [pipeline.md](pipeline.md#历史数据
 | `kimi-k3` | `kimi-k3` | 有效 temperature 1；default 对应 reasoning max |
 | `cosmos3-nano` | `nvidia/Cosmos3-Nano` | temperature 0、seed 0；none/default |
 | `gemma4` | `google/gemma-4-31B-it` | temperature 0、seed 0；none/default |
+| `qwen3.8-27b` | `Qwen/Qwen3.8-27B` | temperature 0、seed 0；none/default，开启 thinking 时 reasoning effort 为 xhigh |
 
 省略 effort 时统一使用 default。本地服务请求模型 ID 取 `/v1/models` 返回值，
 持久化 ID 保持表中实验标识。Gemma 通过 `chat_template_kwargs.enable_thinking`
 显式控制推理；回答正文与可选 reasoning 分开保存，final_answer 仅从正文提取。
-本地默认输出上限为 Cosmos 8192、Gemma 2048。
+Qwen27B 同样显式设置 `chat_template_kwargs.enable_thinking`，开启时在该对象内设置
+`reasoning_effort=xhigh`，正文和 reasoning 分开保存。本地默认输出上限为 Cosmos
+8192、Gemma 2048、Qwen27B 32768；Qwen27B 服务默认上下文 65536。
 
 - Gemini 和 Kimi 将本地视频编码为 Base64 Data URL，Kimi 请求体上限 100 MB。
-- Qwen 使用中国大陆 DashScope SDK 上传本地视频，文件上限 100 MiB，固定 fps=2。
+- 云端 Qwen (`qwen3.8-max`) 使用中国大陆 DashScope SDK 上传本地视频，文件上限
+  100 MiB，固定 fps=2。
+- 本地 Qwen27B 使用服务端可读的 MP4 file URI。加载器保留原始帧，模型处理器
+  采用官方默认 2 fps 和帧数边界，执行一次采样，避免重复采样。
 - Cosmos 使用服务端可读的 MP4 file URI。加载器保留原始帧，再由模型视频处理器
   从头到尾均匀按 4 fps 采样，避免加载器和处理器重复采样。
 - Gemma 使用服务端可读的 MP4 file URI，加载器对整段视频均匀采样最多 32 帧，
@@ -198,6 +212,18 @@ Gemma 视频请求参数：
   "media_io_kwargs": {"video": {"video_backend": "opencv", "num_frames": 32, "fps": -1}}
 }
 ```
+
+Qwen27B 视频请求参数：
+
+```json
+{
+  "media_io_kwargs": {"video": {"video_backend": "opencv", "num_frames": -1, "fps": -1}},
+  "mm_processor_kwargs": {"fps": 2, "do_sample_frames": true}
+}
+```
+
+Qwen27B 的 thinking 开关与 parser 参考 [vLLM 官方配方](https://recipes.vllm.ai/Qwen/Qwen3.8-27B)，
+视频加载/采样行为参考 [vLLM 视频加载器](https://github.com/vllm-project/vllm/blob/main/vllm/multimodal/video.py)。
 
 文字请求不包含视频或视频采样参数。主实验和两层 filter 使用相同 QA 模型配置，
 本地模型不占 OpenRouter QA RPM，Judge 仍通过 OpenRouter。采样与生成参数属于

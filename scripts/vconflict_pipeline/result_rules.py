@@ -11,6 +11,7 @@ from .settings import (
     GEMMA_QA_MODEL,
     KIMI_QA_MODEL,
     QWEN_QA_MODEL,
+    QWEN38_QA_MODEL,
 )
 
 
@@ -49,6 +50,7 @@ QA_THINKING_EFFORTS = {
     KIMI_QA_MODEL: ("default",),
     COSMOS_QA_MODEL: (None, "default"),
     GEMMA_QA_MODEL: (None, "default"),
+    QWEN38_QA_MODEL: (None, "default"),
 }
 DEFAULT_THINKING_EFFORT = "default"
 

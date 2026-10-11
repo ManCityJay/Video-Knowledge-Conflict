@@ -361,6 +361,10 @@ def validate_qa_result(result: Any, prefix: str, questions: dict[str, dict[str, 
     final_answer = result.get("final_answer")
     if final_answer is not None:
         require_nonempty_string(final_answer, f"{prefix}.final_answer")
+    if "final_answer_retry_count" in result:
+        count = result["final_answer_retry_count"]
+        if type(count) is not int or count != 1:
+            raise PipelineError(f"{prefix}.final_answer_retry_count must be 1 when present.")
     input_mode = qa_result_input_mode(result)
     if input_mode not in INPUT_MODES:
         raise PipelineError(f"{prefix}.input_mode is invalid.")

@@ -71,8 +71,7 @@ class TaskExecutor:
                 local_served_model_id=self.served,
                 local_max_tokens=local_qa_max_tokens(self.args), based=task.based,
                 diagnostics=self.diagnostics, prepared_video_input=media,
-                diagnostic_stage=('question_only filter' if task.stage == 'question_only' else
-                                  'control filter' if task.stage == 'control_video' else 'main'))
+                diagnostic_stage=task.diagnostic_stage)
         q, facts = task.question, task.context['conflict_spec']
         final_answer = task.result.get('final_answer')
         if not isinstance(final_answer, str) or not final_answer.strip():

@@ -13,9 +13,9 @@ question-only filter QA → Judge → control filter QA → Judge → 目标 QA 
 
 | 参数 | 默认 | 范围 |
 |---|---|---|
-| `--qa-concurrency` | 云端 24，Cosmos 8，Gemma 4 | 当前命令，filter 和主 QA 合计 |
+| `--qa-concurrency` | 云端 24，Cosmos 8，Gemma 4，Qwen27B 1 | 当前命令，filter 和主 QA 合计 |
 | `--judge-concurrency` | 24 | 当前命令，filter 和主 Judge 合计 |
-| `--qa-service-concurrency` | 云端 24，Cosmos 8，Gemma 4 | 同一 QA 服务，跨命令共享 |
+| `--qa-service-concurrency` | 云端 24，Cosmos 8，Gemma 4，Qwen27B 1 | 同一 QA 服务，跨命令共享 |
 | `--qa-rpm` | 云端 20，本地 0 | 同一 QA 模型，跨命令共享 |
 | `--judge-rpm` | 20 | Judge 模型，跨命令共享 |
 | `--openrouter-concurrency` | 24 | 所有 OpenRouter 请求，跨命令共享 |
@@ -108,7 +108,15 @@ filter 链仍可推进。已有有效结果直接满足依赖，不计入本次�
 
 只有满足所有额度的任务才进入网络线程。每次重试重新计入 RPM，退避保存在
 协调器的时间队列，不占请求线程。保持原有重试分类、次数和退避策略；429 会
-更新对应服务的共享冷却时间。格式错误、截断、缺少 final answer 不增加语义重试。
+更新对应服务的共享冷却时间。正常结束但缺少有效末行 `Final answer:`（含空正文）
+时，全部 QA 模型在主实验及两层 filter 中均完整重试原请求一次；输入、提示词和
+生成参数不变，不增加纠错提示或历史回答。截断和判分错误不触发格式重试。
+
+格式失败后先释放本次 permit，保持原任务认领和下游依赖；原任务重新进入同一
+调度队列，通过归属检查并重新申请全部共享并发及 RPM 额度后才能发起重试。
+`final_answer_retry_count` 最多为 1；`network_retry_count` 独立遵循 `--max-retries`，
+不会因格式重试清零或耗用。第二次有效才写入 QA 并释放 Judge；再次格式失败则
+共享该任务失败状态，不保存失败回答，不执行下游。已有有效历史结果仍直接复用。
 
 进程内相同视频内容只准备一份可复用编码。闲置 Base64 缓存采用 512 MiB LRU，
 在途请求持有的对象可以超过该缓存容量，因此它不是进程内存上限。不改变 Qwen
@@ -120,4 +128,7 @@ filter 链仍可推进。已有有效结果直接满足依赖，不计入本次�
 不自动等待整批 QA，也不自动串联 summarize。
 
 每 10 秒打印本进程待处理、在途、等待其他进程、重试、实际请求和完成速率，
-并显示共享服务占用与等待时间。保留原有三组 QA 诊断、最终完成统计和非零退出规则。
+并显示共享服务占用与等待时间。三组 QA 诊断另显示 `final_answer_retries`、
+`final_answer_retry_recovered`、`final_answer_retry_failed`，分别表示安排格式重试的任务数、
+重试后成功落盘数和最终失败数（包括重试后耗尽网络额度等失败）。保留最终完成统计
+和非零退出规则。

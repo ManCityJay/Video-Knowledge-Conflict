@@ -29,6 +29,8 @@ from .settings import (
     DEFAULT_COSMOS_WORKERS,
     DEFAULT_GEMMA_MAX_TOKENS,
     DEFAULT_GEMMA_WORKERS,
+    DEFAULT_QWEN38_MAX_TOKENS,
+    DEFAULT_QWEN38_WORKERS,
     DEFAULT_QA_MODEL,
     DEFAULT_REQUEST_RPM,
     DEFAULT_REQUEST_WORKERS,
@@ -36,6 +38,7 @@ from .settings import (
     DEFAULT_SOURCE_CASE_DIR,
     FAIRY_TALE_GROUP,
     GEMMA_QA_MODEL,
+    QWEN38_QA_MODEL,
     SEEDANCE_MODEL,
 )
 
@@ -226,6 +229,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_based(qa_judge)
     qa_judge.add_argument("--cosmos-max-tokens", type=int, default=DEFAULT_COSMOS_MAX_TOKENS)
     qa_judge.add_argument("--gemma-max-tokens", type=int, default=DEFAULT_GEMMA_MAX_TOKENS)
+    qa_judge.add_argument("--qwen38-max-tokens", type=int, default=DEFAULT_QWEN38_MAX_TOKENS)
     _add_retries(qa_judge, timeout=REQUEST_TIMEOUT_SECONDS)
     force = qa_judge.add_mutually_exclusive_group()
     force.add_argument("--force-qa", action="store_true")
@@ -283,13 +287,14 @@ def _validate(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None
         concurrency = {
             COSMOS_QA_MODEL: DEFAULT_COSMOS_WORKERS,
             GEMMA_QA_MODEL: DEFAULT_GEMMA_WORKERS,
+            QWEN38_QA_MODEL: DEFAULT_QWEN38_WORKERS,
         }.get(args.qa_model, 24)
         if args.qa_concurrency is None:
             args.qa_concurrency = concurrency
         if args.qa_service_concurrency is None:
             args.qa_service_concurrency = concurrency
         if args.qa_rpm is None:
-            args.qa_rpm = 0 if args.qa_model in (COSMOS_QA_MODEL, GEMMA_QA_MODEL) else 20
+            args.qa_rpm = 0 if args.qa_model in (COSMOS_QA_MODEL, GEMMA_QA_MODEL, QWEN38_QA_MODEL) else 20
     if getattr(args, "audit_only", False) and (args.force or args.repair_variant_context):
         parser.error("--audit-only cannot be combined with --force or --repair-variant-context")
     if getattr(args, "repair_variant_context", False):
@@ -330,6 +335,7 @@ def _validate(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None
         "summary_workers",
         "cosmos_max_tokens",
         "gemma_max_tokens",
+        "qwen38_max_tokens",
     ):
         if hasattr(args, field) and getattr(args, field) <= 0:
             parser.error(f"--{field.replace('_', '-')} must be greater than zero")

@@ -37,6 +37,7 @@ cmd=(
   --served-model-name google/gemma-4-31B-it
   --tensor-parallel-size "$TENSOR_PARALLEL_SIZE"
   --dtype bfloat16
+  --override-generation-config '{"max_new_tokens":8192}'
   --max-model-len "$MAX_MODEL_LEN"
   --max-num-seqs "$MAX_NUM_SEQS"
   --gpu-memory-utilization "$GPU_MEMORY_UTILIZATION"

@@ -21,10 +21,13 @@ from .settings import (
     DEFAULT_COSMOS_MAX_TOKENS,
     DEFAULT_GEMMA_BASE_URL,
     DEFAULT_GEMMA_MAX_TOKENS,
+    DEFAULT_QWEN38_BASE_URL,
+    DEFAULT_QWEN38_MAX_TOKENS,
     GEMINI_QA_MODEL,
     GEMMA_QA_MODEL,
     KIMI_QA_MODEL,
     QWEN_QA_MODEL,
+    QWEN38_QA_MODEL,
 )
 from .transport import (
     EmptyResponseTextError,
@@ -278,11 +281,9 @@ def _normalize_dashscope_response(response: Any) -> dict[str, Any]:
         if content is not None:
             raise TransportError("Qwen response did not contain textual content.")
         answer = ""
-    if not answer.strip():
-        raise EmptyResponseTextError("Qwen response did not contain textual content.")
-
     normalized: dict[str, Any] = {
-        "choices": [{"message": {"content": answer}}],
+        "choices": [{"message": {"content": answer},
+                     "finish_reason": _response_field(choices[0], "finish_reason")}],
     }
     request_id = _response_field(response, "request_id") or _response_field(
         response, "id"
@@ -543,6 +544,45 @@ def _gemma_payload(
     return payload
 
 
+def _qwen38_payload(
+    *,
+    prompt_text: str,
+    video_uri: str | None,
+    thinking_effort: str | None,
+    served_model_id: str,
+    max_tokens: int,
+) -> dict[str, Any]:
+    if thinking_effort not in (None, "default"):
+        raise PipelineError("Qwen3.8-27B thinking effort must be none or default.")
+    thinking = thinking_effort == "default"
+    template_kwargs: dict[str, Any] = {"enable_thinking": thinking}
+    if thinking:
+        template_kwargs["reasoning_effort"] = "xhigh"
+    content: str | list[dict[str, Any]] = prompt_text
+    if video_uri is not None:
+        content = [
+            {"type": "video_url", "video_url": {"url": video_uri}},
+            {"type": "text", "text": prompt_text},
+        ]
+    payload: dict[str, Any] = {
+        "model": served_model_id,
+        "temperature": 0.0,
+        "seed": 0,
+        "max_tokens": max_tokens,
+        "stream": False,
+        "chat_template_kwargs": template_kwargs,
+        "messages": [{"role": "user", "content": content}],
+    }
+    if video_uri is not None:
+        # Keep original frames in the loader; the HF processor samples once at
+        # Qwen's default 2 fps, including its normal frame-count bounds.
+        payload["media_io_kwargs"] = {
+            "video": {"video_backend": "opencv", "num_frames": -1, "fps": -1}
+        }
+        payload["mm_processor_kwargs"] = {"fps": 2, "do_sample_frames": True}
+    return payload
+
+
 @dataclass(frozen=True)
 class LocalQAConfig:
     base_url_variable: str
@@ -560,6 +600,10 @@ LOCAL_QA_CONFIGS = {
     GEMMA_QA_MODEL: LocalQAConfig(
         "GEMMA_BASE_URL", DEFAULT_GEMMA_BASE_URL,
         "gemma_max_tokens", DEFAULT_GEMMA_MAX_TOKENS, _gemma_payload,
+    ),
+    QWEN38_QA_MODEL: LocalQAConfig(
+        "QWEN38_BASE_URL", DEFAULT_QWEN38_BASE_URL,
+        "qwen38_max_tokens", DEFAULT_QWEN38_MAX_TOKENS, _qwen38_payload,
     ),
 }
 
@@ -622,9 +666,19 @@ GEMMA_BACKEND = QABackend(
     endpoint=lambda: f"{_local_base_url(GEMMA_QA_MODEL)}/chat/completions",
     build_payload=None,
 )
+QWEN38_BACKEND = QABackend(
+    model=QWEN38_QA_MODEL,
+    thinking_efforts=QA_THINKING_EFFORTS[QWEN38_QA_MODEL],
+    default_thinking_effort=DEFAULT_THINKING_EFFORT,
+    temperature=0.0,
+    api_key_variable=None,
+    service="Qwen3.8-27B",
+    endpoint=lambda: f"{_local_base_url(QWEN38_QA_MODEL)}/chat/completions",
+    build_payload=None,
+)
 QA_BACKENDS = {
     backend.model: backend
-    for backend in (GEMINI_BACKEND, QWEN_BACKEND, KIMI_BACKEND, COSMOS_BACKEND, GEMMA_BACKEND)
+    for backend in (GEMINI_BACKEND, QWEN_BACKEND, KIMI_BACKEND, COSMOS_BACKEND, GEMMA_BACKEND, QWEN38_BACKEND)
 }
 
 
@@ -743,26 +797,30 @@ def run_qa_once(
                     prompt_text, video_input, thinking_effort
                 )
             response = backend.send_request(payload, api_key, timeout)
-        if qa_model in LOCAL_QA_CONFIGS:
-            choices = response.get("choices")
-            if (
-                isinstance(choices, list)
-                and choices
-                and isinstance(choices[0], dict)
-                and choices[0].get("finish_reason") == "length"
-            ):
-                raise TruncatedAnswerError(
-                    f"{backend.service} answer was truncated at max_tokens; "
-                    f"increase --{LOCAL_QA_CONFIGS[qa_model].max_tokens_argument.replace('_', '-')} "
-                    "and rerun this QA."
-                )
+        choices = response.get("choices")
+        finish_reason = (choices[0].get("finish_reason")
+                         if isinstance(choices, list) and choices
+                         and isinstance(choices[0], dict) else None)
+        if finish_reason in ("length", "max_tokens"):
+            config = LOCAL_QA_CONFIGS.get(qa_model)
+            hint = (f"increase --{config.max_tokens_argument.replace('_', '-')} "
+                    if config else "increase the service output budget ")
+            raise TruncatedAnswerError(
+                f"{backend.service} answer was truncated at max_tokens; {hint}and rerun this QA."
+            )
+        if finish_reason not in (None, "stop"):
+            raise PipelineError(f"{backend.service} answer did not finish normally: {finish_reason}")
         raw_answer = backend.extract_answer(response)
         final_answer = extract_final_answer(raw_answer)
+    except EmptyResponseTextError as exc:
+        if diagnostics is not None:
+            diagnostics.record(diagnostic_stage, "missing_final_answer")
+        raise MissingFinalAnswerError(str(exc)) from exc
     except PipelineError as exc:
         if diagnostics is not None:
             if isinstance(exc, TruncatedAnswerError):
                 diagnostics.record(diagnostic_stage, "max_tokens_truncated")
-            elif isinstance(exc, (MissingFinalAnswerError, EmptyResponseTextError)):
+            elif isinstance(exc, MissingFinalAnswerError):
                 diagnostics.record(diagnostic_stage, "missing_final_answer")
         raise
     result: dict[str, Any] = {
@@ -787,7 +845,9 @@ def run_qa_once(
         result["based"] = based
     if backend.effective_reasoning_effort is not None:
         result["effective_reasoning_effort"] = backend.effective_reasoning_effort
-    if qa_model == GEMMA_QA_MODEL:
+    if qa_model == QWEN38_QA_MODEL and thinking_effort == "default":
+        result["effective_reasoning_effort"] = "xhigh"
+    if qa_model in (GEMMA_QA_MODEL, QWEN38_QA_MODEL):
         message = response["choices"][0]["message"]
         for field in ("reasoning", "reasoning_content"):
             reasoning = message.get(field)
