@@ -53,12 +53,10 @@ def audit_cases(paths: list[Path], *, group: str | None = None) -> dict:
             if local in physical_paths:
                 note("error", "duplicate_file_binding", entity, str(local))
             physical_paths.add(local)
-            qualified = "qualified" in local.parts
+            qualified = video.get("human_review") == "verified"
             if qualified:
                 counts["qualified_" + video["role"]] += 1
                 counts["qualified_review_" + video["human_review"]] += 1
-                if video["human_review"] != "verified":
-                    note("warning", "qualified_review_unverified", entity, video["human_review"])
                 if local.stem != video["video_id"] and video["role"] == "conflict":
                     note("error", "qualified_video_filename", entity, str(local))
                 elif local.stem != video["video_id"]:
@@ -66,7 +64,7 @@ def audit_cases(paths: list[Path], *, group: str | None = None) -> dict:
                          "The legacy control filename is resolved through local_path; no renumbering is needed.")
             if video["status"] == "ready" and not local.is_file():
                 note("error", "missing_video", entity, str(local))
-            if video_selected(video, "video"):
+            if video_selected(video, "control" if video["role"] == "control" else "video"):
                 counts["default_video_targets_" + video["role"]] += 1
                 if not video_case_context(case, video)["questions"]:
                     note("error", "missing_questions", entity, "No questions in the effective video scope.")

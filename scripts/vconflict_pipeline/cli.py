@@ -100,7 +100,7 @@ def _add_retries(parser: argparse.ArgumentParser, *, timeout: int = 900) -> None
 def _add_input(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--input",
-        choices=("video", "description", "question_only"),
+        choices=("video", "control", "description", "question_only"),
         default="video",
     )
 
@@ -234,10 +234,10 @@ def build_parser() -> argparse.ArgumentParser:
     force = qa_judge.add_mutually_exclusive_group()
     force.add_argument("--force-qa", action="store_true")
     force.add_argument("--force-judge", action="store_true")
-    qa_judge.add_argument("--video-scope", choices=("qualified", "all"),
-                          help="Math defaults to qualified; other groups default to all.")
+    qa_judge.add_argument("--video-scope", choices=("all",),
+                          help="All groups use the current dataset without review-directory buckets.")
     qa_judge.add_argument("--filter-only", action="store_true",
-                          help="Run question-only then matched control filters; do not run conflict QA.")
+                          help="Run only the question-only filter for the selected video role.")
     qa_judge.set_defaults(func=command_qa_judge)
 
     summarize = _stage(subparsers, "summarize")
@@ -253,9 +253,9 @@ def build_parser() -> argparse.ArgumentParser:
     _add_work_title_prefix(summarize)
     _add_based(summarize)
     summarize.add_argument("--summary-workers", type=int, default=4)
-    summarize.add_argument("--video-scope", choices=("qualified", "all"))
+    summarize.add_argument("--video-scope", choices=("all",))
     summarize.add_argument("--filter", dest="filter_mode", choices=("all", "passed"), default="all",
-                           help="Require both question filters to pass; write separate reports.")
+                           help="Require the question-only filter to pass; write separate reports.")
     summarize.set_defaults(func=command_summarize)
     audit = _stage(subparsers, "audit")
     _add_case_selection(audit)
@@ -268,21 +268,19 @@ def build_parser() -> argparse.ArgumentParser:
 
 def _validate(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
     if getattr(args, "based", False) and args.input == "question_only":
-        parser.error("--based requires --input video or description")
+        parser.error("--based requires --input video, control or description")
     if getattr(args, "filter_only", False) and getattr(args, "based", False):
         parser.error("--filter-only cannot be combined with --based")
-    if getattr(args, "filter_only", False) and args.input != "video":
-        parser.error("--filter-only requires --input video")
+    if getattr(args, "filter_only", False) and args.input not in ("video", "control"):
+        parser.error("--filter-only requires --input video or control")
     if getattr(args, "filter_mode", "all") == "passed" and args.input == "question_only":
-        parser.error("--filter passed requires video or description input")
+        parser.error("--filter passed requires video, control or description input")
     if (
         args.command == "qa-judge"
         and args.input == "question_only"
         and args.video_id
     ):
         parser.error("--video-id cannot be combined with --input question_only")
-    if hasattr(args, "video_scope") and args.video_scope is None:
-        args.video_scope = "qualified" if args.group == "mathematics_algorithm_conflicts" else "all"
     if args.command == "qa-judge":
         concurrency = {
             COSMOS_QA_MODEL: DEFAULT_COSMOS_WORKERS,
@@ -308,8 +306,8 @@ def _validate(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None
                 "--with-work-title-prefix requires "
                 f"--group {FAIRY_TALE_GROUP}"
             )
-        if args.input != "video":
-            parser.error("--with-work-title-prefix requires --input video")
+        if args.input not in ("video", "control"):
+            parser.error("--with-work-title-prefix requires --input video or control")
     if args.command == "delete":
         has_selected_items = bool(args.video_id or args.question_id)
         if args.delete_all and has_selected_items:
@@ -366,9 +364,6 @@ def main(argv: list[str] | None = None) -> int:
             option = argument.split("=", 1)[0]
             if option in replacements:
                 parser.error(f"{option} was removed from qa-judge; use {replacements[option]}")
-    forbidden = [value for value in arguments if value in ("-h", "--help")]
-    if forbidden:
-        parser.error(f"unrecognized arguments: {' '.join(forbidden)}")
     args = parser.parse_args(arguments)
     _validate(args, parser)
     try:

@@ -862,14 +862,12 @@ def run_qa_once(
 def _preflight_local_videos(
     args: Any, loaded: list[tuple[Path, dict[str, Any]]]
 ) -> None:
-    if args.input != "video":
+    if args.input not in ("video", "control"):
         return
     selected_videos = set(args.video_id or [])
     for _, case in loaded:
         for video in eligible_videos(
             case, input_mode=args.input, selected_video_ids=selected_videos,
-            video_scope=getattr(args, "video_scope", None),
-            based=bool(getattr(args, "based", False)),
         ):
             path = resolve_video_path(video["local_path"], must_exist=True)
             _local_video_uri(path, get_backend(args.qa_model).service)

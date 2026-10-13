@@ -15,6 +15,19 @@ from .settings import (
 )
 
 
+def qa_input_mode(input_selection: str) -> str:
+    """Control selects a video role while retaining the persisted video medium."""
+    return "video" if input_selection == "control" else input_selection
+
+
+def target_video_role(input_selection: str) -> str:
+    if input_selection in ("video", "description"):
+        return "conflict"
+    if input_selection == "control":
+        return "control"
+    raise PipelineError(f"Input {input_selection!r} has no video targets.")
+
+
 def qa_result_input_mode(result: dict[str, Any]) -> str:
     """Treat pre-description results as video results."""
     value = result.get("input_mode", "video")
@@ -114,46 +127,32 @@ def qa_result_based(result: dict[str, Any]) -> bool:
     return result.get("based", False) is True
 
 
+def qa_result_matches(
+    result: dict[str, Any],
+    *,
+    input_selection: str,
+    model: str,
+    efforts: set[str | None],
+    based: bool = False,
+    work_title_prefix: bool | None = None,
+) -> bool:
+    mode = qa_input_mode(input_selection)
+    return (
+        result.get("model") == model
+        and qa_result_input_mode(result) == mode
+        and qa_result_thinking_effort(result) in efforts
+        and (mode == "question_only" or qa_result_based(result) is based)
+        and (mode != "video" or work_title_prefix is None
+             or qa_result_work_title_prefix(result) is work_title_prefix)
+    )
+
+
 def work_title_prefix_condition(
     group: Any,
     input_mode: str,
     enabled: bool,
 ) -> bool | None:
-    """Return the prefix condition only for the Fairy video experiment."""
-    if group == FAIRY_TALE_GROUP and input_mode == "video":
+    """Return the prefix condition for Fairy conflict and control videos."""
+    if group == FAIRY_TALE_GROUP and qa_input_mode(input_mode) == "video":
         return bool(enabled)
     return None
-
-
-def qa_run_key(
-    input_mode: str,
-    question_id: Any,
-    model: Any,
-    thinking_effort: Any,
-    *,
-    based: bool = False,
-    work_title_prefix: bool | None = None,
-) -> tuple[Any, ...]:
-    key = (input_mode, question_id, model, thinking_effort)
-    if input_mode != "question_only":
-        key = (*key, based)
-    return (*key, work_title_prefix) if work_title_prefix is not None else key
-
-
-def qa_result_key(
-    result: dict[str, Any],
-    *,
-    include_work_title_prefix: bool = False,
-) -> tuple[Any, ...]:
-    input_mode = qa_result_input_mode(result)
-    key = (
-        input_mode,
-        result.get("question_id"),
-        result.get("model"),
-        qa_result_thinking_effort(result),
-    )
-    if input_mode != "question_only":
-        key = (*key, qa_result_based(result))
-    if input_mode == "video" and include_work_title_prefix:
-        return (*key, qa_result_work_title_prefix(result))
-    return key

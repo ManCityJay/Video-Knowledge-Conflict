@@ -60,29 +60,52 @@ def validate_group(value: Any) -> str:
 def video_case_context(case: dict[str, Any], video: dict[str, Any]) -> dict[str, Any]:
     """Return this video's facts/questions while keeping the parent case identity."""
     context = video.get("variant_context")
-    if context is None:
-        return case
-    return {**case, "title": context.get("title", case["title"]),
-            "questions": context["questions"], "conflict_spec": context["conflict_spec"]}
+    result = case if context is None else {
+        **case, "title": context.get("title", case["title"]),
+        "questions": context["questions"], "conflict_spec": context["conflict_spec"]}
+    # Curation removes individual video/question associations without deleting
+    # a shared question that is still valid for another video.
+    if "question_ids" in video:
+        retained = set(video["question_ids"])
+        result = {**result, "questions": [
+            q for q in result["questions"] if q["question_id"] in retained]}
+    return result
 
 
 def require_question_only_compatible(
     case: dict[str, Any],
 ) -> list[dict[str, Any]]:
-    """Return shared questions after rejecting private video question scopes."""
-    private_videos = [
-        video["video_id"]
-        for video in case["videos"]
-        if video.get("variant_context") is not None
-    ]
-    if private_videos:
-        raise PipelineError(
-            f"Case {case['case_id']} has private variant_context questions "
-            f"({', '.join(private_videos)}); question_only currently supports "
-            "case-level questions only."
-        )
-    if not case["questions"]:
-        raise PipelineError(
-            f"Case {case['case_id']} has no questions. Run questions first."
-        )
-    return case["questions"]
+    """Return effective questions needed by the conflict-video filters."""
+    questions = [question for _, question in conflict_question_scopes(case)]
+    if not questions and not case.get('quality_curation'):
+        raise PipelineError(f"Case {case['case_id']} has no conflict questions. Run questions first.")
+    return questions
+
+
+def conflict_question_scopes(case):
+    """Cover every conflict's effective questions, reusing identical shared scopes.
+
+    Private variant questions remain isolated even when question IDs match.
+    Text-only filtering does not require video media or descriptions.
+    """
+    seen = set()
+    for video in case['videos']:
+        if video['role'] != 'conflict':
+            continue
+        scope = video['video_id'] if video.get('variant_context') is not None else 'case'
+        for question in video_case_context(case, video)['questions']:
+            key = (scope, question['question_id'])
+            if key not in seen:
+                seen.add(key)
+                yield video, question
+
+
+def question_only_records(question):
+    """Read standalone and filter storage without copying or migrating records."""
+    from .result_rules import FILTER_RESULT_FIELDS, filter_field
+    records = []
+    for field in FILTER_RESULT_FIELDS:
+        records.extend(result for result in question.get(field, [])
+                       if filter_field(result, 'stage') == 'question_only')
+    records.extend(question.get('question_only_results', []))
+    return records

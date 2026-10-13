@@ -6,10 +6,9 @@ import json
 import os
 
 from .common import PipelineError, utc_now
-from .filters import control_video, scope_id
-from .integrity import digest, judgment_fingerprint, qa_fingerprint
+from .integrity import digest, judgment_fingerprint
 from .qa import get_backend, local_qa_max_tokens, preflight_qa_backend, run_qa_once
-from .result_rules import filter_field, set_filter_field
+from .result_rules import set_filter_field
 from .schema import JUDGMENT_SCHEMA
 from .settings import AUTHOR_JUDGE_MODEL, VERDICTS
 from .transport import openrouter_json
@@ -52,11 +51,8 @@ class TaskExecutor:
             self.backend_ready = True
 
     def normalize_filter(self, case, task, result):
-        video, _, q = self.planner.owners(case, task)
         set_filter_field(result, 'stage', task.stage)
         set_filter_field(result, 'fingerprint', task.fingerprint)
-        if task.stage == 'control_video' and scope_id(video) == 'case':
-            result['input_fingerprint'] = qa_fingerprint(case, control_video(case, video), q, 'video', task.prefix)
         records = self.planner.records(case, task, result)
         records[:] = [r for r in records if r.get('run_id') != result['run_id']]
         records.append(result)
@@ -89,8 +85,6 @@ class TaskExecutor:
             raise PipelineError('Invalid judgment verdict')
         if task.context['role'] == 'control' and verdict['verdict'] == 'knowledge_trapped':
             raise PipelineError('Judge returned knowledge_trapped for a control input')
-        if task.stage and verdict['verdict'] not in ('context_grounded', 'ambiguous_or_unjudgeable'):
-            raise PipelineError('Invalid filter judgment verdict')
         confidence = float(verdict['confidence'])
         if not 0 <= confidence <= 1:
             raise PipelineError('Invalid judgment confidence')
@@ -98,7 +92,7 @@ class TaskExecutor:
                 'judge_model': AUTHOR_JUDGE_MODEL, 'judge_request_id': response.get('id')}
 
     def merge(self, case, task, output):
-        video, _, q = self.planner.owners(case, task)
+        video, q = self.planner.owners(case, task)
         _, binding = self.planner.fingerprint(case, video, q, task.stage, task.mode, task.prefix, task.based)
         if binding != task.binding:
             raise PipelineError('Inputs changed during request; refusing stale result')
@@ -106,13 +100,7 @@ class TaskExecutor:
             if task.stage:
                 self.normalize_filter(case, task, output)
             else:
-                if task.mode != 'question_only':
-                    output['input_fingerprint'] = task.fingerprint
-                else:
-                    # Same request as the shared question-only filter: persist its
-                    # existing provenance fields so another command can reuse it.
-                    set_filter_field(output, 'stage', 'question_only')
-                    set_filter_field(output, 'fingerprint', task.fingerprint)
+                output['input_fingerprint'] = task.fingerprint
                 self.planner.records(case, task).append(output)
             return
         records = self.planner.records(case, task, task.result)
@@ -121,11 +109,6 @@ class TaskExecutor:
             raise PipelineError('QA changed during judging; refusing stale judgment')
         if task.stage:
             output['filter_fingerprint'] = digest({'input': task.fingerprint, 'final_answer': result['final_answer']})
-            if task.stage == 'control_video' and scope_id(video) == 'case':
-                output['input_fingerprint'] = judgment_fingerprint(case, control_video(case, video), result)
-        elif task.mode != 'question_only':
+        else:
             output['input_fingerprint'] = judgment_fingerprint(case, video, result)
-        if not task.stage and filter_field(result, 'stage'):
-            output['filter_fingerprint'] = digest({'input': filter_field(result, 'fingerprint'),
-                                                   'final_answer': result['final_answer']})
         result['judgment'] = output

@@ -7,9 +7,10 @@ import sys
 from pathlib import Path
 from typing import Any, Iterable
 
-from .common import PipelineError, video_case_context
+from .common import PipelineError
 from .integrity import require_writable_case
 from .paths import grouped_dir, resolve_video_path
+from .result_rules import FILTER_RESULT_FIELDS
 from .schema import validate_case
 from .settings import PROJECT_ROOT
 from .storage import atomic_write_json, load_case
@@ -45,7 +46,8 @@ def _remove_selected(
 
     questions_by_id = {
         question["question_id"]: question
-        for context in [case] + [video_case_context(case, video) for video in case["videos"]]
+        for context in [case] + [video["variant_context"] for video in case["videos"]
+                                  if video.get("variant_context") is not None]
         for question in context["questions"]
     }
     missing_questions = _missing(question_ids, questions_by_id)
@@ -56,21 +58,11 @@ def _remove_selected(
         )
 
     selected_videos = [videos_by_id[video_id] for video_id in video_ids]
-    control_ids = sorted(
-        video["video_id"]
-        for video in selected_videos
-        if video["role"] == "control"
-    )
-    if control_ids:
-        raise PipelineError(
-            "Control videos cannot be deleted individually: "
-            f"{', '.join(control_ids)}. Delete the entire case instead."
-        )
     remaining_conflicts = sum(
         video["role"] == "conflict" and video["video_id"] not in video_ids
         for video in case["videos"]
     )
-    if remaining_conflicts < 1:
+    if remaining_conflicts < 1 and not case.get("quality_curation"):
         raise PipelineError(
             "At least one conflict video must remain. Delete the entire case instead."
         )
@@ -86,11 +78,16 @@ def _remove_selected(
         if video["video_id"] in video_ids
         or result["question_id"] in question_ids
     ]
+    question_owners = [(None, case)] + [
+        (video['video_id'], video['variant_context']) for video in case['videos']
+        if video.get('variant_context') is not None]
     removed_results.extend(
         result
-        for question in case["questions"]
-        if question["question_id"] in question_ids
-        for result in question.get("question_only_results", [])
+        for video_id, owner in question_owners
+        for question in owner['questions']
+        if video_id in video_ids or question['question_id'] in question_ids
+        for field in ('question_only_results', *FILTER_RESULT_FIELDS)
+        for result in question.get(field, [])
     )
     removed_judgments = sum(
         isinstance(result.get("judgment"), dict) for result in removed_results
@@ -100,6 +97,8 @@ def _remove_selected(
     )
 
     updated = copy.deepcopy(case)
+    # Removing the whole video also removes its description and all QA/Judge
+    # history, including both video and description inputs.
     updated["videos"] = [
         video for video in updated["videos"] if video["video_id"] not in video_ids
     ]
@@ -109,6 +108,8 @@ def _remove_selected(
         if question["question_id"] not in question_ids
     ]
     for video in updated["videos"]:
+        if "question_ids" in video:
+            video["question_ids"] = [qid for qid in video["question_ids"] if qid not in question_ids]
         if "variant_context" in video:
             video["variant_context"]["questions"] = [
                 question for question in video["variant_context"]["questions"]

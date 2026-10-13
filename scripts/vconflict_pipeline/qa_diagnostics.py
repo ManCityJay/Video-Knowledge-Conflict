@@ -5,13 +5,13 @@ from __future__ import annotations
 import threading
 from typing import Literal
 
-QADiagnosticStage = Literal["main", "question_only filter", "control filter"]
+QADiagnosticStage = Literal["main", "question_only filter"]
 QADiagnosticReason = Literal[
     "max_tokens_truncated", "missing_final_answer", "final_answer_retries",
     "final_answer_retry_recovered", "final_answer_retry_failed",
 ]
 DIAGNOSTIC_STAGES: tuple[QADiagnosticStage, ...] = (
-    "main", "question_only filter", "control filter",
+    "main", "question_only filter",
 )
 
 

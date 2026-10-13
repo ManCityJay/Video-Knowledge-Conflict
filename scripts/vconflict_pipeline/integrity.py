@@ -8,7 +8,8 @@ from typing import Any
 
 from .common import PipelineError, video_case_context
 from .evidence import description_source_hash, observed_summary, video_sha256
-from .result_rules import qa_result_input_mode
+from .paths import resolve_video_path
+from .result_rules import qa_result_input_mode, target_video_role
 
 
 MATH_GROUP = "mathematics_algorithm_conflicts"
@@ -27,19 +28,9 @@ def question_content(question: dict | None) -> dict | None:
             if key not in {"question_only_results", "filter_results", "baseline_results"}}
 
 
-def video_selected(video: dict, input_mode: str, scope: str | None = None) -> bool:
-    parts = Path(video["local_path"]).parts
-    # Existing other groups retain their default scope. Math experiments use the
-    # curated bucket; legacy control review flags are reported separately.
-    scope = scope or ("qualified" if MATH_GROUP in parts else "all")
-    if input_mode == "description" and video["role"] != "conflict":
-        return False
-    if scope == "qualified":
-        return ("qualified" in parts and video["status"] == "ready"
-                and video.get("human_review") != "rejected"
-                and not video.get("qualification_pending")
-                and (video["role"] == "control" or video.get("human_review") == "verified"))
-    return input_mode == "description" or video["status"] == "ready"
+def video_selected(video: dict, input_mode: str) -> bool:
+    return (video["role"] == target_video_role(input_mode)
+            and (input_mode == "description" or video["status"] == "ready"))
 
 
 def description_is_current(video: dict) -> bool:
@@ -85,6 +76,9 @@ def qa_is_current(case: dict, video: dict, result: dict) -> bool:
     if mode == "video" and video["status"] != "ready":
         return False
     try:
+        if mode == "video":
+            resolve_video_path(video["local_path"], must_exist=True)
+            observed_summary(video)
         if mode == "description" and (not description_is_current(video)
                 or result.get("context_text_en") != video["description"]["context_en"]):
             return False

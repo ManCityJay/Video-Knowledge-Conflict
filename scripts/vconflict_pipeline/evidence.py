@@ -91,7 +91,6 @@ def qualified_references(group: str, case_id: str, *, root: Path | None = None) 
     case = load_case(case_path)
     candidates = [v for v in case['videos'] if v['role'] == 'conflict'
                   and v['status'] == 'ready' and v['human_review'] == 'verified'
-                  and 'qualified' in Path(v['local_path']).parts
                   and resolve_video_path(v['local_path']).is_file()]
     # Prefer the tested image-conditioned expansion over an older text-only draft.
     candidates.sort(key=lambda v: (bool(v.get('first_frame_path')), v['video_id']), reverse=True)

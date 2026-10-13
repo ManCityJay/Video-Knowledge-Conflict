@@ -1,4 +1,4 @@
-"""Request scheduling, task claims, shared admission, delayed retries and progress."""
+"""Request scheduling, task claims, shared admission and delayed retries."""
 from __future__ import annotations
 
 import copy
@@ -9,8 +9,9 @@ import time
 from collections import Counter, defaultdict, deque
 from concurrent.futures import ThreadPoolExecutor
 
-from .common import PipelineError, video_case_context
-from .filters import effective_prefix, question_gate, scope_id
+from .common import PipelineError
+from .evaluation import selected_targets
+from .filters import question_gate, scope_id
 from .integrity import digest
 from .media_cache import MediaCache
 from .paths import grouped_dir, iter_case_paths
@@ -18,7 +19,6 @@ from .qa import LOCAL_QA_CONFIGS, MissingFinalAnswerError, preflight_qa_backend,
 from .qa_diagnostics import QADiagnostics
 from .result_rules import expand_thinking_efforts
 from .runtime import Runtime, case_lock, path_key
-from .selection import eligible_videos, selected_questions
 from .settings import AUTHOR_JUDGE_MODEL, GEMINI_QA_MODEL
 from .storage import atomic_write_json, load_case
 from .task_execution import TaskExecutor
@@ -42,7 +42,6 @@ class Engine:
         self.cached = set()
         self.cache_records = {'qa': set(), 'judge': set()}
         self.produced_runs = {'qa': set(), 'judge': set()}
-        self.waiting_keys = set()
         self.case_plans = {}
         self.dirty = set(self.cases)
         self.main_reservations = set()
@@ -53,7 +52,6 @@ class Engine:
                                    self.forced, self.note_cache, self._error)
         self.execution = TaskExecutor(args, self.planner, diagnostics)
         self.media_cache = MediaCache(args.qa_model, self.planner.tasks)
-        self.started = time.monotonic()
         self.interrupted = False
         self.resources = self._resources()
         self.runtime.configure(self.resources)
@@ -200,9 +198,7 @@ class Engine:
         self.filter_only, self.main_only = filter_only, main_only
         self.dirty.update(self.cases)
         inflight = {}
-        last_log = time.monotonic()
         last_refresh = 0
-        interrupted = False
         with ThreadPoolExecutor(max_workers=self.args.qa_concurrency) as qa_pool, \
              ThreadPoolExecutor(max_workers=self.args.judge_concurrency) as judge_pool, \
              ThreadPoolExecutor(max_workers=2) as media_pool:
@@ -252,7 +248,6 @@ class Engine:
                         self.versions = versions
                         last_refresh = now
                     pending = self.plan()
-                    self.waiting_keys.intersection_update(pending)
                     if pending:
                         self.execution.judge_key = require_openrouter_api_key()
                     active_keys = {t.key for t, _ in inflight.values()}
@@ -288,11 +283,9 @@ class Engine:
                                     self.fail(task, exc, write=True)
                                     continue
                                 if state == 'waiting':
-                                    self.waiting_keys.add(task.key)
                                     task.prepared = None
                                     self.media_cache.trim()
                                     continue
-                                self.waiting_keys.discard(task.key)
                                 if state in ('cached', 'failed'):
                                     task.prepared = None
                                     self.media_cache.trim()
@@ -303,7 +296,6 @@ class Engine:
                                                               lane=kind, fairness_key=self.admission_roots[kind])
                                 if permit is None:
                                     break
-                                task.attempts += 1
                                 self.attempts[kind] += 1
                                 try:
                                     future = pools[kind].submit(self.execution.request, task, task.prepared)
@@ -322,27 +314,11 @@ class Engine:
                             except Exception as exc:
                                 self.fail(task, exc, write=isinstance(exc, OSError))
                     self.runtime.withdraw(set(self.resources) - waiting_resources)
-                    if now - last_log >= 10:
-                        retrying = sum(t.due > now for t in pending.values())
-                        elapsed = max(1, now - self.started)
-                        limits = [{'resource': r['key'].split(':')[0], 'active': r['active'],
-                                   'capacity': r['capacity'], 'rpm': r['rpm'],
-                                   'wait_seconds': round(max(0, r['next_start'] - time.time(), r['cooldown'] - time.time()), 1)}
-                                  for r in self.runtime.occupancy()]
-                        ready = sum(t.key not in active_keys and t.key not in self.waiting_keys and t.due <= now
-                                    for t in pending.values())
-                        cached_counts = {k: len(v) for k, v in self.cache_records.items()}
-                        print(f"Progress ready={ready} in_flight={len(inflight)} other_process={len(self.waiting_keys)} "
-                              f"retry={retrying} saved={dict(self.completed)} requests={dict(self.attempts)} "
-                              f"cached={cached_counts} rate={sum(self.completed.values()) / elapsed:.2f}/s "
-                              f"shared={json.dumps(limits)}", flush=True)
-                        last_log = now
                     if not pending and not inflight:
                         break
                     if not progressed:
                         time.sleep(.1)
             except KeyboardInterrupt:
-                interrupted = True
                 self.interrupted = True
                 print('Interrupted: stopping admission; saving completed in-flight responses.', file=sys.stderr)
             finally:
@@ -369,19 +345,15 @@ class Engine:
                 if path in self.failed_cases:
                     continue
                 seen = set()
-                for video in eligible_videos(case, input_mode=self.args.input,
-                        selected_video_ids=set(self.args.video_id or []),
-                        video_scope=self.args.video_scope, based=self.args.based):
-                    for q in selected_questions(video_case_context(case, video), set(self.args.question_id or [])):
-                        for effort in self.efforts:
-                            key = (scope_id(video), q['question_id'], effort)
-                            if key not in seen:
-                                seen.add(key)
-                                gate = question_gate(case, video, q, self.args.qa_model, effort,
-                                    effective_prefix(self.args.group, self.args.with_work_title_prefix))
-                                counts[gate['reason']] += 1
+                for video, question, effort in selected_targets(
+                        case, args=self.args, efforts=self.efforts, enforce_gate=False):
+                    key = (scope_id(video), question['question_id'], effort)
+                    if key not in seen:
+                        seen.add(key)
+                        gate = question_gate(case, video, question, self.args.qa_model, effort)
+                        counts[gate['reason']] += 1
             print('Question filter gates: ' + json.dumps(dict(counts), sort_keys=True))
-        return 1 if interrupted or self.failed else 0
+        return 1 if self.interrupted or self.failed else 0
 
 
 def command_qa_judge(args):
@@ -442,8 +414,6 @@ def command_qa_judge(args):
             snapshot = runtime.snapshot(paths)
             done, total, judged, judge_total = completion_counts(args, efforts, snapshot=snapshot)
             incomplete = done != total or judged != judge_total
-            if args.input == 'video':
-                done, total, judged, judge_total = completion_counts(args, efforts, include_control=False, snapshot=snapshot)
             print(f'QA: {done}/{total}\nJudge: {judged}/{judge_total}')
             print(f'This run: requests={dict(engine.attempts)}, saved={dict(engine.completed)}, '
                   f'cached={ {k: len(v) for k, v in engine.cache_records.items()} }, '

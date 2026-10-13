@@ -145,6 +145,7 @@ def validate_questions(
                 if result.get("question_id") != question["question_id"]:
                     raise PipelineError(f"{result_prefix} must reference its owning question.")
                 stage = filter_field(result, "stage")
+                # Retain retired stages only for loading historical filter/baseline records.
                 expected_mode = {"question_only": "question_only", "control_video": "video"}.get(stage)
                 if expected_mode is None or qa_result_input_mode(result) != expected_mode:
                     raise PipelineError(f"{result_prefix} has an invalid filter stage/input.")
@@ -470,13 +471,20 @@ def validate_case(case: Any) -> None:
 
     videos = case.get("videos")
     # Authoring limits apply to one model response, not accumulated reviewed variants.
-    if not isinstance(videos, list) or len(videos) < 2:
-        raise PipelineError("videos must contain at least 2 entries.")
+    curation = case.get("quality_curation")
+    if curation is not None and (
+        not isinstance(curation, dict)
+        or curation.get("reason") != "manual_quality_pruned"
+        or not isinstance(curation.get("backup"), str) or not curation["backup"]
+    ):
+        raise PipelineError("quality_curation must identify the manual curation backup.")
+    if not isinstance(videos, list) or not videos:
+        raise PipelineError("videos must contain at least one entry.")
     roles = Counter(video.get("role") for video in videos if isinstance(video, dict))
-    if roles["control"] != 1:
-        raise PipelineError("Each case must contain exactly one control video.")
-    if roles["conflict"] < 1:
-        raise PipelineError("Each case must contain at least one conflict video.")
+    if roles["control"] > 1:
+        raise PipelineError("Each case may contain at most one control video.")
+    if not curation and roles["conflict"] < 1:
+        raise PipelineError("Each original case must contain at least one conflict video.")
     if set(roles) - VIDEO_ROLES:
         raise PipelineError("Video role must be conflict or control.")
 
@@ -595,6 +603,8 @@ def validate_case(case: Any) -> None:
             )
         if len(local_parts) in (5, 6):
             validate_group(local_parts[2])
+        if len(local_parts) == 6 and local_parts[2] == "mathematics_algorithm_conflicts":
+            raise PipelineError(f"{prefix}.local_path must use the flat group/case layout; Math review buckets were retired.")
         if len(local_parts) == 6 and local_parts[3] not in {
             "qualified",
             "unqualified",
@@ -617,6 +627,15 @@ def validate_case(case: Any) -> None:
                     raise PipelineError(f"{prefix}.variant_context.{field} must be English.")
             if normalize_text(facts["normal_fact_en"]) == normalize_text(facts["intended_video_fact_en"]):
                 raise PipelineError(f"{prefix}.variant_context facts must differ.")
+        if "question_ids" in video:
+            retained = video["question_ids"]
+            available = set(video_questions)
+            if (not curation or not isinstance(retained, list)
+                or any(not isinstance(qid, str) for qid in retained)
+                or len(set(retained)) != len(retained)
+                or not set(retained) <= available):
+                raise PipelineError(f"{prefix}.question_ids must be unique retained question IDs.")
+            video_questions = {qid: q for qid, q in video_questions.items() if qid in retained}
         qa_results = video.get("qa_results")
         if not isinstance(qa_results, list):
             raise PipelineError(f"{prefix}.qa_results must be an array.")

@@ -5,426 +5,205 @@ import argparse
 from pathlib import Path
 from typing import Any
 
-from .common import PipelineError, require_question_only_compatible, video_case_context
-from .filters import effective_prefix, qa_allowed
-from .integrity import judgment_is_current, qa_is_current, require_writable_case
+from .common import PipelineError, conflict_question_scopes, question_only_records, video_case_context
+from .filters import qa_allowed, question_filter_state
+from .integrity import judgment_is_current, qa_is_current, require_writable_case, video_selected
 from .paths import grouped_dir, iter_case_paths
 from .result_rules import (
-    qa_result_based,
-    qa_result_input_mode,
-    qa_result_key,
-    qa_result_thinking_effort,
+    FILTER_RESULT_FIELDS,
+    qa_result_matches,
     qa_result_work_title_prefix,
-    qa_run_key,
     work_title_prefix_condition,
 )
-from .selection import eligible_videos, selected_questions, target_video_selected
+from .selection import eligible_videos, selected_questions
 from .storage import atomic_write_json, load_case
 
 
-def _result_base_selected(
-    video: dict[str, Any],
-    result: dict[str, Any],
-    *,
-    args: argparse.Namespace,
-    efforts: set[str | None],
-) -> bool:
-    return not (
-        not target_video_selected(video, args.input, getattr(args, "video_scope", None),
-                                  based=bool(getattr(args, "based", False)))
-        or (args.video_id and video["video_id"] not in set(args.video_id))
-        or (args.question_id and result["question_id"] not in set(args.question_id))
-        or result.get("model") != args.qa_model
-        or qa_result_input_mode(result) != args.input
-        or qa_result_thinking_effort(result) not in efforts
-    )
+def selected_targets(case, *, args, efforts, enforce_gate=True):
+    """Use the same role, effective questions and gate for every execution phase."""
+    question_ids = set(args.question_id or [])
+    if args.input == "question_only":
+        targets = list(conflict_question_scopes(case))
+        selected_questions({**case, 'questions': [q for _, q in targets]}, question_ids)
+        for video, question in targets:
+            if question_ids and question['question_id'] not in question_ids:
+                continue
+            for effort in efforts:
+                yield video, question, effort
+        return
+    for video in eligible_videos(case, input_mode=args.input,
+                                 selected_video_ids=set(args.video_id or [])):
+        for question in selected_questions(video_case_context(case, video), question_ids):
+            for effort in efforts:
+                if not enforce_gate or qa_allowed(case, video, question, args.qa_model, effort):
+                    yield video, question, effort
 
 
-def result_selected(
-    video: dict[str, Any],
-    result: dict[str, Any],
-    *,
-    args: argparse.Namespace,
-    efforts: set[str | None],
-) -> bool:
-    if not _result_base_selected(video, result, args=args, efforts=efforts):
-        return False
-    if qa_result_based(result) is not bool(getattr(args, "based", False)):
-        return False
-    prefix_condition = work_title_prefix_condition(
-        args.group,
-        args.input,
-        args.with_work_title_prefix,
-    )
+def _result_base_selected(video, result, *, args, efforts):
     return (
-        prefix_condition is None
-        or qa_result_work_title_prefix(result) is prefix_condition
+        video_selected(video, args.input)
+        and (not args.video_id or video["video_id"] in args.video_id)
+        and (not args.question_id or result.get("question_id") in args.question_id)
+        and qa_result_matches(result, input_selection=args.input, model=args.qa_model,
+                              efforts=efforts, based=args.based)
     )
 
 
-def _legacy_video_result_selected(
-    video: dict[str, Any],
-    result: dict[str, Any],
-    *,
-    args: argparse.Namespace,
-    efforts: set[str | None],
-) -> bool:
-    prefix_condition = work_title_prefix_condition(
-        args.group,
-        args.input,
-        args.with_work_title_prefix,
-    )
+def result_selected(video, result, *, args, efforts):
+    prefix = work_title_prefix_condition(args.group, args.input, args.with_work_title_prefix)
+    return (_result_base_selected(video, result, args=args, efforts=efforts)
+            and (prefix is None or qa_result_work_title_prefix(result) is prefix))
+
+
+def _legacy_video_result_selected(video, result, *, args, efforts):
     return (
-        prefix_condition is not None
+        work_title_prefix_condition(args.group, args.input, args.with_work_title_prefix) is not None
         and _result_base_selected(video, result, args=args, efforts=efforts)
-        and qa_result_based(result) is bool(getattr(args, "based", False))
         and qa_result_work_title_prefix(result) is None
     )
 
 
-def question_result_selected(
-    question: dict[str, Any],
-    result: dict[str, Any],
-    *,
-    args: argparse.Namespace,
-    efforts: set[str | None],
-) -> bool:
-    return not (
-        (args.question_id and question["question_id"] not in set(args.question_id))
-        or result.get("question_id") != question["question_id"]
-        or result.get("model") != args.qa_model
-        or qa_result_input_mode(result) != "question_only"
-        or qa_result_thinking_effort(result) not in efforts
-    )
+def _question_result_selected(question, result, *, args, efforts):
+    return (result.get("question_id") == question["question_id"]
+            and qa_result_matches(result, input_selection="question_only",
+                                  model=args.qa_model, efforts=efforts))
+
+
+def target_results(case, video, question, effort, *, args):
+    """Current records for one target; question-only has one authoritative result."""
+    if args.input == 'question_only':
+        state = question_filter_state(case, video, question, args.qa_model, effort)
+        return [state['result']] if state['status'] in ('unjudged', 'passed', 'failed') else []
+    return [result for result in video['qa_results']
+            if result.get('question_id') == question['question_id']
+            and result_selected(video, result, args=args, efforts={effort})
+            and qa_is_current(case, video, result)]
 
 
 def preflight_cases(
     args: argparse.Namespace,
     efforts: tuple[str | None, ...],
-    *, enforce_gate: bool = True, include_control: bool = True,
+    *, enforce_gate: bool = True,
     snapshot: list[tuple[Path, dict[str, Any]]] | None = None,
 ) -> tuple[list[tuple[Path, dict[str, Any]]], int]:
     dataset_dir = grouped_dir(args.dataset_dir, args.group)
-    selected_question_ids = set(args.question_id or [])
-    selected_videos = set(args.video_id or [])
-    loaded: list[tuple[Path, dict[str, Any]]] = []
+    loaded = []
     target_total = 0
     source = snapshot if snapshot is not None else (
         (path, load_case(path)) for path in iter_case_paths(dataset_dir, args.case_id))
     for path, case in source:
         require_writable_case(case, path)
-        if args.input == "question_only":
-            questions = selected_questions(
-                {**case, "questions": require_question_only_compatible(case)},
-                selected_question_ids,
-            )
-            target_total += len(questions) * len(efforts)
-            loaded.append((path, case))
-            continue
-        videos = eligible_videos(
-            case,
-            input_mode=args.input,
-            selected_video_ids=selected_videos,
-            video_scope=getattr(args, "video_scope", None),
-            based=bool(getattr(args, "based", False)),
-        )
-        for video in videos:
-            if not include_control and video["role"] == "control":
-                continue
-            questions = selected_questions(video_case_context(case, video), selected_question_ids)
-            target_total += sum(
-                not enforce_gate or qa_allowed(case, video, question, args.qa_model, effort,
-                    effective_prefix(args.group, args.with_work_title_prefix), args.input)
-                for question in questions for effort in efforts)
+        target_total += sum(1 for _ in selected_targets(case, args=args, efforts=efforts,
+                                                       enforce_gate=enforce_gate))
         loaded.append((path, case))
     return loaded, target_total
 
 
-def _gate_result(case, video, result, args):
-    if not target_video_selected(video, args.input, getattr(args, "video_scope", None),
-                                 based=bool(getattr(args, "based", False))):
-        return False
-    question = next((q for q in video_case_context(case, video)['questions']
-                     if q['question_id'] == result.get('question_id')), None)
-    return question is not None and qa_allowed(
-        case, video, question, args.qa_model, qa_result_thinking_effort(result),
-        effective_prefix(args.group, args.with_work_title_prefix), args.input)
+def _selected_video_results(case, *, args, efforts):
+    for video, question, effort in selected_targets(case, args=args, efforts=efforts):
+        for result in video['qa_results']:
+            if result.get('question_id') == question['question_id']:
+                yield video, result, effort
 
 
-def require_selected_final_answers(
-    loaded: list[tuple[Path, dict[str, Any]]],
-    *,
-    args: argparse.Namespace,
-    efforts: set[str | None],
-) -> None:
+def require_selected_final_answers(loaded, *, args, efforts):
     for path, case in loaded:
-        if args.input == "question_only":
-            for question in require_question_only_compatible(case):
-                for result in question.get("question_only_results", []):
-                    if not question_result_selected(
-                        question, result, args=args, efforts=efforts
-                    ):
-                        continue
-                    final_answer = result.get("final_answer")
-                    if isinstance(final_answer, str) and final_answer.strip():
-                        continue
-                    raise PipelineError(
-                        f"Selected QA result {case['case_id']}/"
-                        f"{question['question_id']} in {path} has no final_answer. "
-                        "Run qa-judge with --force-qa to replace old-format QA "
-                        "results."
-                    )
-            continue
-        for video in case["videos"]:
-            for result in video["qa_results"]:
-                if not _gate_result(case, video, result, args):
+        for video, question, effort in selected_targets(case, args=args, efforts=efforts):
+            results = (question_only_records(question) if args.input == 'question_only'
+                       else target_results(case, video, question, effort, args=args))
+            for result in results:
+                if args.input == 'question_only' and not _question_result_selected(
+                        question, result, args=args, efforts={effort}):
                     continue
-                if not qa_is_current(case, video, result):
-                    continue
-                if not result_selected(
-                    video, result, args=args, efforts=efforts
-                ):
-                    continue
-                final_answer = result.get("final_answer")
+                final_answer = result.get('final_answer')
                 if isinstance(final_answer, str) and final_answer.strip():
                     continue
+                owner = video['video_id'] if video is not None else 'case'
                 raise PipelineError(
-                    f"Selected QA result {case['case_id']}/{video['video_id']}/"
-                    f"{result['question_id']} in {path} has no final_answer. "
-                    "Run qa-judge with --force-qa to replace old-format QA results."
+                    f"Selected QA result {case['case_id']}/{owner}/{question['question_id']} "
+                    f"in {path} has no final_answer. Run qa-judge with --force-qa "
+                    "to replace old-format QA results."
                 )
 
 
-def require_selected_prefix_metadata(
-    loaded: list[tuple[Path, dict[str, Any]]],
-    *,
-    args: argparse.Namespace,
-    efforts: set[str | None],
-) -> None:
-    if work_title_prefix_condition(
-        args.group,
-        args.input,
-        args.with_work_title_prefix,
-    ) is None:
+def require_selected_prefix_metadata(loaded, *, args, efforts):
+    if work_title_prefix_condition(args.group, args.input, args.with_work_title_prefix) is None:
         return
     for path, case in loaded:
-        for video in case["videos"]:
-            for result in video["qa_results"]:
-                if not _gate_result(case, video, result, args):
-                    continue
-                if not _legacy_video_result_selected(
-                    video, result, args=args, efforts=efforts
-                ):
-                    continue
+        for video, result, effort in _selected_video_results(case, args=args, efforts=efforts):
+            if _legacy_video_result_selected(video, result, args=args, efforts={effort}):
                 raise PipelineError(
                     f"Selected QA result {case['case_id']}/{video['video_id']}/"
-                    f"{result['question_id']} in {path} has no "
-                    "work_title_prefix. Backfill it with true or false, or run "
-                    "qa-judge with --force-qa to replace the unclassified result."
+                    f"{result['question_id']} in {path} has no work_title_prefix. "
+                    "Backfill it with true or false, or run qa-judge with --force-qa "
+                    "to replace the unclassified result."
                 )
 
 
-def preclear_force(
-    loaded: list[tuple[Path, dict[str, Any]]],
-    *,
-    args: argparse.Namespace,
-    efforts: set[str | None],
-) -> None:
+def preclear_force(loaded, *, args, efforts):
     qa_cleared = 0
     judgments_cleared = 0
-    changed: list[tuple[Path, dict[str, Any]]] = []
-
+    changed = []
     for path, case in loaded:
         case_changed = False
-        if args.input == "question_only":
-            for question in require_question_only_compatible(case):
-                results = question.get("question_only_results", [])
-                if args.force_qa:
-                    kept = []
-                    for result in results:
-                        if question_result_selected(
-                            question, result, args=args, efforts=efforts
-                        ):
-                            qa_cleared += 1
-                            case_changed = True
-                        else:
-                            kept.append(result)
-                    if kept:
-                        question["question_only_results"] = kept
-                    else:
-                        question.pop("question_only_results", None)
-                elif args.force_judge:
-                    for result in results:
-                        if not question_result_selected(
-                            question, result, args=args, efforts=efforts
-                        ) or result.get("judgment") is None:
-                            continue
-                        result["judgment"] = None
-                        judgments_cleared += 1
-                        case_changed = True
-            if case_changed:
-                changed.append((path, case))
-            continue
-        for video in case["videos"]:
-            if args.input == "video" and video["role"] == "control":
-                # Filters are forced only by --filter-only; do not invalidate
-                # the admission decision between filter checks and conflict QA.
-                continue
-            if args.force_qa:
-                kept: list[dict[str, Any]] = []
-                for result in video["qa_results"]:
-                    if not _gate_result(case, video, result, args):
-                        kept.append(result)
-                        continue
-                    if result_selected(
-                        video, result, args=args, efforts=efforts
-                    ) or _legacy_video_result_selected(
-                        video, result, args=args, efforts=efforts
-                    ):
+        for video, question, effort in selected_targets(case, args=args, efforts=efforts):
+            fields = ('question_only_results', *FILTER_RESULT_FIELDS) if args.input == 'question_only' else ('qa_results',)
+            owner = question if args.input == 'question_only' else video
+            for field in fields:
+                results = owner.get(field, [])
+                kept = []
+                for result in results:
+                    selected = (_question_result_selected(question, result, args=args, efforts={effort})
+                                if args.input == 'question_only' else (
+                                    result.get('question_id') == question['question_id']
+                                    and (result_selected(video, result, args=args, efforts={effort})
+                                         or (args.force_qa and _legacy_video_result_selected(
+                                             video, result, args=args, efforts={effort})))))
+                    if selected and args.force_qa:
                         qa_cleared += 1
                         case_changed = True
-                    else:
-                        kept.append(result)
-                video["qa_results"] = kept
-            elif args.force_judge:
-                for result in video["qa_results"]:
-                    if not _gate_result(case, video, result, args):
                         continue
-                    if not result_selected(
-                        video, result, args=args, efforts=efforts
-                    ) or result.get("judgment") is None:
-                        continue
-                    result["judgment"] = None
-                    judgments_cleared += 1
-                    case_changed = True
+                    if selected and args.force_judge and result.get('judgment') is not None:
+                        result['judgment'] = None
+                        judgments_cleared += 1
+                        case_changed = True
+                    kept.append(result)
+                if kept or video is not None:
+                    owner[field] = kept
+                else:
+                    owner.pop(field, None)
         if case_changed:
             changed.append((path, case))
 
-    # This is deliberately a separate global phase. No provider call can occur
-    # until every selected case has been validated and every planned clear has
-    # been persisted.
+    # Validate every target before this global write phase; no provider calls
+    # can occur until every planned clear has been persisted.
     for path, case in changed:
         atomic_write_json(path, case)
-
     if args.force_qa:
         print(f"Cleared {qa_cleared} QA result(s) before forced QA.")
     elif args.force_judge:
-        print(
-            f"Cleared {judgments_cleared} judgment(s) before forced judging."
-        )
+        print(f"Cleared {judgments_cleared} judgment(s) before forced judging.")
 
 
-def completion_counts(
-    args: argparse.Namespace,
-    efforts: tuple[str | None, ...],
-    *, include_control: bool = True,
-    snapshot: list[tuple[Path, dict[str, Any]]] | None = None,
-) -> tuple[int, int, int, int]:
-    loaded, qa_total = preflight_cases(args, efforts, include_control=include_control, snapshot=snapshot)
-    qa_completed = qa_completed_from_loaded(
-        loaded, args=args, efforts=efforts, include_control=include_control,
-    )
-    effort_set = set(efforts)
-    judge_total = 0
-    judge_completed = 0
-
+def _completion_from_loaded(loaded, *, args, efforts):
+    qa_completed = qa_total = judge_completed = judge_total = 0
     for _, case in loaded:
-        if args.input == "question_only":
-            for question in require_question_only_compatible(case):
-                for result in question.get("question_only_results", []):
-                    if not question_result_selected(
-                        question, result, args=args, efforts=effort_set
-                    ):
-                        continue
-                    judge_total += 1
-                    judge_completed += isinstance(result.get("judgment"), dict)
-            continue
-        for video in case["videos"]:
-            if not include_control and video["role"] == "control":
-                continue
-            for result in video["qa_results"]:
-                if not _gate_result(case, video, result, args):
-                    continue
-                if not result_selected(
-                    video, result, args=args, efforts=effort_set
-                ):
-                    continue
-                if not qa_is_current(case, video, result):
-                    continue
-                judge_total += 1
-                judge_completed += judgment_is_current(case, video, result)
+        for video, question, effort in selected_targets(case, args=args, efforts=efforts):
+            qa_total += 1
+            results = target_results(case, video, question, effort, args=args)
+            qa_completed += bool(results)
+            judge_total += len(results)
+            judge_completed += sum(
+                question_filter_state(case, video, question, args.qa_model, effort)['status'] in ('passed', 'failed')
+                if args.input == 'question_only' else judgment_is_current(case, video, result)
+                for result in results)
     return qa_completed, qa_total, judge_completed, judge_total
 
 
-def qa_completed_from_loaded(
-    loaded: list[tuple[Path, dict[str, Any]]],
-    *,
-    args: argparse.Namespace,
-    efforts: tuple[str | None, ...],
-    include_control: bool = True,
-) -> int:
-    selected_question_ids = set(args.question_id or [])
-    selected_videos = set(args.video_id or [])
-    prefix_condition = work_title_prefix_condition(
-        args.group,
-        args.input,
-        args.with_work_title_prefix,
-    )
-    completed = 0
-    for _, case in loaded:
-        if args.input == "question_only":
-            questions = selected_questions(
-                {**case, "questions": require_question_only_compatible(case)},
-                selected_question_ids,
-            )
-            for question in questions:
-                existing = {
-                    qa_result_key(result)
-                    for result in question.get("question_only_results", [])
-                }
-                completed += sum(
-                    qa_run_key(
-                        "question_only",
-                        question["question_id"],
-                        args.qa_model,
-                        effort,
-                    )
-                    in existing
-                    for effort in efforts
-                )
-            continue
-        videos = eligible_videos(
-            case,
-            input_mode=args.input,
-            selected_video_ids=selected_videos,
-            video_scope=getattr(args, "video_scope", None),
-            based=bool(getattr(args, "based", False)),
-        )
-        for video in videos:
-            if not include_control and video["role"] == "control":
-                continue
-            questions = selected_questions(video_case_context(case, video), selected_question_ids)
-            existing = {
-                qa_result_key(
-                    result,
-                    include_work_title_prefix=prefix_condition is not None,
-                )
-                for result in video["qa_results"]
-                if qa_is_current(case, video, result)
-            }
-            completed += sum(
-                qa_run_key(
-                    args.input,
-                    question["question_id"],
-                    args.qa_model,
-                    effort,
-                    based=bool(getattr(args, "based", False)),
-                    work_title_prefix=prefix_condition,
-                )
-                in existing
-                for effort in efforts
-                for question in questions
-                if qa_allowed(case, video, question, args.qa_model, effort,
-                              effective_prefix(args.group, args.with_work_title_prefix), args.input)
-            )
-    return completed
+def completion_counts(args, efforts, *, snapshot=None):
+    loaded, _ = preflight_cases(args, efforts, snapshot=snapshot)
+    return _completion_from_loaded(loaded, args=args, efforts=efforts)
+
+
+def qa_completed_from_loaded(loaded, *, args, efforts):
+    return _completion_from_loaded(loaded, args=args, efforts=efforts)[0]
