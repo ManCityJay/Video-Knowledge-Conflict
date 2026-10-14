@@ -23,7 +23,7 @@ Luna Pro 负责 authoring、问题生成与校验、生成式文字 context 和 
 | video | conflict 视频及其有效问题 | conflict |
 | control | control 视频及其有效问题 | control |
 | description | conflict 视频对应的中性事实文本和问题 | conflict |
-| question_only | 共享原始问题，无额外证据 | control |
+| question_only | conflict 视频的有效原始问题，无额外证据 | control |
 
 Description 不生成 control 文本。存在实际视频审核观察时，context 使用审核后的
 事实段落；否则由 Seedance prompt 生成中性文本。Fairy context 自然地以作品名
@@ -35,26 +35,28 @@ Description 不生成 control 文本。存在实际视频审核观察时，conte
 依据输入回答指令；关闭时保持原有 prompt 和指纹。Control 复用视频请求流程，
 QA 仍保存为 `input_mode: video`，通过所属视频的 role 区分，历史 control 结果可续用。
 
-独立 question-only 实验只遍历 case 顶层共享问题，不依赖视频文件或审核。存在
-私有 `variant_context.questions` 不阻止共享问题执行；私有问题仅在选择对应视频的
-video/control/description 实验时参与下述 question-only filter。
+四种输入独立执行 QA → Judge。Video、control 和 description 不自动运行
+question-only，也不要求其判定通过。独立 question-only 遍历 conflict 视频的
+有效问题：共享问题按 case scope 去重，私有 `variant_context.questions` 按 video ID
+隔离，均遵循视频的 `question_ids` 关联；不依赖视频文件、ready 状态或审核。
 
-## 筛选流程
+## 可选报告筛选
 
-Video、control 和 description 默认逐题进行 question-only filter：
-
-1. 同一问题、QA 模型和 thinking effort 的 question-only QA，由 Judge 判定。
-2. 该题为 `context_grounded`，才执行该视频或 description 的目标 QA。
+Video、control 和 description 默认执行、汇总全部有效目标。仅在汇总时显式选择
+`summarize --filter passed`，才逐题保留同一问题、QA 模型和 thinking effort 的
+有效 question-only 判定为 `context_grounded` 的目标回答。汇总只读取已有结果，
+不补跑 QA 或 Judge；`--input question_only` 不能组合 `--filter passed`。
 
 筛选单位包含 case、question scope、question ID、模型和 effort。共享题目 scope 为
 `case`，私有 `variant_context.questions` 的 scope 为所属 video ID，ID 相同也不能跨
 scope 复用。一题未通过不会排除同 case 或同视频的其他题目。
 
-Filter 只发送原始问题，不加 based 指令或作品名前缀；gate 身份和来源指纹均不
+Question-only 只发送原始问题，不加 based 指令或作品名前缀；筛选身份和来源指纹均不
 包含这两种目标条件。三种目标输入可复用同 scope、同问题、同模型和 effort 的
-有效 filter 回答。每个视频只筛选自己的有效问题；`question_ids` 可保留部分题目，
-`variant_context.matched_control_path` 不参与 gate。缺少结果、过期或未判分都不能
-视为通过；已判错的回答不会在普通续跑中自动反复重试到答对。
+有效 question-only 回答。每个视频只筛选自己的有效问题；`question_ids` 可保留部分
+题目，`variant_context.matched_control_path` 不参与筛选。缺少结果、过期、未判分或
+判错只影响筛选报告，不影响目标执行、预检、force 清理或完成计数；已判错的
+question-only 回答不会在普通续跑中自动反复重试到答对。
 
 Video 报告只统计 conflict，control 报告只统计 control，未选角色的 JSON 计数为零。
 全量报告统计所选角色的全部有效判定，不受当前 gate 是否通过影响；筛选报告先按题
@@ -73,7 +75,7 @@ Judge 只读取从正文提取的 `final_answer`，不从解释或 reasoning 中
 可选 `final_answer_retry_count: 1`；第二次仍格式失败则终止该任务，不保存成功 QA，
 不释放下游。输出截断直接拒绝，不进入格式重试；其他成功回答继续判分。
 
-此规则统一用于全部 QA 模型、输入和 effort，包括主实验及 question-only filter。判分错误
+此规则统一用于全部 QA 模型、输入和 effort，包括独立 question-only 实验。判分错误
 不触发 QA 重试，已有有效历史结果不自动重跑。每次格式重试重新申请共享并发和
 RPM 额度，沿用同一任务认领；格式重试与网络重试分别计数，网络错误仍遵循
 `--max-retries`，格式重试不会重置或占用其额度。
@@ -121,9 +123,9 @@ trapped_video_rate  = conflict trapped videos  / all conflict videos
 | variant_context | 私有 facts/questions、可选标题、`matched_control_path` |
 | 审核证据 | `video_observation`、`question_audit`、审核/资格状态和来源指纹 |
 
-Description 仅属于 conflict 视频。Question-only 结果属于共享 question，不依附
-视频，也不含 context 文本、作品名前缀或 based。共享 filter 直接使用 question-only
-的权威回答；私有 filter 保存在私有题目的 `filter_results`。
+Description 仅属于 conflict 视频。Question-only 结果不含 context 文本、作品名前缀
+或 based。共享结果属于 case 顶层 question，保存在 `question_only_results`；私有
+结果保存在对应视频私有题目的 `filter_results`。报告筛选直接读取这些权威回答。
 
 Video/control/description 结果记录布尔 `based`。仅 Fairy video/control 额外记录布尔
 `work_title_prefix`；description 不得保存此字段，其他组的视频忽略历史 prefix 值。
@@ -227,7 +229,7 @@ Qwen27B 视频请求参数：
 Qwen27B 的 thinking 开关与 parser 参考 [vLLM 官方配方](https://recipes.vllm.ai/Qwen/Qwen3.8-27B)，
 视频加载/采样行为参考 [vLLM 视频加载器](https://github.com/vllm-project/vllm/blob/main/vllm/multimodal/video.py)。
 
-文字请求不包含视频或视频采样参数。主实验和 question-only filter 使用相同 QA 模型配置，
+文字请求不包含视频或视频采样参数。目标实验和独立 question-only 使用相同 QA 模型配置，
 本地模型不占 OpenRouter QA RPM，Judge 仍通过 OpenRouter。采样与生成参数属于
 实验协议；部署和覆盖方法见 [pipeline.md](pipeline.md#模型服务与-qajudge)。
 
@@ -242,7 +244,7 @@ Qwen27B 的 thinking 开关与 parser 参考 [vLLM 官方配方](https://recipes
 | `core.py` | 供已有独立脚本使用的显式兼容导出 |
 | `authoring_definitions.py` / `authoring.py` | Prompt/schema 定义、生成校验修复与保存 |
 | `generation.py` / `descriptions.py` / `deletion.py` | 视频、文本 context 和数据删除操作 |
-| `result_rules.py` / `selection.py` / `filters.py` | 输入介质与角色、统一结果条件、有效视频/问题选择、逐题 question-only 筛选 |
+| `result_rules.py` / `selection.py` / `filters.py` | 输入介质与角色、统一结果条件、有效视频/问题选择、question-only 来源及可选报告筛选 |
 | `qa.py` / `qa_diagnostics.py` | 单次模型请求、回答解析、本次运行诊断 |
 | `task_planning.py` / `task_execution.py` / `media_cache.py` | 任务身份与依赖规划、请求执行与结果合并、媒体准备与缓存 |
 | `scheduler.py` / `runtime.py` | 调度、认领、额度准入、退避和进度；同机进程协调与锁 |
@@ -251,7 +253,9 @@ Qwen27B 的 thinking 开关与 parser 参考 [vLLM 官方配方](https://recipes
 | `transport.py` | HTTP、凭据保护及其他阶段使用的限流重试 |
 
 QA 单请求失败直接向调度器抛出异常，由调度器统一决定重试、限流和失败处理。
-每条 QA 保存后即可判分，每题 question-only filter 通过后释放该题目标 QA。
+每条 QA 保存后即可判分，所选四种输入之间没有执行依赖。
+`--force-qa` / `--force-judge` 直接清理所选输入、模型、effort 和 based/prefix 条件的
+回答或判定，再执行该输入；不先运行 question-only，不清理其他输入条件。
 完整协调实现约定仅在
 [concurrency.md](concurrency.md) 维护。独立对比解码实验见
 [scripts/mcd_v1/README.md](scripts/mcd_v1/README.md)。

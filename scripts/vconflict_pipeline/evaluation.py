@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from .common import PipelineError, conflict_question_scopes, question_only_records, video_case_context
-from .filters import qa_allowed, question_filter_state
+from .filters import question_filter_state
 from .integrity import judgment_is_current, qa_is_current, require_writable_case, video_selected
 from .paths import grouped_dir, iter_case_paths
 from .result_rules import (
@@ -19,8 +19,8 @@ from .selection import eligible_videos, selected_questions
 from .storage import atomic_write_json, load_case
 
 
-def selected_targets(case, *, args, efforts, enforce_gate=True):
-    """Use the same role, effective questions and gate for every execution phase."""
+def selected_targets(case, *, args, efforts):
+    """Use the same role and effective questions for every execution phase."""
     question_ids = set(args.question_id or [])
     if args.input == "question_only":
         targets = list(conflict_question_scopes(case))
@@ -35,8 +35,7 @@ def selected_targets(case, *, args, efforts, enforce_gate=True):
                                  selected_video_ids=set(args.video_id or [])):
         for question in selected_questions(video_case_context(case, video), question_ids):
             for effort in efforts:
-                if not enforce_gate or qa_allowed(case, video, question, args.qa_model, effort):
-                    yield video, question, effort
+                yield video, question, effort
 
 
 def _result_base_selected(video, result, *, args, efforts):
@@ -83,7 +82,7 @@ def target_results(case, video, question, effort, *, args):
 def preflight_cases(
     args: argparse.Namespace,
     efforts: tuple[str | None, ...],
-    *, enforce_gate: bool = True,
+    *,
     snapshot: list[tuple[Path, dict[str, Any]]] | None = None,
 ) -> tuple[list[tuple[Path, dict[str, Any]]], int]:
     dataset_dir = grouped_dir(args.dataset_dir, args.group)
@@ -93,8 +92,7 @@ def preflight_cases(
         (path, load_case(path)) for path in iter_case_paths(dataset_dir, args.case_id))
     for path, case in source:
         require_writable_case(case, path)
-        target_total += sum(1 for _ in selected_targets(case, args=args, efforts=efforts,
-                                                       enforce_gate=enforce_gate))
+        target_total += sum(1 for _ in selected_targets(case, args=args, efforts=efforts))
         loaded.append((path, case))
     return loaded, target_total
 

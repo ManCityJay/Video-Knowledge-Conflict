@@ -236,8 +236,6 @@ def build_parser() -> argparse.ArgumentParser:
     force.add_argument("--force-judge", action="store_true")
     qa_judge.add_argument("--video-scope", choices=("all",),
                           help="All groups use the current dataset without review-directory buckets.")
-    qa_judge.add_argument("--filter-only", action="store_true",
-                          help="Run only the question-only filter for the selected video role.")
     qa_judge.set_defaults(func=command_qa_judge)
 
     summarize = _stage(subparsers, "summarize")
@@ -255,7 +253,7 @@ def build_parser() -> argparse.ArgumentParser:
     summarize.add_argument("--summary-workers", type=int, default=4)
     summarize.add_argument("--video-scope", choices=("all",))
     summarize.add_argument("--filter", dest="filter_mode", choices=("all", "passed"), default="all",
-                           help="Require the question-only filter to pass; write separate reports.")
+                           help="Select saved results whose question-only judgment passed; never run models.")
     summarize.set_defaults(func=command_summarize)
     audit = _stage(subparsers, "audit")
     _add_case_selection(audit)
@@ -269,10 +267,6 @@ def build_parser() -> argparse.ArgumentParser:
 def _validate(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
     if getattr(args, "based", False) and args.input == "question_only":
         parser.error("--based requires --input video, control or description")
-    if getattr(args, "filter_only", False) and getattr(args, "based", False):
-        parser.error("--filter-only cannot be combined with --based")
-    if getattr(args, "filter_only", False) and args.input not in ("video", "control"):
-        parser.error("--filter-only requires --input video or control")
     if getattr(args, "filter_mode", "all") == "passed" and args.input == "question_only":
         parser.error("--filter passed requires video, control or description input")
     if (

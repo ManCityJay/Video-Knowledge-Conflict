@@ -1,4 +1,4 @@
-"""Immutable task identities, filter dependencies and per-case task planning."""
+"""Immutable task identities and independent input-specific task planning."""
 from __future__ import annotations
 
 import copy
@@ -55,7 +55,6 @@ class Task:
     video_path: Path | None
     media_key: str | None
     context_text: str | None
-    force_slot: tuple | None
     token: str | None = None
     network_retry_count: int = 0
     final_answer_retry_count: int = 0
@@ -64,13 +63,13 @@ class Task:
 
     @property
     def diagnostic_stage(self) -> QADiagnosticStage:
-        return 'question_only filter' if self.stage == 'question_only' else 'main'
+        return 'question_only' if self.stage == 'question_only' else 'main'
 
 
 class TaskPlanner:
-    def __init__(self, args, runtime, failed, failed_cases, forced, note_cache, error):
-        self.args, self.runtime = args, runtime
-        self.failed, self.failed_cases, self.forced = failed, failed_cases, forced
+    def __init__(self, args, failed, failed_cases, note_cache, error):
+        self.args = args
+        self.failed, self.failed_cases = failed, failed_cases
         self.note_cache, self.error = note_cache, error
         self.efforts = expand_thinking_efforts(args.thinking_effort, args.qa_model)
         self.tasks = {}
@@ -107,8 +106,6 @@ class TaskPlanner:
         fp, binding = self.fingerprint(case, video, question, stage, mode, prefix, based)
         context = video_case_context(case, video) if video else case
         scope = scope_id(video)
-        slot = (path_key(path), scope, question['question_id'], effort, stage, kind)
-        forced = bool(stage and self.args.filter_only and (self.args.force_qa or self.args.force_judge))
         identity = [path_key(path), scope, mode, video['video_id'] if mode != 'question_only' else None,
                     question['question_id'], self.args.qa_model, effort, prefix, based, kind]
         # Filter metadata normalization must not change a Judge task's identity.
@@ -116,7 +113,7 @@ class TaskPlanner:
                    context['conflict_spec'], video_sha256(video) if mode == 'video' else
                    video['description']['context_en'] if mode == 'description' else None]
                   if result else binding)
-        key = digest([identity, source, self.runtime.id if forced else None])
+        key = digest([identity, source, None])
         if key in self.tasks:
             return self.tasks[key]
         video_path = resolve_video_path(video['local_path'], must_exist=True) if mode == 'video' else None
@@ -131,7 +128,6 @@ class TaskPlanner:
                      'role': 'control' if stage else video['role']},
             result=copy.deepcopy(result), video_path=video_path, media_key=media_key,
             context_text=video['description']['context_en'] if mode == 'description' else None,
-            force_slot=slot if forced else None,
         )
         self.tasks[key] = task
         return task
@@ -140,36 +136,25 @@ class TaskPlanner:
         if task.key not in self.failed and task.path not in self.failed_cases:
             pending[task.key] = task
 
-    def plan_case(self, path, case, pending, *, filter_only=False, main_only=False):
+    def plan_case(self, path, case, pending):
         args = self.args
-        if not filter_only:
-            require_selected_prefix_metadata([(path, case)], args=args, efforts=set(self.efforts))
-            require_selected_final_answers([(path, case)], args=args, efforts=set(self.efforts))
-        for video, question, effort in selected_targets(case, args=args, efforts=self.efforts,
-                                                         enforce_gate=False):
-            if not main_only or args.input == 'question_only':
+        require_selected_prefix_metadata([(path, case)], args=args, efforts=set(self.efforts))
+        require_selected_final_answers([(path, case)], args=args, efforts=set(self.efforts))
+        for video, question, effort in selected_targets(case, args=args, efforts=self.efforts):
+            if args.input == 'question_only':
                 state = question_filter_state(case, video, question, args.qa_model, effort)
-                slot = (path_key(path), scope_id(video), question['question_id'], effort, 'question_only')
-                force_qa = args.filter_only and args.force_qa and slot + ('qa',) not in self.forced
-                force_judge = args.filter_only and args.force_judge and slot + ('judge',) not in self.forced
-                if state['status'] in ('unjudged', 'passed', 'failed') and not force_qa:
+                if state['status'] in ('unjudged', 'passed', 'failed'):
                     self.note_cache(path, state['result'],
-                                    judged=state['status'] in ('passed', 'failed') and not force_judge)
+                                    judged=state['status'] in ('passed', 'failed'))
                 if state['status'] == 'unavailable':
-                    self.error(str(slot), f"Filter unavailable {case['case_id']}/{question['question_id']}: {state['reason']}")
+                    slot = (path_key(path), scope_id(video), question['question_id'], effort)
+                    self.error(str(slot), f"Question-only unavailable {case['case_id']}/{question['question_id']}: {state['reason']}")
                     continue
-                if force_qa or state['status'] in ('missing', 'stale'):
+                if state['status'] in ('missing', 'stale'):
                     self.offer(pending, self.make_task(path, case, video, question, effort, 'qa', stage='question_only'))
-                    continue
-                if force_judge or state['status'] == 'unjudged':
+                elif state['status'] == 'unjudged':
                     self.offer(pending, self.make_task(path, case, video, question, effort, 'judge',
                                                        stage='question_only', result=state['result']))
-                    continue
-                if state['status'] == 'failed':
-                    continue
-            if filter_only or args.input == 'question_only':
-                continue
-            if main_only and question_filter_state(case, video, question, args.qa_model, effort)['status'] != 'passed':
                 continue
             existing = target_results(case, video, question, effort, args=args)
             if not existing:
@@ -188,12 +173,10 @@ class TaskPlanner:
         if task.stage:
             state = question_filter_state(case, video, question, self.args.qa_model, task.effort)
             if task.kind == 'qa':
-                return (bool(task.force_slot and self.args.force_qa and task.force_slot not in self.forced)
-                        or state['status'] in ('missing', 'stale'))
+                return state['status'] in ('missing', 'stale')
             if not state['result'] or state['result']['run_id'] != task.result['run_id']:
                 return False
-            return (bool(task.force_slot and self.args.force_judge and task.force_slot not in self.forced)
-                    or state['status'] == 'unjudged')
+            return state['status'] == 'unjudged'
         records = target_results(case, video, question, task.effort, args=self.args)
         if task.kind == 'qa':
             return not records

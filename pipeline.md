@@ -66,7 +66,8 @@ python scripts/pipeline.py summarize --group classic_fairy_tale_film_conflicts \
 
 Control 视频以 `--input control` 独立执行 QA 和汇总；`--input video` 只执行
 conflict。文字实验先运行 `description`，再以 `--input description` 执行 QA 和汇总。
-其过滤与目标 QA 都只用文本，不依赖 control 视频。独立 question-only 实验有问题后即可执行，
+文字实验只用文本，不依赖 control 视频。四种输入独立执行 QA → Judge，目标实验
+不自动运行 question-only，也不要求其通过。独立 question-only 实验有有效问题后即可执行，
 不依赖视频文件、视频状态、description 或人工审核。
 
 ## 数据组、目录与范围
@@ -223,7 +224,7 @@ Qwen27B 默认 `vllm` 环境、GPU 0 单卡、BF16、65536 上下文、`MAX_NUM_
 `COSMOS_BASE_URL` / `GEMMA_BASE_URL` / `QWEN38_BASE_URL`；Qwen27B 默认
 `http://127.0.0.1:8002/v1`。预检从 `/v1/models` 获取实际模型 ID，持久化实验 ID
 始终为 `Qwen/Qwen3.8-27B`。整条 pipeline 与 vLLM 在同一服务器运行。
-Description 与 question-only 过滤都只用文本，`TEXT_ONLY=1` 同时适用于二者。
+Description 与独立 question-only 实验都只用文本，`TEXT_ONLY=1` 同时适用于二者。
 
 ```bash
 python scripts/pipeline.py qa-judge --group classic_fairy_tale_film_conflicts \
@@ -241,13 +242,14 @@ python scripts/pipeline.py qa-judge --group real_world_commonsense_conflicts \
 | `video` | conflict 视频及其有效问题 |
 | `control` | control 视频及其有效问题 |
 | `description` | conflict 文本 context 及其有效问题 |
-| `question_only` | case 顶层共享问题 |
+| `question_only` | conflict 视频的有效问题，共享题按 scope 去重，私有题按视频隔离 |
 
 视频的有效问题来自共享或私有上下文，并受可选 `question_ids` 约束。
-独立 question-only 不要求视频文件存在或 ready，也不遍历私有问题；存在私有问题的
-case 仍可执行顶层共享题目。共享结果写入 `question_only_results`，与主 QA 的共享
-question-only filter 共用来源指纹。不能组合 `--video-id`、`--with-work-title-prefix`
-或 `--based`。
+独立 question-only 遍历 conflict 视频关联的有效问题，不要求视频文件存在或 ready。
+共享题按 `(case scope, question_id)` 去重，私有题按 `(video ID, question_id)` 隔离，
+两者均遵循 `question_ids`。共享结果写入 `question_only_results`，私有结果保留在
+私有题目的 `filter_results`；存储位置、来源指纹和旧字段兼容规则不变。可用
+`--question-id` 缩小范围，不能组合 `--video-id`、`--with-work-title-prefix` 或 `--based`。
 
 Fairy video/control 可加 `--with-work-title-prefix`，作品名取标题第一个冒号前的部分。
 Video/control/description 可加 `--based`，为目标 QA 加入中性的依据输入回答指令。
@@ -263,40 +265,34 @@ python scripts/pipeline.py qa-judge --group classic_fairy_tale_film_conflicts \
   --based --with-work-title-prefix
 ```
 
-### question-only filter、续跑与 force
+### 独立输入、续跑与 force
 
-Video、control 和 description 默认逐题执行 question-only 过滤：目标视频自己的
-有效问题必须答对（Judge 判 `context_grounded`）才执行目标 QA。失败题目不阻止其他
-题目。共享问题的 gate 跨输入条件复用；私有问题按所属视频 scope 隔离。Filter 不加
-based 指令或作品名前缀，gate 身份不含这些条件；`variant_context.matched_control_path`
-不参与 gate。各组视频请求只按角色和 ready 状态选择，并检查文件和观察是否过期；
-不另加数学组的人工审核资格门槛。
+Video、control 和 description 直接执行目标 QA → Judge。Question-only 缺失、过期、
+未判分、通过或判错均不影响目标执行。各组视频请求只按角色和 ready 状态选择，
+并检查文件和观察是否过期；不另加数学组的人工审核资格门槛。
 
-只补 filter、不重跑目标 QA：
+需要 question-only 指标或筛选报告时，显式执行独立实验：
 
 ```bash
 python scripts/pipeline.py qa-judge --group classic_fairy_tale_film_conflicts \
-  --input video --qa-model qwen3.8-max --thinking-effort all --filter-only
-python scripts/pipeline.py qa-judge --group classic_fairy_tale_film_conflicts \
-  --input control --qa-model qwen3.8-max --thinking-effort all --filter-only
+  --input question_only --qa-model qwen3.8-max --thinking-effort all
+python scripts/pipeline.py summarize --group classic_fairy_tale_film_conflicts \
+  --input question_only --qa-model qwen3.8-max --thinking-effort all
 ```
 
-可保留原有 case、video、question 和 scope 选择。`--filter-only` 只跑 question-only，
-接受 video/control 输入，不能组合 `--based`；作品名前缀不会传给 filter。正常重复
-运行复用有效结果；请求中断后可用相同命令续跑，已判错的 filter 不会自动反复
-尝试到答对。
+`qa-judge --filter-only` 已删除，改用 `--input question_only`。正常重复运行复用
+所选输入的有效结果，缺少判定时只补 Judge；请求中断后可用相同命令续跑。
+已判错的 question-only 不会自动反复尝试到答对。
 
-- `--force-qa` 清理选中且通过 filter 的目标 QA/Judge，再执行。
+- `--force-qa` 清理所选输入、模型、effort 和 based/prefix 条件的 QA/Judge，再执行。
 - `--force-judge` 保留目标回答，只清理匹配 judgment 并重判。
-- 两者互斥，普通 video/control/description force 保留 question-only filter、未通过题目的
-  历史及另一 based/prefix 条件。
-- 强制重跑 filter 用 `--filter-only --force-qa`；只重判用
-  `--filter-only --force-judge`。保留历史，主实验依赖 question-only 的新判定；
-  共享题目新判定也影响复用该 gate 的其他角色和输入条件。
-- 独立 question-only force 只清理选中顶层共享问题的对应模型和 effort 结果。
+- 两者互斥，video/control/description force 不先运行或清理 question-only；
+  所有选中题目均参与清理，不受 question-only 判定影响，其他输入和 based/prefix 条件保留。
+- `--input question_only --force-qa` / `--force-judge` 只清理所选 conflict 有效共享/私有
+  题目中对应模型和 effort 的结果/判定。新判定仅影响随后显式选择的筛选报告。
 
-Force 先独占全部所选 case；冲突时报错。Video/control/description 先准备 filter，再预检和
-统一清理主实验结果，全部清理成功后才开始主实验请求。清理中断可能已有部分文件
+Force 先独占全部所选 case；冲突时报错。对所选输入预检并统一清理，
+全部清理成功后才开始 QA/Judge 请求。清理中断可能已有部分文件
 写回。完整协调和恢复说明见 [concurrency.md](concurrency.md#force)。
 
 使用 `--qa-concurrency`、`--judge-concurrency` 调整当前命令并发，
@@ -321,6 +317,45 @@ video/control QA 需按真实条件补成 true/false，或 `--force-qa` 替换�
 
 ## 汇总、输出与排错
 
+### 批量汇总已运行的实验
+
+```bash
+python scripts/run_all/run_all_summarize.py
+python scripts/run_all/run_all_summarize.py --dry-run
+```
+
+该脚本扫描三个非数学 group 中 conflict 视频已保存的目标 QA，覆盖 video、
+video + based、description、description + based；Fairy video 只选择有作品名前缀的
+记录。未产生目标 QA 的组合跳过，支持部分完成的实验。`--model all` 为默认值，
+在此汇总入口中包含 Gemini、Qwen Max、Kimi、Cosmos、Gemma、Qwen27B 全部六个
+模型。Qwen Max 和三个本地模型分别发现 none/default，Gemini 的历史 medium
+归一化为 default；每个组合仅将实际保存过 QA 的 effort 显式传给原生 summarize。
+
+支持 `--model`（含 `cosmos` / `gemma` 别名）、可重复的 `--group` / `--condition`、
+`--dataset-dir` 和 `--summary-workers`（默认 4）。相对数据路径以仓库根目录为基准。
+`--dry-run` 只展示发现的组合及命令，不写报告、不调用模型。实际汇总也只处理已有
+记录，不执行 QA/Judge 请求。使用自定义数据目录时，输出仍写入仓库的 results 目录。
+
+每个模型/组/条件调用一次原生 `summarize --filter passed`，新鲜度、有效判定、
+question-only filter 和指标计算均沿用原生逻辑。各 effort JSON 和合并 Markdown
+继续保存在 `results/<group>/<model>/`。已有目标 QA 但没有有效通过答案的实验也
+保留，计数为零、rate 为 null。
+
+批量汇总显式启用报告筛选，需要先独立运行对应模型的 `--input question_only` 才能
+得到通过样本；该脚本不会补跑。需要全量报告时使用下文原生 `summarize --filter all`。
+
+额外原子写入并替换 `results/run_all/summary.json` 和 `results/run_all/report.md`。
+前者每个实验/effort 一条记录，将本次原生 JSON 的 `answers.conflict` 原样保存为
+`conflict`，附带模型、组、输入、based、prefix、effort、filter 和原生报告路径；
+后者以表格展示 total、三类 label 数量、trapped_answer_rate 并链接原生 JSON/Markdown。
+不同实验之间不合并计数或平均比例。
+
+只读取本次成功调用明确生成的报告。单个实验失败后继续其余实验，汇总列出失败
+信息并最终非零退出，失败任务不会拿旧报告替代。未发现任何实验时生成明确的空
+结果。每次运行替换总汇总，因此指定子集时总汇总仅包含本次选择的范围。
+
+### 单个实验汇总
+
 ```bash
 python scripts/pipeline.py summarize --group classic_fairy_tale_film_conflicts \
   --input video --qa-model qwen3.8-max --thinking-effort all
@@ -336,7 +371,9 @@ python scripts/pipeline.py summarize --group classic_fairy_tale_film_conflicts \
 answer/video 指标结构，未选角色计数为零。`--filter all` 默认统计所选角色全部有效
 结果；`--filter passed` 逐题筛选 question-only 通过的结果，再重新聚合 video 标签，
 没有剩余题目的视频不计入分母，生成独立报告。Gate 标识不含作品名前缀。`--based` 和 prefix 选项应与目标实验条件相同。不同模型和
-effort 通过的题目集合可能不同。汇总只读取快照，不发模型请求；同时有 QA 运行时，
+effort 通过的题目集合可能不同。缺失、过期、未判分或判错的 question-only 均不能视为
+筛选通过；`--filter passed` 与 `--input question_only` 组合时报参数错误。
+汇总只读取快照，不发模型请求；同时有 QA 运行时，
 报告可能尚不完整。`--summary-workers` 默认 4，输出位置由程序确定。
 
 省略 effort 或使用 `all` 时，只汇总已有判定中实际存在的 effort；没有结果则生成
@@ -364,9 +401,9 @@ results/classic_fairy_tale_film_conflicts/qwen/qwen_control_based_with_prefix_fi
 实际判分答案；question-only 仅有 answer-level control 指标和逐题明细。
 
 命令结束显示 `QA: 完成/总数`、`Judge: 完成/总数`。Video/control/description 的
-终端比例仅统计所选角色中通过 filter 的有效目标，复用结果也计为完成；独立
-question-only 按顶层共享问题 × effort 统计。缺少目标角色时不发模型请求，返回零目标。
-另打印 `main`、`question_only filter` 两组输出诊断：本地模型显示
+终端比例统计所选角色的全部有效目标，复用结果也计为完成；独立 question-only 按
+去重后的 conflict 有效 question scope × 问题 × effort 统计。缺少目标角色时不发模型
+请求，返回零目标。另打印 `main`、`question_only` 两组输出诊断：本地模型显示
 `max_tokens_truncated` 和 `missing_final_answer`，云端只显示后者。只统计本次实际
 请求，缓存复用不计入。另显示安排格式重试的任务数 `final_answer_retries`、
 成功落盘数 `final_answer_retry_recovered`、最终失败数 `final_answer_retry_failed`。
@@ -379,10 +416,10 @@ question-only 按顶层共享问题 × effort 统计。缺少目标角色时不�
 | description 过期 | 完成视频观察后重跑 description，再运行 QA |
 | 本地回答达到 token 上限 | 增大对应 max-tokens 参数；替换已有 QA 时使用 `--force-qa` |
 | 空正文、只有 reasoning 或缺少有效末行答案 | 检查模型输出；最终非空行须包含大小写匹配的 `Final answer:` 和非空答案 |
-| Filter 未通过 | 查看逐题 gate 原因；需要主动重跑时使用 filter-only force |
+| 筛选报告为空或题目被排除 | 查看逐题 gate 原因，显式运行对应模型的 `--input question_only`；重跑/重判可加 force，不影响目标实验执行 |
 | 共享服务配额冲突或 force 占用冲突 | 对齐活跃命令配置，等待占用命令结束；恢复机制见 concurrency.md |
 
-全部 QA 模型、输入和 effort（含 question-only filter）正常结束但缺少有效最终答案时，
+全部 QA 模型、输入和 effort（含独立 question-only）正常结束但缺少有效最终答案时，
 调度器完整重试原请求一次，输入、提示词、生成参数完全一致，不传回首次回答或
 增加纠错提示。解析允许最后一个非空行在标记前有解释，取该行最后一次标记后的
 非空答案；标记缺失、答案为空、标记只在更早行、正常结束但正文为空均触发此规则。

@@ -75,7 +75,7 @@ def video_case_context(case: dict[str, Any], video: dict[str, Any]) -> dict[str,
 def require_question_only_compatible(
     case: dict[str, Any],
 ) -> list[dict[str, Any]]:
-    """Return effective questions needed by the conflict-video filters."""
+    """Return effective conflict questions for the standalone experiment."""
     questions = [question for _, question in conflict_question_scopes(case)]
     if not questions and not case.get('quality_curation'):
         raise PipelineError(f"Case {case['case_id']} has no conflict questions. Run questions first.")
@@ -86,7 +86,7 @@ def conflict_question_scopes(case):
     """Cover every conflict's effective questions, reusing identical shared scopes.
 
     Private variant questions remain isolated even when question IDs match.
-    Text-only filtering does not require video media or descriptions.
+    Question-only execution does not require ready media or descriptions.
     """
     seen = set()
     for video in case['videos']:

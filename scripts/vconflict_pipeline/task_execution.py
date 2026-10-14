@@ -1,7 +1,6 @@
 """Single-task QA/Judge requests and provenance-checked result merging."""
 from __future__ import annotations
 
-import argparse
 import json
 import os
 
@@ -43,10 +42,9 @@ class TaskExecutor:
         self.served = None
         self.backend_ready = False
 
-    def ensure_backend(self):
+    def ensure_backend(self, loaded):
         if not self.backend_ready:
-            preflight = argparse.Namespace(**{**vars(self.args), 'input': 'question_only'})
-            self.served = preflight_qa_backend(preflight)
+            self.served = preflight_qa_backend(self.args, loaded)
             self.api_key = self.backend.require_api_key()
             self.backend_ready = True
 

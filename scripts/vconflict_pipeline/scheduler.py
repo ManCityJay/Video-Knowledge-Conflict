@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import copy
-import json
 import random
 import sys
 import time
@@ -10,8 +9,6 @@ from collections import Counter, defaultdict, deque
 from concurrent.futures import ThreadPoolExecutor
 
 from .common import PipelineError
-from .evaluation import selected_targets
-from .filters import question_gate, scope_id
 from .integrity import digest
 from .media_cache import MediaCache
 from .paths import grouped_dir, iter_case_paths
@@ -33,9 +30,6 @@ class Engine:
         self.efforts = expand_thinking_efforts(args.thinking_effort, args.qa_model)
         self.failed = set()
         self.failed_cases = set()
-        self.forced = set()
-        self.main_only = False
-        self.filter_only = False
         self.versions = runtime.versions()
         self.completed = Counter()
         self.attempts = Counter()
@@ -46,10 +40,9 @@ class Engine:
         self.dirty = set(self.cases)
         self.main_reservations = set()
         self.last_case = {}
-        self.ticks = Counter()
         self.next_pool = 0
-        self.planner = TaskPlanner(args, runtime, self.failed, self.failed_cases,
-                                   self.forced, self.note_cache, self._error)
+        self.planner = TaskPlanner(args, self.failed, self.failed_cases,
+                                   self.note_cache, self._error)
         self.execution = TaskExecutor(args, self.planner, diagnostics)
         self.media_cache = MediaCache(args.qa_model, self.planner.tasks)
         self.interrupted = False
@@ -97,7 +90,7 @@ class Engine:
             try:
                 if path in self.dirty:
                     planned = {}
-                    self.planner.plan_case(path, case, planned, filter_only=self.filter_only, main_only=self.main_only)
+                    self.planner.plan_case(path, case, planned)
                     self.case_plans[path] = planned
                     self.dirty.discard(path)
                 pending.update({k: t for k, t in self.case_plans.get(path, {}).items() if k not in self.failed})
@@ -174,28 +167,22 @@ class Engine:
             self.fail(task, exc)
 
     def ordered(self, tasks, kind):
-        groups = {True: defaultdict(deque), False: defaultdict(deque)}
+        cases = defaultdict(deque)
         for t in tasks:
-            groups[bool(t.stage)][t.path].append(t)
+            cases[t.path].append(t)
         order = []
-        tick = self.ticks[kind]
-        while any(groups.values()):
-            filt = tick % 4 != 3
-            if not groups[filt]:
-                filt = not filt
-            cases = groups[filt]
+        last = self.last_case.get(kind)
+        while cases:
             paths = sorted(cases, key=str)
-            last = self.last_case.get((kind, filt))
             chosen = next((p for p in paths if last is None or str(p) > str(last)), paths[0])
             task = cases[chosen].popleft()
             if not cases[chosen]:
                 del cases[chosen]
             order.append(task)
-            tick += 1
+            last = chosen
         return order
 
-    def run(self, *, filter_only=False, main_only=False):
-        self.filter_only, self.main_only = filter_only, main_only
+    def run(self):
         self.dirty.update(self.cases)
         inflight = {}
         last_refresh = 0
@@ -230,8 +217,6 @@ class Engine:
                             self.produced_runs[task.kind].add((path_key(task.path),
                                 output['run_id'] if task.kind == 'qa' else task.result['run_id']))
                             self.dirty.add(task.path)
-                            if task.force_slot:
-                                self.forced.add(task.force_slot)
                             if task.kind == 'judge':
                                 self.main_reservations.discard((task.path, task.video_id, task.question_id, task.effort))
                             print(f"{task.kind.upper()} {task.path.stem}/{task.video_id or 'case'}/"
@@ -274,7 +259,7 @@ class Engine:
                                     continue
                             try:
                                 if kind == 'qa':
-                                    self.execution.ensure_backend()
+                                    self.execution.ensure_backend(list(self.cases.items()))
                                 if not self.media_cache.prepare(task, media_pool):
                                     continue
                                 try:
@@ -307,8 +292,7 @@ class Engine:
                                 inflight[future] = (task, permit)
                                 if kind == 'qa' and not task.stage:
                                     self.main_reservations.add(reservation)
-                                self.ticks[kind] += 1
-                                self.last_case[(kind, bool(task.stage))] = task.path
+                                self.last_case[kind] = task.path
                                 progressed = True
                                 break
                             except Exception as exc:
@@ -339,20 +323,6 @@ class Engine:
                         self.runtime.release(permit)
                 self.runtime.withdraw(self.resources)
                 self.media_cache.clear_preparing()
-        if self.args.input != 'question_only' and not main_only:
-            counts = Counter()
-            for path, case in self.cases.items():
-                if path in self.failed_cases:
-                    continue
-                seen = set()
-                for video, question, effort in selected_targets(
-                        case, args=self.args, efforts=self.efforts, enforce_gate=False):
-                    key = (scope_id(video), question['question_id'], effort)
-                    if key not in seen:
-                        seen.add(key)
-                        gate = question_gate(case, video, question, self.args.qa_model, effort)
-                        counts[gate['reason']] += 1
-            print('Question filter gates: ' + json.dumps(dict(counts), sort_keys=True))
         return 1 if self.interrupted or self.failed else 0
 
 
@@ -370,30 +340,16 @@ def command_qa_judge(args):
     diagnostics = QADiagnostics(include_truncation=args.qa_model in LOCAL_QA_CONFIGS)
     try:
         with Runtime(paths, exclusive=args.force_qa or args.force_judge) as runtime:
-            loaded, total = preflight_cases(args, efforts, enforce_gate=False)
+            loaded, total = preflight_cases(args, efforts)
             if not total:
                 print('No eligible question/video targets in the selected scope.')
                 return 0
             # Global format/metadata checks must precede ordinary model work.
-            if not args.force_qa and not args.filter_only:
+            if not args.force_qa:
                 require_selected_prefix_metadata(loaded, args=args, efforts=set(efforts))
                 require_selected_final_answers(loaded, args=args, efforts=set(efforts))
             engine = Engine(args, runtime, loaded, diagnostics)
-            status = 0
-            if args.filter_only:
-                return engine.run(filter_only=True)
             if args.force_qa or args.force_judge:
-                if args.input != 'question_only':
-                    status = engine.run(filter_only=True)
-                    if engine.interrupted:
-                        return 1
-                loaded, total = preflight_cases(args, efforts)
-                if not total:
-                    print('No questions passed the required filter gates in the selected scope.')
-                    return status
-                if not args.force_qa:
-                    require_selected_prefix_metadata(loaded, args=args, efforts=set(efforts))
-                    require_selected_final_answers(loaded, args=args, efforts=set(efforts))
                 require_openrouter_api_key()
                 qa_done = qa_completed_from_loaded(loaded, args=args, efforts=efforts)
                 if args.force_qa or qa_done != total:
@@ -408,9 +364,7 @@ def command_qa_judge(args):
                     for path in paths:
                         runtime.changed(path)
                 engine.cases = dict(loaded)
-                status |= engine.run(main_only=True)
-            else:
-                status = engine.run()
+            status = engine.run()
             snapshot = runtime.snapshot(paths)
             done, total, judged, judge_total = completion_counts(args, efforts, snapshot=snapshot)
             incomplete = done != total or judged != judge_total

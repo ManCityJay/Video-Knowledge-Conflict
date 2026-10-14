@@ -1,20 +1,20 @@
 # QA/Judge 并发与同机多命令运行
 
-`qa-judge` 以一次模型请求为调度单位。每条回答落盘后立即判分，每层 filter
-通过后立即释放该题的下游，不等待其他 case、视频或题目。独立 question-only
-执行 QA → Judge；`--filter-only` 不运行目标 QA。
+`qa-judge` 以一次模型请求为调度单位。每条回答落盘后立即判分，不等待其他
+case、视频或题目。Video、control、description 和 question-only 四种输入独立
+执行 QA → Judge，目标实验没有 question-only 或 control filter 前置依赖。
+`--filter-only` 已删除；需要 question-only 时显式选择 `--input question_only`。
 
 ```text
-question-only filter QA → Judge → control filter QA → Judge → 目标 QA → Judge
-                          通过                        通过
+所选输入 QA → Judge
 ```
 
 ## 参数
 
 | 参数 | 默认 | 范围 |
 |---|---|---|
-| `--qa-concurrency` | 云端 24，Cosmos 8，Gemma 4，Qwen27B 1 | 当前命令，filter 和主 QA 合计 |
-| `--judge-concurrency` | 24 | 当前命令，filter 和主 Judge 合计 |
+| `--qa-concurrency` | 云端 24，Cosmos 8，Gemma 4，Qwen27B 1 | 当前命令的所选输入 QA |
+| `--judge-concurrency` | 24 | 当前命令的所选输入 Judge |
 | `--qa-service-concurrency` | 云端 24，Cosmos 8，Gemma 4，Qwen27B 1 | 同一 QA 服务，跨命令共享 |
 | `--qa-rpm` | 云端 20，本地 0 | 同一 QA 模型，跨命令共享 |
 | `--judge-rpm` | 20 | Judge 模型，跨命令共享 |
@@ -49,11 +49,13 @@ python scripts/pipeline.py summarize --group classic_fairy_tale_film_conflicts \
 
 同一机器、同一工作区内，多个普通命令可以同时处理同一 case，包括不同模型、
 effort 和 video/description 条件。同一任务只有一个认领者，其他命令等待并
-复用其结果。共享 filter 按 case/question scope、题目、模型、effort、prefix
-及来源隔离；私有变体不能跨 scope 复用。
+复用其结果。任务按 case/question scope、题目、模型、effort、输入及来源隔离，
+目标 QA 还区分 based/prefix 条件；question-only 不含这两种条件。
+共享题目按 case scope 去重，私有变体不能跨视频 scope 复用；question-only
+只遍历 conflict 视频的有效问题并遵循 `question_ids`，不要求 ready 或媒体文件。
 
 新执行的独立 question-only 回答也写入已有的 `filter_stage` / `filter_fingerprint`
-元数据，使其与相同输入的共享 filter 可以复用同一次请求和判断。没有这些来源
+元数据，供独立续跑和可选报告筛选复用同一次请求和判断。没有这些来源
 字段的历史回答不迁移；原有兼容和过期检查仍然适用。
 
 协调状态保存在 `artifacts/pipeline_runtime/coordination.sqlite3`，使用 SQLite
@@ -88,28 +90,29 @@ WAL 和操作系统文件锁。数据库只保存认领、运行登记、服务�
 所有 force 命令在任何模型请求或清理之前，一次性独占登记全部所选 case。
 只要与其他 QA、force 或 summarize 重叠，就明确报错，不部分登记或排队等待。
 
-普通 video/description `--force-qa` 只清理选中且通过 filter 的目标 QA/Judge；
-`--force-judge` 只清空相同范围的 judgment。两者均不清理 control 或 question-only
-filter，也不清理未通过题目的历史。
+Video/control/description `--force-qa` 清理选中输入、模型、effort、based/prefix
+条件的目标 QA/Judge；`--force-judge` 只清空相同范围的 judgment。两者均不先运行
+question-only，其结果缺失、过期、未判分或判错均不缩小目标集合；其他输入、
+question-only 及其他 based/prefix 条件保留。
 
-执行顺序是先准备 filter，再预检和统一清理主实验结果。Filter 缺失、过期或
-未判分时可能先调用模型；禁止在全部清理写回成功前开始的是**主实验请求**。
-清理不是跨文件事务，失败后可能已有部分 case 清理完成，但不会混入新主实验结果。
+执行顺序是对所选输入预检，再统一清理结果，全部清理写回成功后才开始
+QA/Judge 请求。清理不是跨文件事务，失败后可能已有部分 case 清理完成，
+但不会混入新实验结果。
 
-独立 `--input question_only` force 清理所选 question-only 结果。
-`--filter-only` force 单独强制重跑/重判 filter，保留历史，第二层仍取决于第一层新判定。
+独立 `--input question_only` force 清理所选 conflict 有效共享/私有题目的对应
+模型和 effort 的 question-only 结果或 judgment，保留原有容器和指纹算法。
 
 ## 调度、媒体与报告
 
-每个进程有 QA、Judge 两个请求池及最多两个媒体准备线程。池内 filter/主实验
-按 3:1 加权轮转，按 case 公平取任务；QA/Judge 竞争 OpenRouter 时交替准入。
+每个进程有 QA、Judge 两个请求池及最多两个媒体准备线程。所选输入的任务
+在池内按 case 公平轮转；QA/Judge 竞争 OpenRouter 时交替准入。
 主 Judge 积压预算为 `max(64, 4 × judge_concurrency)`，主 QA 预留预算后才派发，
-filter 链仍可推进。已有有效结果直接满足依赖，不计入本次实际请求数。
+独立 question-only 直接执行自身 QA/Judge。已有有效结果直接复用，不计入本次实际请求数。
 
 只有满足所有额度的任务才进入网络线程。每次重试重新计入 RPM，退避保存在
 协调器的时间队列，不占请求线程。保持原有重试分类、次数和退避策略；429 会
 更新对应服务的共享冷却时间。正常结束但缺少有效末行 `Final answer:`（含空正文）
-时，全部 QA 模型在主实验及两层 filter 中均完整重试原请求一次；输入、提示词和
+时，全部 QA 模型在所选四种输入中均完整重试原请求一次；输入、提示词和
 生成参数不变，不增加纠错提示或历史回答。截断和判分错误不触发格式重试。
 
 格式失败后先释放本次 permit，保持原任务认领和下游依赖；原任务重新进入同一
@@ -124,11 +127,13 @@ filter 链仍可推进。已有有效结果直接满足依赖，不计入本次�
 
 `summarize` 共享登记以阻止 force，然后按路径顺序锁定选中 case、并行读取完整
 快照并释放锁。期间网络请求仍可继续，写回短暂等待。各 effort JSON 和 Markdown
-复用同一快照及来源/gate 校验。与 QA 同时运行时，报告反映快照时刻，可能尚未完成；
+复用同一快照及来源校验；仅 `--filter passed` 启用 question-only gate 筛选，
+只读取有效已有判定，不补跑模型。与 QA 同时运行时，报告反映快照时刻，可能尚未完成；
 不自动等待整批 QA，也不自动串联 summarize。
 
-每 10 秒打印本进程待处理、在途、等待其他进程、重试、实际请求和完成速率，
-并显示共享服务占用与等待时间。三组 QA 诊断另显示 `final_answer_retries`、
+运行时打印保存及重试信息，结束时统计所选输入的全部目标完成数、实际请求、
+保存、缓存复用和跨进程复用数；不再打印执行准入 gate 统计。
+`main`、`question_only` 两组 QA 诊断另显示 `final_answer_retries`、
 `final_answer_retry_recovered`、`final_answer_retry_failed`，分别表示安排格式重试的任务数、
 重试后成功落盘数和最终失败数（包括重试后耗尽网络额度等失败）。保留最终完成统计
 和非零退出规则。

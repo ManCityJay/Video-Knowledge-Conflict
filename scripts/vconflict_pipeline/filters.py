@@ -1,8 +1,8 @@
-"""Question-scoped knowledge filters shared by execution and reporting.
+"""Question-only provenance and optional question-scoped report filters.
 
-Gate checks are read-only; task_execution.py owns filter requests and merges.
-Each target question must pass question-only before its main QA. Shared
-questions reuse one gate; variant questions are isolated by their video scope.
+Report gate checks are read-only; task_execution.py owns standalone requests
+and merges. Shared questions reuse one scope; variant questions are isolated
+by their video scope. Target QA never depends on these report filters.
 """
 from __future__ import annotations
 
@@ -67,7 +67,3 @@ def question_gate(case, video, question, model, effort):
             'case_id': case['case_id'], 'question_scope': scope_id(video),
             'question_id': question['question_id'], 'model': model,
             'thinking_effort': effort}
-
-
-def qa_allowed(case, video, question, model, effort):
-    return question_filter_state(case, video, question, model, effort)['status'] == 'passed'
