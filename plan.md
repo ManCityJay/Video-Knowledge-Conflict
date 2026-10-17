@@ -7,7 +7,7 @@
 
 测量问答模型在输入证据与经典知识冲突时，是否遵循当前证据，或退回经典答案。
 每个 case 固定一组正常事实和冲突事实，以匹配的正常 control 视频作为对照。
-Authoring 每次生成 1–5 个 conflict 视频方案和一个 control；审核入库的数学变体可
+Authoring 每次生成 1–5 个 conflict 视频方案和一个 control；入库的数学变体可
 继续积累。普通 case 至少保留一个 conflict，control 可选且最多一个；保留带
 `quality_curation` 和人工备份记录的裁剪例外。
 
@@ -99,13 +99,17 @@ Judgment 保存 verdict、confidence、时间、Judge 模型、请求 ID 和适�
 grounded 时聚合为 trapped，两者同时出现或两者均无则为 ambiguous。
 
 ```text
-trapped_answer_rate = conflict trapped answers / all conflict answers
-trapped_video_rate  = conflict trapped videos  / all conflict videos
+grounded_answer_rate = role grounded answers / all valid judged role answers
+trapped_answer_rate  = role trapped answers  / all valid judged role answers
+grounded_video_rate  = role grounded videos  / all valid judged role videos
+trapped_video_rate   = role trapped videos   / all valid judged role videos
 ```
 
-分母均包括 ambiguous；无 conflict 样本时 rate 为 `null`。Control 的 grounded rate
-也以全部对应样本为分母。Question-only 仅统计 answer-level control 指标，重复历史
-按 `(timestamp, run_id)` 选择最新记录；不产生 video-level 指标。
+汇总始终同时输出 grounded 和 trapped 比例，按 conflict/control 角色分别统计，
+分母均包括 ambiguous，保留六位小数；对应角色无样本时两种 rate 均为 `null`。
+Control 和 question-only 有样本时 trapped 比例按现有判分规则为 0。
+Question-only 仅统计 answer-level control 指标，重复历史按 `(timestamp, run_id)`
+选择最新记录；不产生 video-level 指标。原生 Markdown 按 effort、角色列出两种比例。
 
 ## 数据结构
 
@@ -117,11 +121,11 @@ trapped_video_rate  = conflict trapped videos  / all conflict videos
 | case | `schema_version`、`case_id`、英文 `title`、`conflict_spec`、`questions`、`videos` |
 | conflict_spec | `normal_fact_en`、`intended_video_fact_en` |
 | question | `question_id`、`text_en`、两类 reference，可选 `question_only_results` |
-| video | `video_id`、`role`、`seedance_prompt_en`、`task_id`、`status`、`local_path`、`human_review`、`qa_results` |
+| video | `video_id`、`role`、`seedance_prompt_en`、`task_id`、`status`、`local_path`、`qa_results` |
 | description | `context_en`、可选 `context_prefix_en`、来源、来源 SHA-256、生成模型、时间和请求 ID |
 | QA | `run_id`、时间、输入模式、问题 ID/正文、模型、effort、温度、`raw_answer`、`final_answer`、可选 usage/reasoning、`final_answer_retry_count: 1`、judgment |
 | variant_context | 私有 facts/questions、可选标题、`matched_control_path` |
-| 审核证据 | `video_observation`、`question_audit`、审核/资格状态和来源指纹 |
+| 画面与审题证据 | `video_observation`、`require_video_observation`、`question_audit` 和来源指纹 |
 
 Description 仅属于 conflict 视频。Question-only 结果不含 context 文本、作品名前缀
 或 based。共享结果属于 case 顶层 question，保存在 `question_only_results`；私有
@@ -139,6 +143,7 @@ Fairy video: input + question_id + model + thinking_effort + based + work_title_
 ```
 
 旧 question ID、`video_grounded`、旧 baseline 字段及旧哈希字段兼容读取，不批量迁移。
+历史 `human_review`、`qualification_pending` 字段忽略，不再写入或校验；schema 保持 4.0。
 `video_grounded` 解释为 grounded，缺失 based 解释为 false，Gemini medium effort
 解释为 default。Filter 读取新字段优先，否则读取 baseline 别名；私有新旧容器共同
 查找最新记录，续跑在原容器更新。命名变化不改变指纹算法或版本。
@@ -146,8 +151,9 @@ Fairy video: input + question_id + model + thinking_effort + based + work_title_
 ## 来源与过期规则
 
 视频状态不能由文件存在推断为 ready。各组 video/control 的 QA 和汇总均按所选
-角色及 ready 状态选择视频，不使用数学组独有的 verified、rejected 或资格审核
-门槛。人工审核状态与审题回执供质量审计使用，不替代来源新鲜度检查。视频重新
+角色及 ready 状态选择视频，不使用人工审核状态或资格门槛。数学 authoring 的参考
+视频同样要求 conflict、ready、文件存在，并保留画面证据检查及原有排序。
+独立模型审题回执供质量审计使用，不替代来源新鲜度检查。视频重新
 生成后，已有观察失效；需要审核观察时，没有有效 observation 不得把生成意图
 当作实际画面证据。Description 可使用有效的 prompt 来源文本，不要求视频 ready。
 

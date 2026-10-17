@@ -1,4 +1,4 @@
-"""Offline structural audit; never calls a provider or grants review approval."""
+"""Offline structural, visual evidence and question audit checks."""
 from __future__ import annotations
 
 from collections import Counter
@@ -53,12 +53,9 @@ def audit_cases(paths: list[Path], *, group: str | None = None) -> dict:
             if local in physical_paths:
                 note("error", "duplicate_file_binding", entity, str(local))
             physical_paths.add(local)
-            qualified = video.get("human_review") == "verified"
-            if qualified:
-                counts["qualified_" + video["role"]] += 1
-                counts["qualified_review_" + video["human_review"]] += 1
+            if video["status"] == "ready":
                 if local.stem != video["video_id"] and video["role"] == "conflict":
-                    note("error", "qualified_video_filename", entity, str(local))
+                    note("error", "ready_video_filename", entity, str(local))
                 elif local.stem != video["video_id"]:
                     note("info", "legacy_control_filename", entity,
                          "The legacy control filename is resolved through local_path; no renumbering is needed.")
@@ -106,8 +103,6 @@ def audit_cases(paths: list[Path], *, group: str | None = None) -> dict:
                                      "Canonical variant_context is authoritative; historical source is not an editable mirror.")
                         except (PipelineError, ValueError, OSError) as exc:
                             note("error", "invalid_variant_source", entity, str(exc))
-                if qualified and (video.get("description") or {}).get("source") != "video":
-                    counts["qualified_variant_prompt_descriptions"] += 1
         for owner, video in scopes:
             entity = cid + ("/" + video["video_id"] if video else "/shared")
             if not owner["questions"]:

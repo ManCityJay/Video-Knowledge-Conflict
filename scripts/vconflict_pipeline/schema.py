@@ -23,7 +23,6 @@ from .settings import (
     CONFLICT_VIDEO_LIMIT,
     INPUT_MODES,
     QUESTION_LIMIT,
-    REVIEW_STATUSES,
     VERDICTS,
     VIDEO_ROLES,
     VIDEO_STATUSES,
@@ -297,7 +296,6 @@ def empty_video(
         "task_id": None,
         "status": "pending",
         "local_path": (video_dir / f"{video_id}.mp4").as_posix(),
-        "human_review": "pending",
         "qa_results": [],
     }
 
@@ -576,8 +574,6 @@ def validate_case(case: Any) -> None:
                     )
         if video.get("status") not in VIDEO_STATUSES:
             raise PipelineError(f"{prefix}.status is invalid.")
-        if video.get("human_review") not in REVIEW_STATUSES:
-            raise PipelineError(f"{prefix}.human_review is invalid.")
         task_id = video.get("task_id")
         if task_id is not None and not isinstance(task_id, str):
             raise PipelineError(f"{prefix}.task_id must be a string or null.")

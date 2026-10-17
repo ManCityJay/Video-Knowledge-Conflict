@@ -120,11 +120,6 @@ def command_author(args: argparse.Namespace) -> int:
         if output_path.exists():
             existing = load_case(output_path)
             require_writable_case(existing, output_path)
-            if args.group == MATHEMATICS_ALGORITHM_GROUP and any(
-                v.get("human_review") == "verified" for v in existing["videos"]
-            ):
-                raise PipelineError("Do not overwrite a reviewed math case with author --force. "
-                                    "Author the expansion in a separate --output-dir, then promote its reviewed variants.")
         references = (qualified_references(args.group, source['case_id'])
                       if args.group == MATHEMATICS_ALGORITHM_GROUP else [])
         reference_designs = [{k: v for k, v in ref.items() if k != 'chronological_frames'}

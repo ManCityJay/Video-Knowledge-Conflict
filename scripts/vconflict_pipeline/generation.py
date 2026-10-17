@@ -1,4 +1,4 @@
-"""Seedance generation, persistence, and human review."""
+"""Seedance generation and persistence."""
 from __future__ import annotations
 
 import argparse
@@ -184,7 +184,7 @@ def generate_one_video(
         # Validate inputs before changing an existing video's state.
         seedance_content(video)
         persist_video_state(case=case, case_path=case_path, video=video, lock=lock,
-                            task_id=None, status="pending", human_review="pending", qa_results=[],
+                            task_id=None, status="pending", qa_results=[],
                             description=None, video_observation=None)
         status = "pending"
 
@@ -340,8 +340,6 @@ def generate_one_video(
         video=video,
         lock=lock,
         status="ready",
-        human_review="pending",
-        qualification_pending=True,
         require_video_observation=(video.get("require_video_observation", False)
             or (video["role"] == "conflict"
                 and "mathematics_algorithm_conflicts" in Path(video["local_path"]).parts)),
@@ -431,32 +429,3 @@ def command_generate(args: argparse.Namespace) -> int:
                 failures += 1
                 print(f"Error generating case {case_path.stem}: {exc}", file=sys.stderr)
     return 1 if failures else 0
-
-
-def command_review(args: argparse.Namespace) -> int:
-    dataset_dir = grouped_dir(args.dataset_dir, args.group)
-    case_path = dataset_dir / f"{args.case_id}.json"
-    if not case_path.exists():
-        raise PipelineError(f"Case file was not found: {case_path}")
-    case = load_case(case_path)
-    require_writable_case(case, case_path)
-    for video in case["videos"]:
-        if video["video_id"] != args.video_id:
-            continue
-        if video["status"] != "ready":
-            raise PipelineError("Only ready videos can be reviewed.")
-        resolve_video_path(video["local_path"], must_exist=True)
-        video["human_review"] = args.decision
-        if args.decision == "verified":
-            from .evidence import (
-                observed_summary,
-            )
-            observed_summary(video)
-            video["qualification_pending"] = False
-        atomic_write_json(case_path, case)
-        print(
-            f"Marked {args.case_id}/{args.video_id} as {args.decision}: "
-            f"{video['local_path']}"
-        )
-        return 0
-    raise PipelineError(f"Video ID was not found in {args.case_id}: {args.video_id}")

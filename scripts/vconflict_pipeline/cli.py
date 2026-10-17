@@ -13,7 +13,7 @@ from .authoring import command_author, command_questions
 from .common import PipelineError, validate_group, validate_id
 from .deletion import command_delete
 from .descriptions import command_description
-from .generation import command_generate, command_review
+from .generation import command_generate
 from .qa import REQUEST_TIMEOUT_SECONDS
 from .reporting import command_summarize
 from .scheduler import command_qa_judge
@@ -186,14 +186,6 @@ def build_parser() -> argparse.ArgumentParser:
     generate.add_argument("--max-polls", type=int, default=120)
     generate.set_defaults(func=command_generate)
 
-    review = _stage(subparsers, "review")
-    review.add_argument("--dataset-dir", type=Path, default=DEFAULT_CASE_DIR)
-    review.add_argument("--case-id", required=True)
-    review.add_argument("--video-id", required=True)
-    review.add_argument("--decision", required=True, choices=("verified", "rejected"))
-    _add_group(review)
-    review.set_defaults(func=command_review)
-
     delete = _stage(subparsers, "delete")
     delete.add_argument("--dataset-dir", type=Path, default=DEFAULT_CASE_DIR)
     delete.add_argument("--case-id", action="append", type=_entity_id, required=True)
@@ -259,7 +251,7 @@ def build_parser() -> argparse.ArgumentParser:
     _add_case_selection(audit)
     audit.add_argument("--output", type=Path, required=True)
     audit.add_argument("--strict", action="store_true",
-                       help="Return nonzero for missing reviews as well as structural errors.")
+                       help="Return nonzero for audit warnings as well as structural errors.")
     audit.set_defaults(func=command_audit)
     return parser
 

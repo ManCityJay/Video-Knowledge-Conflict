@@ -47,7 +47,7 @@ $env:MOONSHOT_API_KEY = "<key>"
 python scripts/pipeline.py <stage> [参数]
 ```
 
-可用阶段：`author`、`questions`、`description`、`generate`、`review`、
+可用阶段：`author`、`questions`、`description`、`generate`、
 `delete`、`qa-judge`、`summarize`、`audit`。各阶段显式执行，没有自动串联入口。
 参数用法统一查询本文，并发协调与恢复细节见 `concurrency.md`。
 
@@ -57,7 +57,7 @@ python scripts/pipeline.py <stage> [参数]
 python scripts/pipeline.py author --group classic_fairy_tale_film_conflicts
 python scripts/pipeline.py questions --group classic_fairy_tale_film_conflicts
 python scripts/pipeline.py generate --group classic_fairy_tale_film_conflicts
-# 查看生成的视频，再按下文 review 命令逐个登记审核。
+# 需要实际画面证据的视频须补齐与当前文件绑定的 video_observation。
 python scripts/pipeline.py qa-judge --group classic_fairy_tale_film_conflicts \
   --input video --qa-model qwen3.8-max --thinking-effort all
 python scripts/pipeline.py summarize --group classic_fairy_tale_film_conflicts \
@@ -68,7 +68,7 @@ Control 视频以 `--input control` 独立执行 QA 和汇总；`--input video` 
 conflict。文字实验先运行 `description`，再以 `--input description` 执行 QA 和汇总。
 文字实验只用文本，不依赖 control 视频。四种输入独立执行 QA → Judge，目标实验
 不自动运行 question-only，也不要求其通过。独立 question-only 实验有有效问题后即可执行，
-不依赖视频文件、视频状态、description 或人工审核。
+不依赖视频文件、视频状态或 description。
 
 ## 数据组、目录与范围
 
@@ -90,14 +90,15 @@ conflict。文字实验先运行 `description`，再以 `--input description` �
   `--video-scope qualified` 应删除或改为 `all`；`all` 仅保留入口兼容，内部按
   `--input` 选择角色。所选角色不存在时为零目标；显式选择其他角色或未就绪
   的视频时报错。Description 只检查 conflict 文本及其来源是否有效。
-- `review` 一次选择一个 case 和一个视频；删除视频或问题时也只选择一个 case，
+- 删除视频或问题时只选择一个 case，
   `delete --all` 则可选择同组多个完整 case。
 
-## 数据准备、生成、审核与删除
+## 数据准备、生成、画面证据与删除
 
 源 case 需预先按每个 case 一份 Markdown 准备，文件名为合法 case ID，首行使用
-`### 标题`。Author 默认跳过已有 JSON；`--force` 可覆盖，但不能覆盖已有 verified
-视频的数学 case。新增数学变体使用独立 `--output-dir`，审核后再入库。
+`### 标题`。Author 默认跳过已有 JSON；`--force` 可覆盖可写 case，仍禁止覆盖
+带 `canonical_case_path` 的历史来源快照。新增数学变体可使用独立 `--output-dir`。
+数学参考视频要求 conflict、ready、文件存在，继续校验实际画面证据及原有排序。
 
 ```bash
 python scripts/pipeline.py author --group classic_fairy_tale_film_conflicts \
@@ -140,17 +141,10 @@ Ark 地址。每 30 秒轮询，最多 120 次；用 `--poll-interval` 和 `--ma
 失败任务须加 `--retry-failed`；submitted 任务保留 task ID，重复命令可继续轮询或下载。
 
 `--regenerate` 重置 ready 视频，清除其 description、审核观察和全部 QA。
-新提交的生成任务也会清空旧 description 和观察；成功下载后标为 ready，并要求
-重新审核。数学 unqualified 视频已备份并移出正式数据；不能凭旧文件或旧目录
-恢复资格。视频重建不影响独立 question-only 结果。
-
-```bash
-python scripts/pipeline.py review --group classic_fairy_tale_film_conflicts \
-  --case-id alice_drink_makes_her_grow --video-id v001 --decision verified
-```
-
-也可用 `--decision rejected`。只有 ready 且文件存在的视频能登记审核；需要
-视频观察的数学视频须先补齐实际审核观察，`review` 本身不生成这些证据。
+新提交的生成任务也会清空旧 description 和观察；成功下载后标为 ready。
+需要画面证据的视频（包括新生成的数学 conflict 视频）须补齐与当前文件 SHA-256
+绑定的 `video_observation`。保留 `require_video_observation`、独立模型
+`question_audit` 和来源新鲜度检查；人工状态登记及 `review` 子命令已移除。
 视频文件存在不会自动将状态升级为 ready；默认跳过未就绪视频，显式选择时报错。
 ready 视频文件缺失时，在 QA 模型请求前报错。
 
@@ -308,6 +302,8 @@ Author/questions/description 使用 `--case-workers`、`--openrouter-workers` �
 
 Schema 只接受 4.0。旧 question ID、`video_grounded`、baseline filter 字段及平铺
 报告可保留；旧 `based` 缺失按 false，Gemini `medium` effort 按 default。
+历史 `human_review`、`qualification_pending` 字段忽略，不校验、不批量改写，
+新建或生成视频不再写入这些状态。
 旧 `QWEN_BASE_URL` 仍可读取，`/compatible-mode/v1` 后缀会转换为 `/api/v1`。
 
 缺少 `final_answer` 的旧 QA 需 `--force-qa` 重跑。缺少 prefix 元数据的旧 Fairy
@@ -317,6 +313,30 @@ video/control QA 需按真实条件补成 true/false，或 `--force-qa` 替换�
 
 ## 汇总、输出与排错
 
+### 批量 QA/Judge
+
+```bash
+python scripts/run_all/run_qa_judge.py --dry-run
+python scripts/run_all/run_qa_judge.py
+python scripts/run_all/run_qa_judge.py --model gemini
+```
+
+统一使用 `run_qa_judge.py`，省略 `--model` 等同于 `--model all`。
+默认三个云端模型依次运行四个 group（含 math），每组执行 `video`、`video-based`、
+`description`、`description-based`，共 48 条命令；不包含 control 或 question_only。
+保留模型、effort 和 Fairy video 的作品名前缀设置：Qwen Max 使用 all effort，
+Gemini/Kimi 使用 default。也可用 `--model` 选择单个云端或本地模型；本地模型使用
+all effort。`--group`、`--condition` 可重复指定，`--config` 覆盖并发、RPM 等配置。
+
+每次运行只在 `results/run_all/<UTC时间戳>_<模型>_<随机ID>/` 下生成 `summary.txt`，
+`--log-dir` 可覆盖其父目录。子进程完整输出实时显示在终端；每条命令结束立即追加并
+flush 任务序号、模型、组、条件、完整命令、状态、退出码及实际输出的命令级统计，
+包括 QA/Judge、This run、输出诊断，以及实际出现的 Question filter gates。
+不保存逐 case 进度、回答、判定、错误明细、逐命令日志、配置快照或状态 JSON。
+零目标、提前失败和 Ctrl+C 中断分别记录，缺少的统计明确标为未报告，不推算完成数。
+普通失败继续其余命令；中断停止后续命令并保留已收集统计，最后记录成功、失败、
+中断及未启动数量。`--dry-run` 不创建文件或发起模型请求。
+
 ### 批量汇总已运行的实验
 
 ```bash
@@ -324,7 +344,7 @@ python scripts/run_all/run_all_summarize.py
 python scripts/run_all/run_all_summarize.py --dry-run
 ```
 
-该脚本扫描三个非数学 group 中 conflict 视频已保存的目标 QA，覆盖 video、
+该脚本扫描四个 group（含 math）中 conflict 视频已保存的目标 QA，覆盖 video、
 video + based、description、description + based；Fairy video 只选择有作品名前缀的
 记录。未产生目标 QA 的组合跳过，支持部分完成的实验。`--model all` 为默认值，
 在此汇总入口中包含 Gemini、Qwen Max、Kimi、Cosmos、Gemma、Qwen27B 全部六个
@@ -336,18 +356,19 @@ video + based、description、description + based；Fairy video 只选择有作�
 `--dry-run` 只展示发现的组合及命令，不写报告、不调用模型。实际汇总也只处理已有
 记录，不执行 QA/Judge 请求。使用自定义数据目录时，输出仍写入仓库的 results 目录。
 
-每个模型/组/条件调用一次原生 `summarize --filter passed`，新鲜度、有效判定、
-question-only filter 和指标计算均沿用原生逻辑。各 effort JSON 和合并 Markdown
-继续保存在 `results/<group>/<model>/`。已有目标 QA 但没有有效通过答案的实验也
+每个模型/组/条件调用一次原生 `summarize`，不传 `--filter passed`，采用默认
+`filter=all`。新鲜度、有效判定和指标计算均沿用原生逻辑，各 effort JSON 和合并
+Markdown 继续保存在 `results/<group>/<model>/`。已有目标 QA 但没有有效已判定答案的实验也
 保留，计数为零、rate 为 null。
 
-批量汇总显式启用报告筛选，需要先独立运行对应模型的 `--input question_only` 才能
-得到通过样本；该脚本不会补跑。需要全量报告时使用下文原生 `summarize --filter all`。
+批量汇总统计全部有效已判定目标（含 ambiguous），不依赖 question-only 是否存在
+或通过，也不会补跑模型。需要筛选报告时手动使用原生 `summarize --filter passed`。
 
 额外原子写入并替换 `results/run_all/summary.json` 和 `results/run_all/report.md`。
 前者每个实验/effort 一条记录，将本次原生 JSON 的 `answers.conflict` 原样保存为
 `conflict`，附带模型、组、输入、based、prefix、effort、filter 和原生报告路径；
-后者以表格展示 total、三类 label 数量、trapped_answer_rate 并链接原生 JSON/Markdown。
+后者以表格展示 total、三类 label 数量、grounded_answer_rate、trapped_answer_rate，
+并链接原生 JSON/Markdown；实验身份、JSON 元数据和报告标题均标记 `filter=all`。
 不同实验之间不合并计数或平均比例。
 
 只读取本次成功调用明确生成的报告。单个实验失败后继续其余实验，汇总列出失败
@@ -368,7 +389,10 @@ python scripts/pipeline.py summarize --group classic_fairy_tale_film_conflicts \
 ```
 
 必须指定模型。Video 只汇总 conflict，control 只汇总 control；JSON 保留原有
-answer/video 指标结构，未选角色计数为零。`--filter all` 默认统计所选角色全部有效
+answer/video 指标结构，新增 grounded/trapped 两种比例，未选角色计数为零、rate 为 null。
+两种比例均以对应角色全部有效已判定样本（含 ambiguous）为分母，沿用六位小数；
+control/question-only 有样本时 trapped 比例为 0。原生 Markdown 按 effort、角色展示
+answer/video 两种比例，question-only 只有 answer 比例。`--filter all` 默认统计所选角色全部有效
 结果；`--filter passed` 逐题筛选 question-only 通过的结果，再重新聚合 video 标签，
 没有剩余题目的视频不计入分母，生成独立报告。Gate 标识不含作品名前缀。`--based` 和 prefix 选项应与目标实验条件相同。不同模型和
 effort 通过的题目集合可能不同。缺失、过期、未判分或判错的 question-only 均不能视为
@@ -412,7 +436,7 @@ results/classic_fairy_tale_film_conflicts/qwen/qwen_control_based_with_prefix_fi
 | 问题 | 处理方法 |
 |---|---|
 | 缺少凭据、服务不可达或模型 ID 不明确 | 检查对应 key、地址、`/v1/models` 和模型服务日志 |
-| 视频未就绪、文件缺失或观察过期 | 完成生成和实际视频审核，再运行 review；不靠文件存在自动修复状态 |
+| 视频未就绪、文件缺失或观察过期 | 完成生成并补齐与当前文件绑定的 video_observation；文件存在不会自动修复状态 |
 | description 过期 | 完成视频观察后重跑 description，再运行 QA |
 | 本地回答达到 token 上限 | 增大对应 max-tokens 参数；替换已有 QA 时使用 `--force-qa` |
 | 空正文、只有 reasoning 或缺少有效末行答案 | 检查模型输出；最终非空行须包含大小写匹配的 `Final answer:` 和非空答案 |

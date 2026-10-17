@@ -58,7 +58,6 @@ CONFLICT_VIDEO_LIMIT = 5
 TOTAL_VIDEO_LIMIT = CONFLICT_VIDEO_LIMIT + 1
 VIDEO_ROLES = {"conflict", "control"}
 VIDEO_STATUSES = {"pending", "submitted", "ready", "failed"}
-REVIEW_STATUSES = {"pending", "verified", "rejected"}
 VERDICTS = {"context_grounded", "knowledge_trapped", "ambiguous_or_unjudgeable"}
 LEGACY_VERDICTS = {"video_grounded"}
 ACCEPTED_VERDICTS = VERDICTS | LEGACY_VERDICTS

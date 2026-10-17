@@ -79,6 +79,9 @@ def _summarize_counts(
                 "labels": {
                     label: answers["conflict"][label] for label in sorted(VERDICTS)
                 },
+                "grounded_answer_rate": _safe_rate(
+                    answers["conflict"]["context_grounded"], conflict_answers
+                ),
                 "trapped_answer_rate": _safe_rate(
                     answers["conflict"]["knowledge_trapped"],
                     conflict_answers,
@@ -92,6 +95,9 @@ def _summarize_counts(
                 "grounded_answer_rate": _safe_rate(
                     answers["control"]["context_grounded"], control_answers
                 ),
+                "trapped_answer_rate": _safe_rate(
+                    answers["control"]["knowledge_trapped"], control_answers
+                ),
             },
         },
         "videos": {
@@ -100,6 +106,9 @@ def _summarize_counts(
                 "labels": {
                     label: videos["conflict"][label] for label in sorted(VERDICTS)
                 },
+                "grounded_video_rate": _safe_rate(
+                    videos["conflict"]["context_grounded"], conflict_videos
+                ),
                 "trapped_video_rate": _safe_rate(
                     videos["conflict"]["knowledge_trapped"], conflict_videos
                 ),
@@ -111,6 +120,9 @@ def _summarize_counts(
                 },
                 "grounded_video_rate": _safe_rate(
                     videos["control"]["context_grounded"], control_videos
+                ),
+                "trapped_video_rate": _safe_rate(
+                    videos["control"]["knowledge_trapped"], control_videos
                 ),
             },
         },
@@ -194,6 +206,9 @@ def build_summary(
                     },
                     "grounded_answer_rate": _safe_rate(
                         answer_counts["context_grounded"], total
+                    ),
+                    "trapped_answer_rate": _safe_rate(
+                        answer_counts["knowledge_trapped"], total
                     ),
                 }
             },
@@ -370,16 +385,43 @@ def build_markdown(
         lines.extend([f"**Work-title prefix:** {prefix_name}", ""])
     if input_mode != "question_only":
         lines.extend([f"**Based prompt:** {'enabled' if based else 'disabled'}", ""])
+    if summaries is None:
+        summaries = {
+            effort: build_summary(
+                case_paths, qa_model=qa_model, input_mode=input_mode, effort=effort,
+                work_title_prefix=work_title_prefix, based=based,
+                filter_mode=filter_mode, index=index,
+            )
+            for effort in efforts
+        }
     if filter_mode == 'passed':
         lines.extend(['**Question filter:** question-only must pass for each question scope/model/effort.', ''])
         for effort in sorted(efforts, key=str):
-            summary = summaries[effort] if summaries is not None else build_summary(case_paths, qa_model=qa_model, input_mode=input_mode,
-                                  effort=effort, work_title_prefix=work_title_prefix,
-                                  based=based,
-                                  filter_mode='passed', index=index)
-            stats = summary['filter_gate']
+            stats = summaries[effort]['filter_gate']
             lines.extend([f"- {_effort_name(effort)}: {stats['passed_questions']}/{stats['total_questions']} questions passed; "
                           f"{stats['excluded_judged_answers']} judged answers excluded. Reasons: {stats['reasons']}", ''])
+    columns = ["Effort", "Role", "Answers", "grounded_answer_rate", "trapped_answer_rate"]
+    if input_mode != "question_only":
+        columns.extend(["Videos", "grounded_video_rate", "trapped_video_rate"])
+    lines.extend([
+        "## Summary", "",
+        "Rates use all valid judged samples for each role, including ambiguous labels; no samples means null.", "",
+        "| " + " | ".join(columns) + " |",
+        "| " + " | ".join(["---", "---", *(["---:"] * (len(columns) - 2))]) + " |",
+    ])
+    for effort in sorted(efforts, key=str):
+        summary = summaries[effort]
+        for role, answers in summary["answers"].items():
+            values = [_effort_name(effort), role, answers["total"],
+                      answers["grounded_answer_rate"], answers["trapped_answer_rate"]]
+            if input_mode != "question_only":
+                videos = summary["videos"][role]
+                values.extend([videos["total"], videos["grounded_video_rate"], videos["trapped_video_rate"]])
+            lines.append("| " + " | ".join(
+                "null" if value is None else f"{value:.6f}" if isinstance(value, float) else str(value)
+                for value in values
+            ) + " |")
+    lines.append("")
     for path in case_paths:
         case = index.load(path)
         title = _markdown_value(case["title"]).replace("#", r"\#")
