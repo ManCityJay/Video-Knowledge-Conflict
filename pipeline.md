@@ -327,6 +327,7 @@ python scripts/run_all/run_qa_judge.py --model gemini
 保留模型、effort 和 Fairy video 的作品名前缀设置：Qwen Max 使用 all effort，
 Gemini/Kimi 使用 default。也可用 `--model` 选择单个云端或本地模型；本地模型使用
 all effort。`--group`、`--condition` 可重复指定，`--config` 覆盖并发、RPM 等配置。
+默认配置文件为脚本同目录下的 `run_all_qa_judge_config.json`。
 
 每次运行只在 `results/run_all/<UTC时间戳>_<模型>_<随机ID>/` 下生成 `summary.txt`，
 `--log-dir` 可覆盖其父目录。子进程完整输出实时显示在终端；每条命令结束立即追加并

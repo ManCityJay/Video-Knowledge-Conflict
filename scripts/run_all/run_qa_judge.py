@@ -249,7 +249,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--condition", action="append", choices=tuple(CONDITIONS),
                         help="Repeat to select conditions; default: all four conditions.")
     parser.add_argument("--config", type=Path,
-                        default=RUNNER_DIR / "closed_qa_judge_config.json")
+                        default=RUNNER_DIR / "run_all_qa_judge_config.json")
     parser.add_argument("--dataset-dir", type=Path, default=Path("dataset/cases"))
     parser.add_argument("--log-dir", type=Path, default=Path("results/run_all"),
                         help="Parent directory for each run's summary.txt.")
