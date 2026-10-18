@@ -1,39 +1,39 @@
 {
-  "judge_concurrency": 24,
-  "judge_rpm": 20,
-  "openrouter_concurrency": 24,
-  "openrouter_rpm": 20,
+  "judge_concurrency": 64,
+  "judge_rpm": 60,
+  "openrouter_concurrency": 64,
+  "openrouter_rpm": 60,
   "timeout": 600,
-  "max_retries": 4,
+  "max_retries": 3,
   "models": {
     "gemini": {
-      "qa_concurrency": 24,
-      "qa_service_concurrency": 24,
-      "qa_rpm": 20
+      "qa_concurrency": 64,
+      "qa_service_concurrency": 64,
+      "qa_rpm":60 
     },
     "qwen3.8-max": {
-      "qa_concurrency": 24,
-      "qa_service_concurrency": 24,
-      "qa_rpm": 20
+      "qa_concurrency": 64,
+      "qa_service_concurrency": 64,
+      "qa_rpm":60 
     },
     "kimi-k3": {
-      "qa_concurrency": 24,
-      "qa_service_concurrency": 24,
-      "qa_rpm": 20
+      "qa_concurrency": 64,
+      "qa_service_concurrency": 64,
+      "qa_rpm":60 
     },
     "cosmos3-nano": {
-      "qa_concurrency": 8,
-      "qa_service_concurrency": 8,
+      "qa_concurrency": 64,
+      "qa_service_concurrency": 64,
       "qa_rpm": 0
     },
     "gemma4": {
-      "qa_concurrency": 4,
-      "qa_service_concurrency": 4,
+      "qa_concurrency": 64,
+      "qa_service_concurrency": 64,
       "qa_rpm": 0
     },
     "qwen3.8-27b": {
-      "qa_concurrency": 4,
-      "qa_service_concurrency": 4,
+      "qa_concurrency": 64,
+      "qa_service_concurrency": 64,
       "qa_rpm": 0
     }
   }
