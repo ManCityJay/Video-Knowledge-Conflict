@@ -16,7 +16,7 @@ python -m pip install volcengine-python-sdk[ark]
 python -m pip install av Pillow
 ```
 
-Author、questions、生成式 description、Gemini / Gemini 4 Argon QA 和 Judge 使用 `OPENROUTER_API_KEY`；
+Author、questions、生成式 description、Gemini 3.1 Pro / Gemini 4 Argon QA 和 Judge 使用 `OPENROUTER_API_KEY`；
 Seedance 使用 `ARK_API_KEY`；云端 Qwen QA 使用 `DASHSCOPE_API_KEY`；Kimi QA 使用
 `MOONSHOT_API_KEY`。本地 QA 不需要模型 API key，但 Judge 仍需 OpenRouter 凭据。
 PowerShell 配置示例：
@@ -175,7 +175,7 @@ QA 及其中的 Judge 历史；保留其他视频的历史、共享问题及其 
 
 | `--qa-model` | `--thinking-effort` | QA / 共享 QA 服务默认并发 | 输出上限 |
 |---|---|---|---|
-| `gemini` | `default` | 24 / 24 | 服务配置 |
+| `gemini-3.1-pro` | `default` | 24 / 24 | 服务配置 |
 | `gemini-4-argon` | `default` | 24 / 24 | 服务配置 |
 | `qwen3.8-max` | `none`、`default` | 24 / 24 | 服务配置 |
 | `kimi-k3` | `default` | 24 / 24 | 服务配置 |
@@ -186,7 +186,7 @@ QA 及其中的 Judge 历史；保留其他视频的历史、共享问题及其 
 省略 effort 使用 `default`；`all` 执行模型支持的全部 effort，也可重复指定该选项。
 模型 ID、温度和视频采样协议见 [plan.md](plan.md#模型配置与采样协议)。
 
-默认 QA 模型仍为 `gemini`。Argon 使用独立的 `google/gemini-4-argon` 模型 ID，
+默认 QA 模型仍为 `gemini-3.1-pro`。Argon 使用独立的 `google/gemini-4-argon` 模型 ID，
 显式发送 reasoning medium 和 `temperature: 0`，省略 top_p、top_k；结果保存
 `effective_reasoning_effort: "medium"` 和 `temperature: 0`。沿用单次回答与格式
 重试，截断直接报错，不自动续写。四种输入均可通过 `--input` 单独选择，例如：
@@ -314,10 +314,13 @@ Author/questions/description 使用 `--case-workers`、`--openrouter-workers` �
 ### 历史数据兼容
 
 Schema 只接受 4.0。旧 question ID、`video_grounded`、baseline filter 字段及平铺
-报告可保留；旧 `based` 缺失按 false，Gemini `medium` effort 按 default。
+报告可保留；旧 `based` 缺失按 false，Gemini 3.1 Pro `medium` effort 按 default。
 历史 `human_review`、`qualification_pending` 字段忽略，不校验、不批量改写，
 新建或生成视频不再写入这些状态。
 旧 `QWEN_BASE_URL` 仍可读取，`/compatible-mode/v1` 后缀会转换为 `/api/v1`。
+
+Gemini 3.1 Pro 的命令名和批量配置键统一为 `gemini-3.1-pro`，旧 `gemini` 名称不再接受。
+实际请求和持久化模型 ID 仍为 `google/gemini-3.1-pro-preview`，历史 QA 可继续续跑和汇总。
 
 缺少 `final_answer` 的旧 QA 需 `--force-qa` 重跑。缺少 prefix 元数据的旧 Fairy
 video/control QA 需按真实条件补成 true/false，或 `--force-qa` 替换选中范围的未分类结果。
@@ -331,16 +334,16 @@ video/control QA 需按真实条件补成 true/false，或 `--force-qa` 替换�
 ```bash
 python scripts/run_all/run_qa_judge.py --dry-run
 python scripts/run_all/run_qa_judge.py
-python scripts/run_all/run_qa_judge.py --model gemini
+python scripts/run_all/run_qa_judge.py --model gemini-3.1-pro
 python scripts/run_all/run_qa_judge.py --model gemini-4-argon --dry-run
 ```
 
 统一使用 `run_qa_judge.py`，省略 `--model` 等同于 `--model all`。
-默认四个云端模型（Gemini、Gemini 4 Argon、Qwen Max、Kimi）依次运行四个 group（含 math），
+默认四个云端模型（Gemini 3.1 Pro、Gemini 4 Argon、Qwen Max、Kimi）依次运行四个 group（含 math），
 每组执行 `video`、`video-based`、`description`、`description-based`，共 64 条命令；
 单独选择 Argon 默认生成 16 条命令，不包含 control 或 question_only。
 保留模型、effort 和 Fairy video 的作品名前缀设置：Qwen Max 使用 all effort，
-Gemini、Argon、Kimi 使用 default。也可用 `--model` 选择单个云端或本地模型；本地模型使用
+Gemini 3.1 Pro、Argon、Kimi 使用 default。也可用 `--model` 选择单个云端或本地模型；本地模型使用
 all effort。`--group`、`--condition` 可重复指定，`--config` 覆盖并发、RPM 等配置。
 默认配置文件为脚本同目录下的 `run_all_qa_judge_config.json`。
 Argon 默认 QA 并发 24、共享 QA 服务并发 24、QA RPM 20；旧自定义配置缺少
@@ -365,9 +368,9 @@ python scripts/run_all/run_all_summarize.py --dry-run
 该脚本扫描四个 group（含 math）中 conflict 视频已保存的目标 QA，覆盖 video、
 video + based、description、description + based；Fairy video 只选择有作品名前缀的
 记录。未产生目标 QA 的组合跳过，支持部分完成的实验。`--model all` 为默认值，
-在此汇总入口中包含 Gemini、Gemini 4 Argon、Qwen Max、Kimi、Cosmos、Gemma、Qwen27B 全部七个
-模型。Qwen Max 和三个本地模型分别发现 none/default，Gemini 的历史 medium
-归一化为 default；Argon 仅发现 default，与旧 Gemini 的结果独立。
+在此汇总入口中包含 Gemini 3.1 Pro、Gemini 4 Argon、Qwen Max、Kimi、Cosmos、Gemma、Qwen27B 全部七个
+模型。Qwen Max 和三个本地模型分别发现 none/default，Gemini 3.1 Pro 的历史 medium
+归一化为 default；Argon 仅发现 default，与 Gemini 3.1 Pro 的结果独立。
 每个组合仅将实际保存过 QA 的 effort 显式传给原生 summarize。
 
 支持 `--model`（含 `cosmos` / `gemma` 别名）、可重复的 `--group` / `--condition`、
@@ -421,9 +424,12 @@ effort 通过的题目集合可能不同。缺失、过期、未判分或判错�
 
 省略 effort 或使用 `all` 时，只汇总已有判定中实际存在的 effort；没有结果则生成
 默认 effort 的空 summary。每个 effort 一份 JSON，不同 effort 合并到一份 Markdown。
-模型目录名为 `gemini`、`gemini4_argon`、`qwen`、`kimi`、`cosmos`、`gemma`、`qwen38_27b`。例如：
+模型目录名为 `gemini3_1_pro`、`gemini4_argon`、`qwen`、`kimi`、`cosmos`、`gemma`、`qwen38_27b`。
+已有 `gemini` 报告目录保留，重新汇总 Gemini 3.1 Pro 时写入新目录和文件名前缀。例如：
 
 ```text
+results/<group>/gemini3_1_pro/gemini3_1_pro_video_default_summary.json
+results/<group>/gemini3_1_pro/gemini3_1_pro_video_report.md
 results/<group>/gemini4_argon/gemini4_argon_video_default_summary.json
 results/<group>/gemini4_argon/gemini4_argon_video_report.md
 results/<group>/qwen/qwen_description_none_summary.json

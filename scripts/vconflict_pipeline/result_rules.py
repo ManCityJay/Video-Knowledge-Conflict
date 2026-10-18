@@ -106,7 +106,7 @@ def expand_thinking_efforts(
 
 
 def canonical_thinking_effort(model: Any, value: Any) -> Any:
-    """Treat legacy Gemini medium results as the new default effort."""
+    """Treat legacy Gemini 3.1 Pro medium results as the new default effort."""
     if model == GEMINI_QA_MODEL and value == "medium":
         return "default"
     return value

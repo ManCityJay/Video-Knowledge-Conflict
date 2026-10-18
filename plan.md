@@ -144,7 +144,7 @@ Fairy video: input + question_id + model + thinking_effort + based + work_title_
 
 旧 question ID、`video_grounded`、旧 baseline 字段及旧哈希字段兼容读取，不批量迁移。
 历史 `human_review`、`qualification_pending` 字段忽略，不再写入或校验；schema 保持 4.0。
-`video_grounded` 解释为 grounded，缺失 based 解释为 false，Gemini medium effort
+`video_grounded` 解释为 grounded，缺失 based 解释为 false，Gemini 3.1 Pro medium effort
 解释为 default。Filter 读取新字段优先，否则读取 baseline 别名；私有新旧容器共同
 查找最新记录，续跑在原容器更新。命名变化不改变指纹算法或版本。
 
@@ -182,7 +182,7 @@ video/control 缺少 prefix 元数据时，须按 [pipeline.md](pipeline.md#历�
 | 职责 / CLI 名称 | 持久化模型 ID | 生成参数与 effort |
 |---|---|---|
 | Author / Questions / Judge | `openai/gpt-5.6-luna-pro` | OpenRouter 结构化请求 |
-| `gemini` | `google/gemini-3.1-pro-preview` | temperature 0；default 对应 reasoning medium |
+| `gemini-3.1-pro` | `google/gemini-3.1-pro-preview` | temperature 0；default 对应 reasoning medium |
 | `gemini-4-argon` | `google/gemini-4-argon` | 显式发送并记录 temperature 0；仅 default，对应 reasoning medium |
 | `qwen3.8-max` | `qwen3.8-max` | temperature 0；none/default 关闭/开启 thinking |
 | `kimi-k3` | `kimi-k3` | 有效 temperature 1；default 对应 reasoning max |
@@ -190,13 +190,14 @@ video/control 缺少 prefix 元数据时，须按 [pipeline.md](pipeline.md#历�
 | `gemma4` | `google/gemma-4-31B-it` | temperature 0、seed 0；none/default |
 | `qwen3.8-27b` | `Qwen/Qwen3.8-27B` | temperature 0、seed 0；none/default，开启 thinking 时 reasoning effort 为 xhigh |
 
-省略 QA 模型时仍使用 `gemini`，省略 effort 时统一使用 default。
+省略 QA 模型时仍使用 `gemini-3.1-pro`，省略 effort 时统一使用 default。
+Gemini 3.1 Pro 的名称调整不改变请求和持久化模型 ID，历史 QA 记录无需迁移。
 Argon 显式发送 `reasoning.effort: "medium"`，结果的
 `effective_reasoning_effort` 记录为 medium，与 [Google 官方默认值](https://ai.google.dev/gemini-api/docs/latest-model?hl=en)
 一致。按实验配置显式发送并记录 `temperature: 0`，省略 `top_p`、`top_k`；
 官方说明采样参数会被忽略，温度记录表示请求配置。保留单次回答、
 最终答案解析和格式重试；截断报错，不进行长输出续写。Argon 使用独立模型 ID，
-结果、续跑与 question-only 筛选均与旧 Gemini 隔离，无需迁移历史数据。
+结果、续跑与 question-only 筛选均与 Gemini 3.1 Pro 隔离，无需迁移历史数据。
 本地服务请求模型 ID 取 `/v1/models` 返回值，
 持久化 ID 保持表中实验标识。Gemma 通过 `chat_template_kwargs.enable_thinking`
 显式控制推理；回答正文与可选 reasoning 分开保存，final_answer 仅从正文提取。
@@ -204,7 +205,7 @@ Qwen27B 同样显式设置 `chat_template_kwargs.enable_thinking`，开启时在
 `reasoning_effort=xhigh`，正文和 reasoning 分开保存。本地默认输出上限为 Cosmos
 8192、Gemma 2048、Qwen27B 32768；Qwen27B 服务默认上下文 65536。
 
-- Gemini、Gemini 4 Argon 和 Kimi 将本地视频编码为 Base64 Data URL，Kimi 请求体上限 100 MB。
+- Gemini 3.1 Pro、Gemini 4 Argon 和 Kimi 将本地视频编码为 Base64 Data URL，Kimi 请求体上限 100 MB。
   两种 Gemini QA 均使用 `OPENROUTER_API_KEY` 和 OpenRouter Chat Completions，
   支持 video、control、description、question_only，并与 Judge 共享 OpenRouter 总额度。
 - 云端 Qwen (`qwen3.8-max`) 使用中国大陆 DashScope SDK 上传本地视频，文件上限

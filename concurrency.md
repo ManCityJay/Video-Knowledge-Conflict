@@ -23,7 +23,7 @@ case、视频或题目。Video、control、description 和 question-only 四种�
 | `--summary-workers` | 4 | 仅 summarize，并行读取 case |
 
 RPM 为 0 表示不增加该项速率限制，仍受其他适用限制约束。并发必须为正整数。
-Gemini（`gemini`）和 Gemini 4 Argon（`gemini-4-argon`）QA 与 Judge 共同占用
+Gemini 3.1 Pro（`gemini-3.1-pro`）和 Gemini 4 Argon（`gemini-4-argon`）QA 与 Judge 共同占用
 OpenRouter 总额度，不能把各池的并发直接相加。两种 Gemini 复用同一 endpoint 和
 `OPENROUTER_API_KEY`，共享 QA 服务并发，QA RPM 则按独立模型 ID 分别记录，
 所有请求还受 OpenRouter 总并发和 RPM 约束。Argon 默认 QA / 服务并发均为 24、RPM 为 20。
@@ -36,13 +36,13 @@ Qwen、Kimi、本地 QA 不占用 OpenRouter 额度。本地并发是客户端�
 
 ```bash
 python scripts/pipeline.py qa-judge --group classic_fairy_tale_film_conflicts \
-  --input video --qa-model gemini \
+  --input video --qa-model gemini-3.1-pro \
   --qa-concurrency 24 --judge-concurrency 24 \
   --qa-service-concurrency 24 --openrouter-concurrency 24 \
   --qa-rpm 20 --judge-rpm 20 --openrouter-rpm 20
 
 python scripts/pipeline.py summarize --group classic_fairy_tale_film_conflicts \
-  --input video --qa-model gemini --summary-workers 4
+  --input video --qa-model gemini-3.1-pro --summary-workers 4
 ```
 
 提高并发不会绕过 RPM。如果 20 RPM 已经饱和，更多线程不能提高启动速率。

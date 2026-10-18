@@ -18,11 +18,11 @@ GEMMA_QA_MODEL = "google/gemma-4-31B-it"
 QWEN38_QA_MODEL = "Qwen/Qwen3.8-27B"
 DEFAULT_QA_MODEL = GEMINI_QA_MODEL
 CLI_QA_MODELS = (
-    "gemini", "gemini-4-argon", QWEN_QA_MODEL, KIMI_QA_MODEL,
+    "gemini-3.1-pro", "gemini-4-argon", QWEN_QA_MODEL, KIMI_QA_MODEL,
     "cosmos3-nano", "gemma4", "qwen3.8-27b",
 )
 CLI_QA_MODEL_IDS = {
-    "gemini": GEMINI_QA_MODEL,
+    "gemini-3.1-pro": GEMINI_QA_MODEL,
     "gemini-4-argon": GEMINI_ARGON_QA_MODEL,
     QWEN_QA_MODEL: QWEN_QA_MODEL,
     KIMI_QA_MODEL: KIMI_QA_MODEL,
@@ -31,7 +31,7 @@ CLI_QA_MODEL_IDS = {
     "qwen3.8-27b": QWEN38_QA_MODEL,
 }
 QA_MODEL_SLUGS = {
-    GEMINI_QA_MODEL: "gemini",
+    GEMINI_QA_MODEL: "gemini3_1_pro",
     GEMINI_ARGON_QA_MODEL: "gemini4_argon",
     QWEN_QA_MODEL: "qwen",
     KIMI_QA_MODEL: "kimi",

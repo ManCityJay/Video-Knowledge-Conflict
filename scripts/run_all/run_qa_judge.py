@@ -28,7 +28,7 @@ from vconflict_pipeline.settings import (
 )
 
 
-CLOSED_MODELS = ("gemini", "gemini-4-argon", "qwen3.8-max", "kimi-k3")
+CLOSED_MODELS = ("gemini-3.1-pro", "gemini-4-argon", "qwen3.8-max", "kimi-k3")
 LOCAL_MODELS = {
     "cosmos3-nano": DEFAULT_COSMOS_WORKERS,
     "gemma4": DEFAULT_GEMMA_WORKERS,
@@ -54,7 +54,7 @@ SHARED_FIELDS = (
 )
 QA_FIELDS = ("qa_concurrency", "qa_service_concurrency", "qa_rpm")
 API_KEYS = {
-    "gemini": "OPENROUTER_API_KEY",
+    "gemini-3.1-pro": "OPENROUTER_API_KEY",
     "gemini-4-argon": "OPENROUTER_API_KEY",
     "qwen3.8-max": "DASHSCOPE_API_KEY",
     "kimi-k3": "MOONSHOT_API_KEY",
@@ -251,7 +251,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", default="all", choices=("all", *MODELS),
                         type=lambda value: MODEL_ALIASES.get(value, value),
-                        help="Default: all (Gemini, Gemini 4 Argon, Qwen Max, Kimi); aliases: cosmos, gemma.")
+                        help="Default: all (Gemini 3.1 Pro, Gemini 4 Argon, Qwen Max, Kimi); aliases: cosmos, gemma.")
     parser.add_argument("--group", action="append", choices=GROUPS,
                         help="Repeat to select groups; default: all four groups, including math.")
     parser.add_argument("--condition", action="append", choices=tuple(CONDITIONS),

@@ -338,7 +338,7 @@ def _gemini_payload(
     thinking_effort: str | None,
 ) -> dict[str, Any]:
     if thinking_effort != "default":
-        raise PipelineError("Gemini thinking effort must be default.")
+        raise PipelineError("Gemini 3.1 Pro thinking effort must be default.")
     return {
         "model": GEMINI_QA_MODEL,
         "temperature": 0.0,
@@ -441,7 +441,7 @@ def _gemini_description_payload(
     thinking_effort: str | None,
 ) -> dict[str, Any]:
     if thinking_effort != "default":
-        raise PipelineError("Gemini thinking effort must be default.")
+        raise PipelineError("Gemini 3.1 Pro thinking effort must be default.")
     return {
         "model": GEMINI_QA_MODEL,
         "temperature": 0.0,
