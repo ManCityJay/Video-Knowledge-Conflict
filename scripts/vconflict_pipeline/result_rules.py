@@ -7,6 +7,7 @@ from .common import PipelineError
 from .settings import (
     COSMOS_QA_MODEL,
     FAIRY_TALE_GROUP,
+    GEMINI_ARGON_QA_MODEL,
     GEMINI_QA_MODEL,
     GEMMA_QA_MODEL,
     KIMI_QA_MODEL,
@@ -59,6 +60,7 @@ def set_filter_field(record: dict[str, Any], name: str, value: Any) -> None:
 
 QA_THINKING_EFFORTS = {
     GEMINI_QA_MODEL: ("default",),
+    GEMINI_ARGON_QA_MODEL: ("default",),
     QWEN_QA_MODEL: (None, "default"),
     KIMI_QA_MODEL: ("default",),
     COSMOS_QA_MODEL: (None, "default"),

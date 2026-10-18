@@ -23,7 +23,10 @@ case、视频或题目。Video、control、description 和 question-only 四种�
 | `--summary-workers` | 4 | 仅 summarize，并行读取 case |
 
 RPM 为 0 表示不增加该项速率限制，仍受其他适用限制约束。并发必须为正整数。
-Gemini QA 与 Judge 共同占用 OpenRouter 总额度，不能把两个池的并发直接相加。
+Gemini（`gemini`）和 Gemini 4 Argon（`gemini-4-argon`）QA 与 Judge 共同占用
+OpenRouter 总额度，不能把各池的并发直接相加。两种 Gemini 复用同一 endpoint 和
+`OPENROUTER_API_KEY`，共享 QA 服务并发，QA RPM 则按独立模型 ID 分别记录，
+所有请求还受 OpenRouter 总并发和 RPM 约束。Argon 默认 QA / 服务并发均为 24、RPM 为 20。
 Qwen、Kimi、本地 QA 不占用 OpenRouter 额度。本地并发是客户端在途上限，
 不是 vLLM `max-num-seqs`，不会自动增加 GPU 的推理容量。
 

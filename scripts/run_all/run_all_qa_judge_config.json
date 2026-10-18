@@ -11,6 +11,11 @@
       "qa_service_concurrency": 24,
       "qa_rpm": 20
     },
+    "gemini-4-argon": {
+      "qa_concurrency": 24,
+      "qa_service_concurrency": 24,
+      "qa_rpm": 20
+    },
     "qwen3.8-max": {
       "qa_concurrency": 24,
       "qa_service_concurrency": 24,
@@ -27,13 +32,13 @@
       "qa_rpm": 0
     },
     "gemma4": {
-      "qa_concurrency": 4,
-      "qa_service_concurrency": 4,
+      "qa_concurrency": 8,
+      "qa_service_concurrency": 8,
       "qa_rpm": 0
     },
     "qwen3.8-27b": {
-      "qa_concurrency": 4,
-      "qa_service_concurrency": 4,
+      "qa_concurrency": 8,
+      "qa_service_concurrency": 8,
       "qa_rpm": 0
     }
   }

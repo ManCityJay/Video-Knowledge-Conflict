@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run a QA/Judge model matrix; default to the three cloud models."""
+"""Run a QA/Judge model matrix; default to the four cloud models."""
 from __future__ import annotations
 
 import argparse
@@ -28,7 +28,7 @@ from vconflict_pipeline.settings import (
 )
 
 
-CLOSED_MODELS = ("gemini", "qwen3.8-max", "kimi-k3")
+CLOSED_MODELS = ("gemini", "gemini-4-argon", "qwen3.8-max", "kimi-k3")
 LOCAL_MODELS = {
     "cosmos3-nano": DEFAULT_COSMOS_WORKERS,
     "gemma4": DEFAULT_GEMMA_WORKERS,
@@ -55,6 +55,7 @@ SHARED_FIELDS = (
 QA_FIELDS = ("qa_concurrency", "qa_service_concurrency", "qa_rpm")
 API_KEYS = {
     "gemini": "OPENROUTER_API_KEY",
+    "gemini-4-argon": "OPENROUTER_API_KEY",
     "qwen3.8-max": "DASHSCOPE_API_KEY",
     "kimi-k3": "MOONSHOT_API_KEY",
 }
@@ -70,6 +71,13 @@ def load_config(path: Path) -> dict:
     if not isinstance(config, dict) or set(config) != {*SHARED_FIELDS, "models"}:
         raise ValueError(f"Config must contain {', '.join(SHARED_FIELDS)} and models")
     models = config["models"]
+    # Older custom configs retain their limits and gain Argon's defaults.
+    if isinstance(models, dict):
+        models.setdefault("gemini-4-argon", {
+            "qa_concurrency": 24,
+            "qa_service_concurrency": 24,
+            "qa_rpm": 20,
+        })
     if (not isinstance(models, dict) or not set(CLOSED_MODELS).issubset(models)
             or not set(models).issubset(MODELS)):
         raise ValueError(
@@ -243,7 +251,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", default="all", choices=("all", *MODELS),
                         type=lambda value: MODEL_ALIASES.get(value, value),
-                        help="Default: all (Gemini, Qwen Max, Kimi only); aliases: cosmos, gemma.")
+                        help="Default: all (Gemini, Gemini 4 Argon, Qwen Max, Kimi); aliases: cosmos, gemma.")
     parser.add_argument("--group", action="append", choices=GROUPS,
                         help="Repeat to select groups; default: all four groups, including math.")
     parser.add_argument("--condition", action="append", choices=tuple(CONDITIONS),

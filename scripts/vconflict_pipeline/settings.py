@@ -10,15 +10,20 @@ RESULTS_DIR = PROJECT_ROOT / "results"
 
 AUTHOR_JUDGE_MODEL = "openai/gpt-5.6-luna-pro"
 GEMINI_QA_MODEL = "google/gemini-3.1-pro-preview"
+GEMINI_ARGON_QA_MODEL = "google/gemini-4-argon"
 QWEN_QA_MODEL = "qwen3.8-max"
 KIMI_QA_MODEL = "kimi-k3"
 COSMOS_QA_MODEL = "nvidia/Cosmos3-Nano"
 GEMMA_QA_MODEL = "google/gemma-4-31B-it"
 QWEN38_QA_MODEL = "Qwen/Qwen3.8-27B"
 DEFAULT_QA_MODEL = GEMINI_QA_MODEL
-CLI_QA_MODELS = ("gemini", QWEN_QA_MODEL, KIMI_QA_MODEL, "cosmos3-nano", "gemma4", "qwen3.8-27b")
+CLI_QA_MODELS = (
+    "gemini", "gemini-4-argon", QWEN_QA_MODEL, KIMI_QA_MODEL,
+    "cosmos3-nano", "gemma4", "qwen3.8-27b",
+)
 CLI_QA_MODEL_IDS = {
     "gemini": GEMINI_QA_MODEL,
+    "gemini-4-argon": GEMINI_ARGON_QA_MODEL,
     QWEN_QA_MODEL: QWEN_QA_MODEL,
     KIMI_QA_MODEL: KIMI_QA_MODEL,
     "cosmos3-nano": COSMOS_QA_MODEL,
@@ -27,6 +32,7 @@ CLI_QA_MODEL_IDS = {
 }
 QA_MODEL_SLUGS = {
     GEMINI_QA_MODEL: "gemini",
+    GEMINI_ARGON_QA_MODEL: "gemini4_argon",
     QWEN_QA_MODEL: "qwen",
     KIMI_QA_MODEL: "kimi",
     COSMOS_QA_MODEL: "cosmos",

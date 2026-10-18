@@ -23,6 +23,7 @@ from .settings import (
     DEFAULT_GEMMA_MAX_TOKENS,
     DEFAULT_QWEN38_BASE_URL,
     DEFAULT_QWEN38_MAX_TOKENS,
+    GEMINI_ARGON_QA_MODEL,
     GEMINI_QA_MODEL,
     GEMMA_QA_MODEL,
     KIMI_QA_MODEL,
@@ -81,7 +82,7 @@ class QABackend:
     model: str
     thinking_efforts: tuple[str | None, ...]
     default_thinking_effort: str | None
-    temperature: float
+    temperature: float | None
     api_key_variable: str | None
     service: str
     endpoint: EndpointResolver | None
@@ -355,6 +356,19 @@ def _gemini_payload(
     }
 
 
+def _gemini_argon_payload(
+    prompt_text: str,
+    video_data_url: str,
+    thinking_effort: str | None,
+) -> dict[str, Any]:
+    payload = _gemini_argon_description_payload(prompt_text, thinking_effort)
+    payload["messages"][0]["content"] = [
+        {"type": "video_url", "video_url": {"url": video_data_url}},
+        {"type": "text", "text": prompt_text},
+    ]
+    return payload
+
+
 def _kimi_payload(
     prompt_text: str,
     video_data_url: str,
@@ -430,6 +444,22 @@ def _gemini_description_payload(
         raise PipelineError("Gemini thinking effort must be default.")
     return {
         "model": GEMINI_QA_MODEL,
+        "temperature": 0.0,
+        "reasoning": {"effort": "medium"},
+        "stream": False,
+        "messages": [{"role": "user", "content": prompt_text}],
+    }
+
+
+def _gemini_argon_description_payload(
+    prompt_text: str,
+    thinking_effort: str | None,
+) -> dict[str, Any]:
+    if thinking_effort != "default":
+        raise PipelineError("Gemini 4 Argon thinking effort must be default.")
+    # Send the experiment's temperature explicitly; omit top_p and top_k.
+    return {
+        "model": GEMINI_ARGON_QA_MODEL,
         "temperature": 0.0,
         "reasoning": {"effort": "medium"},
         "stream": False,
@@ -624,6 +654,17 @@ GEMINI_BACKEND = QABackend(
     build_payload=_gemini_payload,
     effective_reasoning_effort="medium",
 )
+GEMINI_ARGON_BACKEND = QABackend(
+    model=GEMINI_ARGON_QA_MODEL,
+    thinking_efforts=QA_THINKING_EFFORTS[GEMINI_ARGON_QA_MODEL],
+    default_thinking_effort=DEFAULT_THINKING_EFFORT,
+    temperature=0.0,
+    api_key_variable="OPENROUTER_API_KEY",
+    service="OpenRouter",
+    endpoint=lambda: OPENROUTER_URL,
+    build_payload=_gemini_argon_payload,
+    effective_reasoning_effort="medium",
+)
 QWEN_BACKEND = QABackend(
     model=QWEN_QA_MODEL,
     thinking_efforts=QA_THINKING_EFFORTS[QWEN_QA_MODEL],
@@ -678,7 +719,10 @@ QWEN38_BACKEND = QABackend(
 )
 QA_BACKENDS = {
     backend.model: backend
-    for backend in (GEMINI_BACKEND, QWEN_BACKEND, KIMI_BACKEND, COSMOS_BACKEND, GEMMA_BACKEND, QWEN38_BACKEND)
+    for backend in (
+        GEMINI_BACKEND, GEMINI_ARGON_BACKEND, QWEN_BACKEND, KIMI_BACKEND,
+        COSMOS_BACKEND, GEMMA_BACKEND, QWEN38_BACKEND,
+    )
 }
 
 
@@ -786,6 +830,8 @@ def run_qa_once(
                 )
             elif input_mode != "video" and qa_model == GEMINI_QA_MODEL:
                 payload = _gemini_description_payload(prompt_text, thinking_effort)
+            elif input_mode != "video" and qa_model == GEMINI_ARGON_QA_MODEL:
+                payload = _gemini_argon_description_payload(prompt_text, thinking_effort)
             elif input_mode != "video" and qa_model == KIMI_QA_MODEL:
                 payload = _kimi_description_payload(prompt_text, thinking_effort)
             elif backend.build_payload is None or video_input is None:

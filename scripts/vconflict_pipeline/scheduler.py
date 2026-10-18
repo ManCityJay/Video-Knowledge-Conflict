@@ -16,7 +16,7 @@ from .qa import LOCAL_QA_CONFIGS, MissingFinalAnswerError, preflight_qa_backend,
 from .qa_diagnostics import QADiagnostics
 from .result_rules import expand_thinking_efforts
 from .runtime import Runtime, case_lock, path_key
-from .settings import AUTHOR_JUDGE_MODEL, GEMINI_QA_MODEL
+from .settings import AUTHOR_JUDGE_MODEL
 from .storage import atomic_write_json, load_case
 from .task_execution import TaskExecutor
 from .task_planning import TaskPlanner
@@ -62,7 +62,7 @@ class Engine:
         judge_rate = 'judge-rpm:' + digest([router, AUTHOR_JUDGE_MODEL])
         self.resource_keys = {'qa': [service, qa_rate], 'judge': [router, judge_rate]}
         self.admission_roots = {'qa': service, 'judge': router}
-        if self.args.qa_model == GEMINI_QA_MODEL:
+        if endpoint == OPENROUTER_URL:
             self.resource_keys['qa'].append(router)
             self.admission_roots['qa'] = router
         return {service: (self.args.qa_service_concurrency, 0), qa_rate: (0, self.args.qa_rpm),
