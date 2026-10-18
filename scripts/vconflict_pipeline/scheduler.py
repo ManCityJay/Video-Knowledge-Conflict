@@ -338,6 +338,8 @@ def command_qa_judge(args):
     )
     log_path = getattr(args, 'max_token_log', None)
     max_token_log = MaxTokenLog(log_path) if log_path is not None else None
+    if max_token_log is not None:
+        print(f'Max-token log: {max_token_log.path}', flush=True)
     paths = iter_case_paths(grouped_dir(args.dataset_dir, args.group), args.case_id)
     efforts = expand_thinking_efforts(args.thinking_effort, args.qa_model)
     diagnostics = QADiagnostics(include_truncation=args.qa_model in LOCAL_QA_CONFIGS)

@@ -49,18 +49,11 @@ def split_truncated_response(response: dict[str, Any], model: str) -> dict[str, 
 
 
 class MaxTokenLog:
-    """One append-only JSONL shared by this command's worker threads."""
+    """One JSONL created on first append, shared by this command's worker threads."""
 
     def __init__(self, path: Path) -> None:
         self.path = path.expanduser().resolve()
         self._lock = threading.Lock()
-        print(f"Max-token log: {self.path}", flush=True)
-        try:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            with self.path.open("a", encoding="utf-8", newline="\n"):
-                pass
-        except OSError as exc:
-            self._report_error(exc)
 
     def _report_error(self, exc: Exception) -> None:
         print(f"Max-token log write failed: {self.path}: {exc}", file=sys.stderr, flush=True)

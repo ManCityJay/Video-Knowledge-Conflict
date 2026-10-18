@@ -288,16 +288,6 @@ def main(argv: list[str] | None = None) -> int:
             summary.flush()
             batch_status = "running"
             try:
-                if max_token_log is not None:
-                    try:
-                        max_token_log.parent.mkdir(parents=True, exist_ok=True)
-                        with max_token_log.open("x", encoding="utf-8"):
-                            pass
-                    except OSError as exc:
-                        message = f"Max-token log write failed: {max_token_log}: {exc}"
-                        summary.write(message + "\n")
-                        summary.flush()
-                        raise OSError(message) from exc
                 for group in dict.fromkeys(args.group or GROUPS):
                     directory = args.dataset_dir / group
                     if not directory.is_dir() or not any(directory.glob("*.json")):

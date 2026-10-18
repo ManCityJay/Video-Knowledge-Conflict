@@ -371,14 +371,16 @@ Summary 不保存逐 case 进度、回答、判定、逐命令日志、配置快
 
 #### 保存本地模型的截断回答
 
-选择 `--model cosmos3-nano`、`gemma4` 或 `qwen3.8-27b` 时，每次批量运行还创建
+选择 `--model cosmos3-nano`、`gemma4` 或 `qwen3.8-27b` 时，每次批量运行指定
 `results/run_all/max_token/<本次运行ID>.jsonl`，运行 ID 与该次 summary 的目录名
 相同。指定 `--log-dir` 时使用其下的 `max_token/`。同次运行的全部 group、condition
 和 effort 共用这一绝对路径，下一次运行使用新文件；启动时在终端和 summary 中
-打印路径。正常完成且没有截断时文件为空；提前失败或写入失败须结合 summary 判断。
-云端批量运行保持原有输出方式。
+打印路径。首次实际截断时才创建目录和文件并写入记录；没有截断、零目标或预检
+失败时不创建该次运行的截断日志，也不新建 `max_token/` 目录。写入失败须结合
+summary 判断；历史空日志文件不清理。云端批量运行保持原有输出方式。
 
-直接运行 `qa-judge` 默认关闭保存，可显式启用；重复指定同一文件会继续追加：
+直接运行 `qa-judge` 默认关闭保存，可显式启用，同样在首次实际截断时才创建目录
+和文件；重复指定同一文件会继续追加：
 
 ```bash
 python scripts/pipeline.py qa-judge --group real_world_commonsense_conflicts \

@@ -80,8 +80,10 @@ Judge 只读取从正文提取的 `final_answer`，不从解释或 reasoning 中
 RPM 额度，沿用同一任务认领；格式重试与网络重试分别计数，网络错误仍遵循
 `--max-retries`，格式重试不会重置或占用其额度。
 
-本地模型 run_all 每次运行在 `results/run_all/max_token/<运行ID>.jsonl` 保存全部
-实际截断响应，运行 ID 与 summary 目录相同；`--log-dir` 覆盖父目录。同次运行
+本地模型 run_all 仅在首次实际截断时创建目录和日志，在
+`results/run_all/max_token/<运行ID>.jsonl` 保存全部实际截断响应；无截断、零目标或
+预检失败时不创建该次运行的日志，也不新建 `max_token` 目录，不清理历史空日志。
+运行 ID 与 summary 目录相同；`--log-dir` 覆盖父目录。同次运行
 各组、条件和 effort 共用一份文件。独立 `qa-judge` 仅在指定 `--max-token-log` 时
 启用。日志按请求追加并 flush，保留 case/问题/条件、生成参数、usage、完整原始
 响应，以及分离的 reasoning/正文和来源；无法可靠分离时明确标识，不猜测。
