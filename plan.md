@@ -80,6 +80,14 @@ Judge 只读取从正文提取的 `final_answer`，不从解释或 reasoning 中
 RPM 额度，沿用同一任务认领；格式重试与网络重试分别计数，网络错误仍遵循
 `--max-retries`，格式重试不会重置或占用其额度。
 
+本地模型 run_all 每次运行在 `results/run_all/max_token/<运行ID>.jsonl` 保存全部
+实际截断响应，运行 ID 与 summary 目录相同；`--log-dir` 覆盖父目录。同次运行
+各组、条件和 effort 共用一份文件。独立 `qa-judge` 仅在指定 `--max-token-log` 时
+启用。日志按请求追加并 flush，保留 case/问题/条件、生成参数、usage、完整原始
+响应，以及分离的 reasoning/正文和来源；无法可靠分离时明确标识，不猜测。
+日志不作为成功 QA 或 Judge 输入，写入失败保留截断计数并报告路径和原因。
+细节见 [pipeline.md](pipeline.md#保存本地模型的截断回答)。
+
 Judge 根据问题、最终答案、输入角色、事实和两类 reference 分类：
 
 | 条件 | Verdict |
@@ -123,7 +131,7 @@ Question-only 仅统计 answer-level control 指标，重复历史按 `(timestam
 | question | `question_id`、`text_en`、两类 reference，可选 `question_only_results` |
 | video | `video_id`、`role`、`seedance_prompt_en`、`task_id`、`status`、`local_path`、`qa_results` |
 | description | `context_en`、可选 `context_prefix_en`、来源、来源 SHA-256、生成模型、时间和请求 ID |
-| QA | `run_id`、时间、输入模式、问题 ID/正文、模型、effort、温度、`raw_answer`、`final_answer`、可选 usage/reasoning、`final_answer_retry_count: 1`、judgment |
+| QA | `run_id`、时间、输入模式、问题 ID/正文、模型、effort、温度、`raw_answer`、`final_answer`、本地模型的 `max_tokens` / `thinking_token_budget`、可选 usage/reasoning、`final_answer_retry_count: 1`、judgment |
 | variant_context | 私有 facts/questions、可选标题、`matched_control_path` |
 | 画面与审题证据 | `video_observation`、`require_video_observation`、`question_audit` 和来源指纹 |
 
@@ -147,6 +155,11 @@ Fairy video: input + question_id + model + thinking_effort + based + work_title_
 `video_grounded` 解释为 grounded，缺失 based 解释为 false，Gemini medium effort
 解释为 default。Filter 读取新字段优先，否则读取 baseline 别名；私有新旧容器共同
 查找最新记录，续跑在原容器更新。命名变化不改变指纹算法或版本。
+
+本地输出预算只记录在新 QA 中，不加入去重键、任务身份或来源指纹，也不补写历史记录。
+缺少预算字段的有效旧结果仍按原规则复用；修改预算不会自动重跑，旧、新协议结果
+可能同时被复用和汇总。需要统一预算时，使用 `--force-qa` 重跑相应输入、模型和
+effort 范围。
 
 ## 来源与过期规则
 
@@ -193,8 +206,39 @@ video/control 缺少 prefix 元数据时，须按 [pipeline.md](pipeline.md#历�
 持久化 ID 保持表中实验标识。Gemma 通过 `chat_template_kwargs.enable_thinking`
 显式控制推理；回答正文与可选 reasoning 分开保存，final_answer 仅从正文提取。
 Qwen27B 同样显式设置 `chat_template_kwargs.enable_thinking`，开启时在该对象内设置
-`reasoning_effort=xhigh`，正文和 reasoning 分开保存。本地默认输出上限为 Cosmos
-8192、Gemma 2048、Qwen27B 32768；Qwen27B 服务默认上下文 65536。
+`reasoning_effort=xhigh`，正文和 reasoning 分开保存。三个本地模型的默认总输出预算
+统一为 `max_tokens=8192`，保留各模型的 `--*-max-tokens` 覆盖参数。
+Gemma 客户端默认由 2048 调整到 8192，Qwen27B 由 32768 调整到 8192，修正客户端
+与默认服务端上限不一致的问题；Qwen27B 服务默认上下文仍为 65536。
+
+共用 `--thinking-token-budget` 接受正整数，默认 6144。这是本实验采用的工程预算，
+不是官方推荐值。仅本地模型的实际 effort 为 `default` 时，在请求顶层发送
+`thinking_token_budget`，并要求它严格小于该模型请求的总输出预算；`none` 不发送，
+`all` 逐任务按实际 effort 处理，云端模型不使用此参数。四种输入独立执行，均经过
+同一预算传递流程；格式重试沿用完全相同的预算和生成参数。
+
+vLLM 0.29.0 通过 `--reasoning-config` 显式设置以下边界，由 tokenizer 转为 token
+序列；达到预算时只强制注入结束标记，让模型继续自然生成正文，不加入额外收尾提示。
+
+| 模型 | `reasoning_start_str` | `reasoning_end_str` | Parser |
+|---|---|---|---|
+| Cosmos | `<think>` | `</think>` | 不启用 |
+| Qwen27B | `<think>` | `</think>` | `qwen3` |
+| Gemma | `<\|channel>thought\n` | `<channel\|>` | `gemma4` |
+
+Gemma 起始边界末尾的 `\n` 表示实际换行。配置依据为
+[vLLM 0.29.0 ReasoningConfig](https://github.com/vllm-project/vllm/blob/v0.29.0/vllm/config/reasoning.py)，
+请求字段依据为
+[ChatCompletionRequest](https://github.com/vllm-project/vllm/blob/v0.29.0/vllm/entrypoints/openai/chat_completion/protocol.py)。
+本地新 QA 保存实际请求的 `max_tokens` 和 `thinking_token_budget`，后者在未启用时为
+`null`；不按输出长度推断是否触发强制收尾。`Final answer:` 提示、正文解析、一次格式
+重试和总输出截断拒绝规则保持不变。
+
+三个服务启动脚本统一使用 `MAX_OUTPUT_TOKENS` 环境变量，默认 8192，传入
+`--override-generation-config`。更新边界配置后必须重启服务；提高客户端总预算时也须
+提高服务端上限，并确保输入与输出能放入上下文。服务不支持预算时直接报告错误，
+不删除参数后静默重试。逐模型确认强制关闭推理且正文继续生成后，才开始批量实验；
+验收步骤见 [pipeline.md](pipeline.md#本地推理预算验收)。
 
 - Gemini 和 Kimi 将本地视频编码为 Base64 Data URL，Kimi 请求体上限 100 MB。
 - 云端 Qwen (`qwen3.8-max`) 使用中国大陆 DashScope SDK 上传本地视频，文件上限
@@ -251,7 +295,7 @@ Qwen27B 的 thinking 开关与 parser 参考 [vLLM 官方配方](https://recipes
 | `authoring_definitions.py` / `authoring.py` | Prompt/schema 定义、生成校验修复与保存 |
 | `generation.py` / `descriptions.py` / `deletion.py` | 视频、文本 context 和数据删除操作 |
 | `result_rules.py` / `selection.py` / `filters.py` | 输入介质与角色、统一结果条件、有效视频/问题选择、question-only 来源及可选报告筛选 |
-| `qa.py` / `qa_diagnostics.py` | 单次模型请求、回答解析、本次运行诊断 |
+| `qa.py` / `qa_diagnostics.py` / `qa_truncation.py` | 单次模型请求、回答解析、本次运行诊断和截断响应日志 |
 | `task_planning.py` / `task_execution.py` / `media_cache.py` | 任务身份与依赖规划、请求执行与结果合并、媒体准备与缓存 |
 | `scheduler.py` / `runtime.py` | 调度、认领、额度准入、退避和进度；同机进程协调与锁 |
 | `evaluation.py` / `reporting.py` | 共用目标规划的预检、force 清理与完成计数；按角色汇总快照与独立报告 |

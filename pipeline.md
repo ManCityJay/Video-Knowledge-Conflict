@@ -179,11 +179,18 @@ QA 及其中的 Judge 历史；保留其他视频的历史、共享问题及其 
 | `qwen3.8-max` | `none`、`default` | 24 / 24 | 服务配置 |
 | `kimi-k3` | `default` | 24 / 24 | 服务配置 |
 | `cosmos3-nano` | `none`、`default` | 8 / 8 | `--cosmos-max-tokens 8192` |
-| `gemma4` | `none`、`default` | 4 / 4 | `--gemma-max-tokens 2048` |
-| `qwen3.8-27b` | `none`、`default` | 1 / 1 | `--qwen38-max-tokens 32768` |
+| `gemma4` | `none`、`default` | 4 / 4 | `--gemma-max-tokens 8192` |
+| `qwen3.8-27b` | `none`、`default` | 1 / 1 | `--qwen38-max-tokens 8192` |
 
 省略 effort 使用 `default`；`all` 执行模型支持的全部 effort，也可重复指定该选项。
 模型 ID、温度和视频采样协议见 [plan.md](plan.md#模型配置与采样协议)。
+
+三个本地模型默认总输出预算为 8192（含推理和正文），默认
+`--thinking-token-budget 6144`。该正整数参数仅在本地实际 effort 为 `default` 时作为
+顶层 `thinking_token_budget` 发送，并须严格小于所选模型的 `--*-max-tokens`；
+`none` 不发送，`all` 按每个任务的 effort 处理，云端模型忽略该预算。
+6144 是本实验的工程预算，不是官方推荐值。Gemma 客户端默认从 2048 调整到 8192，
+Qwen27B 从 32768 调整到 8192，与默认服务端输出上限一致。
 
 本地服务启动脚本在 Linux/Bash、Conda 和兼容的 vLLM 环境中运行：
 
@@ -195,14 +202,27 @@ bash scripts/start_qwen38_vllm.sh
 DRY_RUN=1 bash scripts/start_gemma4_vllm.sh
 # Qwen27B dry-run 无需激活 Conda 或安装 vLLM
 DRY_RUN=1 bash scripts/start_qwen38_vllm.sh
+# 提高客户端总预算时，同步提高对应服务的上限并重启
+MAX_OUTPUT_TOKENS=16384 bash scripts/start_qwen38_vllm.sh
 ```
+
+三个启动脚本均接受 `MAX_OUTPUT_TOKENS` 正整数，默认 8192，通过
+`--override-generation-config` 设置服务端输出上限。提高客户端 `--*-max-tokens` 时，
+也需提高此上限，并保证输入 token（含视频）与输出能放入服务端上下文。
+本次更新增加 `--reasoning-config`，必须用更新后的脚本重启已有服务。
+Cosmos 和 Qwen 使用 `<think>` / `</think>`，Gemma 使用
+`<|channel>thought\n` / `<channel|>`（`\n` 是实际换行）；达到推理预算时只注入结束
+标记，继续自然生成正文。Cosmos 保留无 parser 模式，Gemma/Qwen 分别保留
+`gemma4` / `qwen3` parser；具体配置和 vLLM 0.29.0 实现依据见
+[plan.md](plan.md#模型配置与采样协议)。
 
 Cosmos 默认激活 `vllm` 环境、GPU 0 单卡、BF16、端口 8000、`MAX_NUM_SEQS=4`。
 `VIDEO_ROOT` 默认仓库 `videos/`，`TENSOR_PARALLEL_SIZE`、`CUDA_VISIBLE_DEVICES`、
 `MAX_NUM_SEQS`、`GPU_MEMORY_UTILIZATION`、`VLLM_HOST`、`VLLM_PORT` 可覆盖。
 无需添加模型架构覆盖参数。
 
-Gemma 默认 `vllm` 环境、GPU 0/1 双卡、BF16、32K 上下文、`MAX_NUM_SEQS=2`、
+Gemma 默认 `vllm` 环境、GPU 1 单卡（`CUDA_VISIBLE_DEVICES=1`、`TENSOR_PARALLEL_SIZE=1`）、
+BF16、32K 上下文、`MAX_NUM_SEQS=2`、
 端口 8001。`GEMMA_MODEL`、`GEMMA_REVISION`、`GEMMA_CONDA_ENV` 可覆盖模型和环境；
 其余部署参数与 Cosmos 同名，另支持 `MAX_MODEL_LEN`、`MEDIA_ROOT` 和 `TEXT_ONLY=1`。
 
@@ -227,6 +247,10 @@ python scripts/pipeline.py qa-judge --group classic_fairy_tale_film_conflicts \
   --input description --qa-model qwen3.8-max --thinking-effort all
 python scripts/pipeline.py qa-judge --group real_world_commonsense_conflicts \
   --input question_only --qa-model qwen3.8-max --thinking-effort all
+# 本地模型显式预算示例；也适用于 control、description、question_only
+python scripts/pipeline.py qa-judge --group real_world_commonsense_conflicts \
+  --input video --qa-model qwen3.8-27b --thinking-effort all \
+  --qwen38-max-tokens 8192 --thinking-token-budget 6144
 ```
 
 `--input` 默认 `video`，执行与汇总使用相同的角色选择：
@@ -306,6 +330,12 @@ Schema 只接受 4.0。旧 question ID、`video_grounded`、baseline filter 字�
 新建或生成视频不再写入这些状态。
 旧 `QWEN_BASE_URL` 仍可读取，`/compatible-mode/v1` 后缀会转换为 `/api/v1`。
 
+新保存的本地 QA 记录增加实际请求的 `max_tokens` 和 `thinking_token_budget`，未启用
+thinking 时后者为 `null`。历史记录不补写预算；去重、任务身份、来源指纹和复用规则
+不变，因此旧、新预算协议结果可能同时被复用和汇总，修改预算本身不会触发重跑。
+要统一重跑，显式使用对应输入、模型和 effort 的 `--force-qa`；四种输入仍须独立执行。
+不按输出长度推断是否发生强制收尾。
+
 缺少 `final_answer` 的旧 QA 需 `--force-qa` 重跑。缺少 prefix 元数据的旧 Fairy
 video/control QA 需按真实条件补成 true/false，或 `--force-qa` 替换选中范围的未分类结果。
 数学结果缺少来源指纹时也需重跑。已入库变体的历史 JSON 不能作为正式 case 的写入
@@ -329,14 +359,54 @@ Gemini/Kimi 使用 default。也可用 `--model` 选择单个云端或本地模�
 all effort。`--group`、`--condition` 可重复指定，`--config` 覆盖并发、RPM 等配置。
 默认配置文件为脚本同目录下的 `run_all_qa_judge_config.json`。
 
-每次运行只在 `results/run_all/<UTC时间戳>_<模型>_<随机ID>/` 下生成 `summary.txt`，
+每次运行在 `results/run_all/<UTC时间戳>_<模型>_<随机ID>/` 下生成 `summary.txt`，
 `--log-dir` 可覆盖其父目录。子进程完整输出实时显示在终端；每条命令结束立即追加并
 flush 任务序号、模型、组、条件、完整命令、状态、退出码及实际输出的命令级统计，
 包括 QA/Judge、This run、输出诊断，以及实际出现的 Question filter gates。
-不保存逐 case 进度、回答、判定、错误明细、逐命令日志、配置快照或状态 JSON。
+Summary 不保存逐 case 进度、回答、判定、逐命令日志、配置快照或状态 JSON；
+本地模型的截断回答另存为下述 JSONL，日志路径和写入错误也会记入 summary。
 零目标、提前失败和 Ctrl+C 中断分别记录，缺少的统计明确标为未报告，不推算完成数。
 普通失败继续其余命令；中断停止后续命令并保留已收集统计，最后记录成功、失败、
 中断及未启动数量。`--dry-run` 不创建文件或发起模型请求。
+
+#### 保存本地模型的截断回答
+
+选择 `--model cosmos3-nano`、`gemma4` 或 `qwen3.8-27b` 时，每次批量运行还创建
+`results/run_all/max_token/<本次运行ID>.jsonl`，运行 ID 与该次 summary 的目录名
+相同。指定 `--log-dir` 时使用其下的 `max_token/`。同次运行的全部 group、condition
+和 effort 共用这一绝对路径，下一次运行使用新文件；启动时在终端和 summary 中
+打印路径。正常完成且没有截断时文件为空；提前失败或写入失败须结合 summary 判断。
+云端批量运行保持原有输出方式。
+
+直接运行 `qa-judge` 默认关闭保存，可显式启用；重复指定同一文件会继续追加：
+
+```bash
+python scripts/pipeline.py qa-judge --group real_world_commonsense_conflicts \
+  --input description --qa-model gemma4 --thinking-effort all \
+  --max-token-log results/truncated_gemma.jsonl
+```
+
+文件使用 UTF-8 JSONL，每次实际截断在任务执行线程中立即追加一条并 flush，以线程锁
+保护并发写入。每条包含 `timestamp`、`case_path` / `case_id`、`group`、`video_id`、
+`video_role`、`question_id` / `question`、`model`、`input` / `input_mode`、
+`thinking_effort`、`based`、`work_title_prefix`、`max_tokens`、`thinking_token_budget`、
+`generation_parameters`、`finish_reason`、`request_id`、`usage`、`reasoning_text`、
+`answer_text`、`reasoning_source` 和未经修改的完整 `raw_response`，另含任务标识与
+格式重试次数。`input` 保留 control 条件，`input_mode` 沿用 QA 中的 video 表示。
+“完整”指截至截断时服务已经返回的全部响应，不包含服务未返回的 token。
+
+Gemma/Qwen 优先用 `message.reasoning`，其次用 `message.reasoning_content` 分离推理
+和正文，优先选择非空字段，`reasoning_source` 记录所用字段；两个字段同时存在时，
+`raw_response` 保留两者。
+Cosmos 从正文中的 `<think>…</think>` 提取推理，来源标为 `content.think_tags`；
+未闭合的 `<think>` 后所有内容保留为推理，来源标为 `content.think_tags_unclosed`。
+没有独立字段或可识别标签时，`reasoning_source=unavailable`、`reasoning_text=null`，
+原文完整保留在 `answer_text` 和原始响应中，不猜测其语义。分离文本不裁剪空白，
+不额外请求原始 token，也不更改提示、生成预算或服务端 parser。
+
+截断仍计入 `max_tokens_truncated` 并视为失败，不进入 Judge、不触发格式重试、
+不写为成功 QA；正常回答和缓存复用保持现有规则。写入失败会报告完整路径和原因，
+保留截断计数，summary 同时收录该错误。启用日志前已经丢弃的截断回答无法补回。
 
 ### 批量汇总已运行的实验
 
@@ -439,7 +509,8 @@ results/classic_fairy_tale_film_conflicts/qwen/qwen_control_based_with_prefix_fi
 | 缺少凭据、服务不可达或模型 ID 不明确 | 检查对应 key、地址、`/v1/models` 和模型服务日志 |
 | 视频未就绪、文件缺失或观察过期 | 完成生成并补齐与当前文件绑定的 video_observation；文件存在不会自动修复状态 |
 | description 过期 | 完成视频观察后重跑 description，再运行 QA |
-| 本地回答达到 token 上限 | 增大对应 max-tokens 参数；替换已有 QA 时使用 `--force-qa` |
+| 本地回答达到 token 上限 | 在 run_all 的 max_token 日志或显式指定的 `--max-token-log` 中核对完整响应；增大对应 max-tokens 参数，并同步提高服务端 `MAX_OUTPUT_TOKENS` 后重启，检查输入与输出能否放入上下文；替换已有 QA 时使用 `--force-qa` |
+| `thinking_token_budget` 不支持、服务拒绝或疑似被忽略 | 检查 vLLM 版本和 `--reasoning-config`，用更新后的脚本重启，再按下节验收；保留预算字段并报告错误，不删除参数静默重试，HTTP 成功本身不能证明生效 |
 | 空正文、只有 reasoning 或缺少有效末行答案 | 检查模型输出；最终非空行须包含大小写匹配的 `Final answer:` 和非空答案 |
 | 筛选报告为空或题目被排除 | 查看逐题 gate 原因，显式运行对应模型的 `--input question_only`；重跑/重判可加 force，不影响目标实验执行 |
 | 共享服务配额冲突或 force 占用冲突 | 对齐活跃命令配置，等待占用命令结束；恢复机制见 concurrency.md |
@@ -455,3 +526,33 @@ results/classic_fairy_tale_film_conflicts/qwen/qwen_control_based_with_prefix_fi
 每次重试重新申请并发和 RPM 额度，沿用同一任务认领。网络请求默认最多重试
 4 次，与一次格式重试分别计数，不因格式重试重置额度。QA/Judge 超时默认
 600 秒，其他模型阶段默认 900 秒。用 `--max-retries` 和 `--timeout` 调整。
+
+### 本地推理预算验收
+
+以下步骤须在部署环境逐模型完成。静态语法检查、CLI 校验和 HTTP 成功均不能代替
+强制结束推理的实际验证；三个模型全部通过后才开始批量实验。
+
+1. 用更新后的脚本重启 vLLM 0.29.0 服务。以小预算（例如
+   `--thinking-token-budget 64`）、足够的总预算和能产生较长推理的问题触发强制结束。
+   结合 tokenizer、原始输出或服务端日志，确认推理结束边界被强制注入且正文继续生成，
+   最终仍满足 `Final answer:` 规则。Gemma/Qwen 的 parser 会分离 reasoning 与正文，
+   仅看正文或 token 使用量不能证明强制注入。
+2. 分别验证自然提前结束、默认 6144、`none` 和 `all`，覆盖纯文字与真实视频请求。
+   `none` 请求应无预算字段，`all` 中仅 default 任务发送；保留原有采样、视频处理和
+   Qwen `xhigh` 参数。服务拒绝预算时应报告失败，不应去掉预算继续请求。
+3. 用少量现有样本分别运行 video、control、description、question_only，检查实际
+   请求和新结果中的预算字段及 Judge 流程。格式失败仍完整重试一次且预算相同，
+   总输出截断仍直接拒绝；Judge 只读取解析出的 `final_answer`。
+4. 检查旧结果按原规则复用；选择明确的小范围加 `--force-qa` 重跑，确认新 QA
+   记录预算。预算不参与去重或指纹，缺少预算字段的旧记录不会自动失效。
+
+将 `existing-case-id` 替换为现有 case ID，并按所选模型替换 CLI 名称及对应
+max-tokens 选项，在部署环境运行单个现有 case：
+
+```bash
+python scripts/pipeline.py qa-judge --case-id existing-case-id \
+  --input question_only --qa-model qwen3.8-27b --thinking-effort default \
+  --thinking-token-budget 64 --qwen38-max-tokens 8192 --force-qa
+```
+
+上述命令会替换所选范围的 QA/Judge；强制边界证据仍需从原始输出或服务端日志核对。

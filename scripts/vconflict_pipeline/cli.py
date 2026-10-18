@@ -14,8 +14,9 @@ from .common import PipelineError, validate_group, validate_id
 from .deletion import command_delete
 from .descriptions import command_description
 from .generation import command_generate
-from .qa import REQUEST_TIMEOUT_SECONDS
+from .qa import REQUEST_TIMEOUT_SECONDS, local_qa_max_tokens, validate_thinking_token_budget
 from .reporting import command_summarize
+from .result_rules import expand_thinking_efforts
 from .scheduler import command_qa_judge
 from .settings import (
     ARK_BASE_URL,
@@ -36,6 +37,7 @@ from .settings import (
     DEFAULT_REQUEST_WORKERS,
     DEFAULT_SEEDANCE_TOTAL_WORKERS,
     DEFAULT_SOURCE_CASE_DIR,
+    DEFAULT_THINKING_TOKEN_BUDGET,
     FAIRY_TALE_GROUP,
     GEMMA_QA_MODEL,
     QWEN38_QA_MODEL,
@@ -222,6 +224,14 @@ def build_parser() -> argparse.ArgumentParser:
     qa_judge.add_argument("--cosmos-max-tokens", type=int, default=DEFAULT_COSMOS_MAX_TOKENS)
     qa_judge.add_argument("--gemma-max-tokens", type=int, default=DEFAULT_GEMMA_MAX_TOKENS)
     qa_judge.add_argument("--qwen38-max-tokens", type=int, default=DEFAULT_QWEN38_MAX_TOKENS)
+    qa_judge.add_argument(
+        "--thinking-token-budget", type=int, default=DEFAULT_THINKING_TOKEN_BUDGET,
+        help="Local thinking token limit (default: 6144); must be below max-tokens when enabled.",
+    )
+    qa_judge.add_argument(
+        "--max-token-log", type=Path,
+        help="Append complete token-limited responses to this UTF-8 JSONL file (default: disabled).",
+    )
     _add_retries(qa_judge, timeout=REQUEST_TIMEOUT_SECONDS)
     force = qa_judge.add_mutually_exclusive_group()
     force.add_argument("--force-qa", action="store_true")
@@ -320,9 +330,18 @@ def _validate(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None
         "cosmos_max_tokens",
         "gemma_max_tokens",
         "qwen38_max_tokens",
+        "thinking_token_budget",
     ):
         if hasattr(args, field) and getattr(args, field) <= 0:
             parser.error(f"--{field.replace('_', '-')} must be greater than zero")
+    if args.command == "qa-judge":
+        max_tokens = local_qa_max_tokens(args)
+        if max_tokens is not None:
+            try:
+                if "default" in expand_thinking_efforts(args.thinking_effort, args.qa_model):
+                    validate_thinking_token_budget(args.thinking_token_budget, max_tokens)
+            except PipelineError as exc:
+                parser.error(str(exc))
     for field in ("openrouter_rpm", "qa_rpm", "judge_rpm"):
         if hasattr(args, field) and (not math.isfinite(getattr(args, field)) or getattr(args, field) < 0):
             parser.error(f"--{field.replace('_', '-')} must be finite and nonnegative")

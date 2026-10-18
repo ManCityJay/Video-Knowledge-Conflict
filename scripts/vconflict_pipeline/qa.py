@@ -23,6 +23,7 @@ from .settings import (
     DEFAULT_GEMMA_MAX_TOKENS,
     DEFAULT_QWEN38_BASE_URL,
     DEFAULT_QWEN38_MAX_TOKENS,
+    DEFAULT_THINKING_TOKEN_BUDGET,
     GEMINI_QA_MODEL,
     GEMMA_QA_MODEL,
     KIMI_QA_MODEL,
@@ -59,6 +60,13 @@ class MissingFinalAnswerError(PipelineError):
 
 class TruncatedAnswerError(PipelineError):
     """A local QA response stopped at its output token limit."""
+
+    def __init__(self, message: str, *, raw_response: dict[str, Any],
+                 generation_parameters: dict[str, Any]) -> None:
+        super().__init__(message)
+        self.timestamp = utc_now()
+        self.raw_response = raw_response
+        self.generation_parameters = generation_parameters
 
 
 VIDEO_MIME_TYPES = {
@@ -469,6 +477,16 @@ def _cosmos_prompt(prompt_text: str, thinking_effort: str | None) -> str:
     return f"{task}\n\n{instruction}\n\n{FINAL_ANSWER_INSTRUCTION}"
 
 
+def validate_thinking_token_budget(thinking_token_budget: int, max_tokens: int) -> None:
+    if thinking_token_budget <= 0:
+        raise PipelineError("--thinking-token-budget must be greater than zero")
+    if thinking_token_budget >= max_tokens:
+        raise PipelineError(
+            "--thinking-token-budget must be strictly less than the selected "
+            "model's max-tokens budget when thinking is enabled"
+        )
+
+
 def _cosmos_payload(
     *,
     prompt_text: str,
@@ -476,6 +494,7 @@ def _cosmos_payload(
     thinking_effort: str | None,
     served_model_id: str,
     max_tokens: int,
+    thinking_token_budget: int = DEFAULT_THINKING_TOKEN_BUDGET,
 ) -> dict[str, Any]:
     content: str | list[dict[str, Any]] = _cosmos_prompt(
         prompt_text, thinking_effort
@@ -496,6 +515,9 @@ def _cosmos_payload(
             {"role": "user", "content": content},
         ],
     }
+    if thinking_effort == "default":
+        validate_thinking_token_budget(thinking_token_budget, max_tokens)
+        payload["thinking_token_budget"] = thinking_token_budget
     if video_uri is not None:
         # The Qwen3VL loader samples by fps even with num_frames=-1. Use the
         # generic loader to pass every decoded frame to the HF video processor,
@@ -514,6 +536,7 @@ def _gemma_payload(
     thinking_effort: str | None,
     served_model_id: str,
     max_tokens: int,
+    thinking_token_budget: int = DEFAULT_THINKING_TOKEN_BUDGET,
 ) -> dict[str, Any]:
     if thinking_effort not in (None, "default"):
         raise PipelineError("Gemma 4 thinking effort must be none or default.")
@@ -535,6 +558,9 @@ def _gemma_payload(
             {"role": "user", "content": content},
         ],
     }
+    if thinking_effort == "default":
+        validate_thinking_token_budget(thinking_token_budget, max_tokens)
+        payload["thinking_token_budget"] = thinking_token_budget
     if video_uri is not None:
         # Sample the whole video once. Gemma's vLLM processor uses 70 tokens
         # per frame; no Cosmos fps resampling or image-budget override applies.
@@ -551,6 +577,7 @@ def _qwen38_payload(
     thinking_effort: str | None,
     served_model_id: str,
     max_tokens: int,
+    thinking_token_budget: int = DEFAULT_THINKING_TOKEN_BUDGET,
 ) -> dict[str, Any]:
     if thinking_effort not in (None, "default"):
         raise PipelineError("Qwen3.8-27B thinking effort must be none or default.")
@@ -573,6 +600,9 @@ def _qwen38_payload(
         "chat_template_kwargs": template_kwargs,
         "messages": [{"role": "user", "content": content}],
     }
+    if thinking:
+        validate_thinking_token_budget(thinking_token_budget, max_tokens)
+        payload["thinking_token_budget"] = thinking_token_budget
     if video_uri is not None:
         # Keep original frames in the loader; the HF processor samples once at
         # Qwen's default 2 fps, including its normal frame-count bounds.
@@ -719,6 +749,7 @@ def run_qa_once(
     timeout: int,
     local_served_model_id: str | None = None,
     local_max_tokens: int | None = None,
+    thinking_token_budget: int = DEFAULT_THINKING_TOKEN_BUDGET,
     based: bool = False,
     diagnostics: QADiagnostics | None = None,
     diagnostic_stage: QADiagnosticStage = "main",
@@ -762,6 +793,7 @@ def run_qa_once(
         prompt_text = _description_prompt(context_text, question["text_en"], based=based)
     else:
         prompt_text = _question_prompt(question["text_en"])
+    payload: dict[str, Any] = {}
     try:
         if qa_model == QWEN_QA_MODEL:
             response = _send_qwen_request(
@@ -783,6 +815,7 @@ def run_qa_once(
                     served_model_id=local_served_model_id,
                     max_tokens=(local_max_tokens if local_max_tokens is not None
                                 else config.default_max_tokens),
+                    thinking_token_budget=thinking_token_budget,
                 )
             elif input_mode != "video" and qa_model == GEMINI_QA_MODEL:
                 payload = _gemini_description_payload(prompt_text, thinking_effort)
@@ -806,7 +839,9 @@ def run_qa_once(
             hint = (f"increase --{config.max_tokens_argument.replace('_', '-')} "
                     if config else "increase the service output budget ")
             raise TruncatedAnswerError(
-                f"{backend.service} answer was truncated at max_tokens; {hint}and rerun this QA."
+                f"{backend.service} answer was truncated at max_tokens; {hint}and rerun this QA.",
+                raw_response=response,
+                generation_parameters={key: value for key, value in payload.items() if key != "messages"},
             )
         if finish_reason not in (None, "stop"):
             raise PipelineError(f"{backend.service} answer did not finish normally: {finish_reason}")
@@ -843,6 +878,9 @@ def run_qa_once(
         result["work_title_prefix"] = work_title_prefix
     if input_mode != "question_only":
         result["based"] = based
+    if qa_model in LOCAL_QA_CONFIGS:
+        result["max_tokens"] = payload["max_tokens"]
+        result["thinking_token_budget"] = payload.get("thinking_token_budget")
     if backend.effective_reasoning_effort is not None:
         result["effective_reasoning_effort"] = backend.effective_reasoning_effort
     if qa_model == QWEN38_QA_MODEL and thinking_effort == "default":

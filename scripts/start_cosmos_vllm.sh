@@ -26,6 +26,11 @@ export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 
 TENSOR_PARALLEL_SIZE="${TENSOR_PARALLEL_SIZE:-1}"
 MAX_NUM_SEQS="${MAX_NUM_SEQS:-4}"
+MAX_OUTPUT_TOKENS="${MAX_OUTPUT_TOKENS:-8192}"
+if [[ ! "$MAX_OUTPUT_TOKENS" =~ ^[1-9][0-9]*$ ]]; then
+  echo "MAX_OUTPUT_TOKENS 必须是正整数。" >&2
+  exit 1
+fi
 # 按总显存计算；默认留出空间供同卡其他进程使用。
 GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.92}"
 VLLM_HOST="${VLLM_HOST:-127.0.0.1}"
@@ -42,7 +47,8 @@ VIDEO_ROOT="$(cd -- "$VIDEO_ROOT" && pwd -P)"
 exec "$CONDA_PREFIX/bin/vllm" serve nvidia/Cosmos3-Nano \
   --tensor-parallel-size "$TENSOR_PARALLEL_SIZE" \
   --dtype bfloat16 \
-  --override-generation-config '{"max_new_tokens":8192}' \
+  --override-generation-config "{\"max_new_tokens\":$MAX_OUTPUT_TOKENS}" \
+  --reasoning-config '{"reasoning_start_str":"<think>","reasoning_end_str":"</think>"}' \
   --mm-encoder-tp-mode data \
   --async-scheduling \
   --allowed-local-media-path "$VIDEO_ROOT" \

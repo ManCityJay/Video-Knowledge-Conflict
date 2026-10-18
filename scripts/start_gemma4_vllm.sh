@@ -1,10 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# 默认复用 vllm 环境：2 × A100 80GB，BF16，32K 上下文，端口 8001。
+# 默认复用 vllm 环境：GPU 1 单卡 A100 80GB，BF16，32K 上下文，端口 8001。
 # 只查看命令：DRY_RUN=1 bash scripts/start_gemma4_vllm.sh
-# 单卡示例：CUDA_VISIBLE_DEVICES=1 TENSOR_PARALLEL_SIZE=1 MAX_MODEL_LEN=8192 \
-#   MAX_NUM_SEQS=1 GPU_MEMORY_UTILIZATION=0.90 bash scripts/start_gemma4_vllm.sh
+# 双卡示例：CUDA_VISIBLE_DEVICES=0,1 TENSOR_PARALLEL_SIZE=2 bash scripts/start_gemma4_vllm.sh
 
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 repo_root="$(cd -- "$script_dir/.." && pwd -P)"
@@ -22,12 +21,17 @@ export HF_HOME="${HF_HOME:-/cache/huggingface}"
 export LD_LIBRARY_PATH="$CONDA_PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 # 当前机器没有匹配的 nvcc，沿用 Cosmos 环境中已验证的采样回退。
 export VLLM_USE_FLASHINFER_SAMPLER="${VLLM_USE_FLASHINFER_SAMPLER:-0}"
-export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1}"
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-1}"
 
 GEMMA_MODEL="${GEMMA_MODEL:-google/gemma-4-31B-it}"
-TENSOR_PARALLEL_SIZE="${TENSOR_PARALLEL_SIZE:-2}"
+TENSOR_PARALLEL_SIZE="${TENSOR_PARALLEL_SIZE:-1}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-32768}"
 MAX_NUM_SEQS="${MAX_NUM_SEQS:-2}"
+MAX_OUTPUT_TOKENS="${MAX_OUTPUT_TOKENS:-8192}"
+if [[ ! "$MAX_OUTPUT_TOKENS" =~ ^[1-9][0-9]*$ ]]; then
+  echo "MAX_OUTPUT_TOKENS 必须是正整数。" >&2
+  exit 1
+fi
 GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.85}"
 VLLM_HOST="${VLLM_HOST:-127.0.0.1}"
 VLLM_PORT="${VLLM_PORT:-8001}"
@@ -37,11 +41,12 @@ cmd=(
   --served-model-name google/gemma-4-31B-it
   --tensor-parallel-size "$TENSOR_PARALLEL_SIZE"
   --dtype bfloat16
-  --override-generation-config '{"max_new_tokens":8192}'
+  --override-generation-config "{\"max_new_tokens\":$MAX_OUTPUT_TOKENS}"
   --max-model-len "$MAX_MODEL_LEN"
   --max-num-seqs "$MAX_NUM_SEQS"
   --gpu-memory-utilization "$GPU_MEMORY_UTILIZATION"
   --reasoning-parser gemma4
+  --reasoning-config '{"reasoning_start_str":"<|channel>thought\n","reasoning_end_str":"<channel|>"}'
   --default-chat-template-kwargs '{"enable_thinking":false}'
   --async-scheduling
   --host "$VLLM_HOST" --port "$VLLM_PORT"

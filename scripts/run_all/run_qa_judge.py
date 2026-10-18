@@ -102,7 +102,8 @@ def load_config(path: Path) -> dict:
     return config
 
 
-def build_plan(args: argparse.Namespace, config: dict) -> list[tuple[str, list[str]]]:
+def build_plan(args: argparse.Namespace, config: dict,
+               max_token_log: Path | None = None) -> list[tuple[str, list[str]]]:
     models = CLOSED_MODELS if args.model == "all" else (args.model,)
     groups = tuple(dict.fromkeys(args.group or GROUPS))
     conditions = tuple(dict.fromkeys(args.condition or CONDITIONS))
@@ -126,6 +127,8 @@ def build_plan(args: argparse.Namespace, config: dict) -> list[tuple[str, list[s
                     command.append("--with-work-title-prefix")
                 if based:
                     command.append("--based")
+                if model in LOCAL_MODELS and max_token_log is not None:
+                    command.extend(("--max-token-log", str(max_token_log)))
                 for field, value in limits.items():
                     command.extend(("--" + field.replace("_", "-"), str(value)))
                 plan.append((f"{model}__{group}__{condition}", command))
@@ -138,6 +141,7 @@ def display_command(command: list[str]) -> str:
 
 STATISTIC_PREFIXES = (
     "QA:", "Judge:", "This run:", "QA output diagnostics (", "Question filter gates:",
+    "Max-token log:", "Max-token log write failed:",
 )
 NO_TARGETS = "No eligible question/video targets in the selected scope."
 
@@ -252,31 +256,48 @@ def main(argv: list[str] | None = None) -> int:
                         default=RUNNER_DIR / "run_all_qa_judge_config.json")
     parser.add_argument("--dataset-dir", type=Path, default=Path("dataset/cases"))
     parser.add_argument("--log-dir", type=Path, default=Path("results/run_all"),
-                        help="Parent directory for each run's summary.txt.")
+                        help="Parent directory for run summaries and local-model max_token/ logs.")
     parser.add_argument("--dry-run", action="store_true",
                         help="Print commands without credentials, API calls, or file writes.")
     args = parser.parse_args(argv)
     args.dataset_dir = project_path(args.dataset_dir)
     try:
         config = load_config(project_path(args.config))
-        plan = build_plan(args, config)
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        log_dir = project_path(args.log_dir)
+        run_dir = log_dir / f"{stamp}_{args.model}_{uuid.uuid4().hex[:8]}"
+        max_token_log = (log_dir / "max_token" / f"{run_dir.name}.jsonl"
+                         if args.model in LOCAL_MODELS else None)
+        plan = build_plan(args, config, max_token_log)
         print(f"Planned qa-judge commands: {len(plan)}", flush=True)
         if args.dry_run:
             for name, command in plan:
                 print(f"\n{name}\n{display_command(command)}")
             return 0
 
-        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        run_dir = project_path(args.log_dir) / f"{stamp}_{args.model}_{uuid.uuid4().hex[:8]}"
         run_dir.mkdir(parents=True)
         summary_path = run_dir / "summary.txt"
         print(f"Summary: {summary_path}", flush=True)
+        if max_token_log is not None:
+            print(f"Max-token log: {max_token_log}", flush=True)
         outcomes: list[JobOutcome] = []
         with summary_path.open("w", encoding="utf-8") as summary:
             summary.write(f"Started: {stamp}\nModel selection: {args.model}\nPlanned commands: {len(plan)}\n")
+            if max_token_log is not None:
+                summary.write(f"Max-token log: {max_token_log}\n")
             summary.flush()
             batch_status = "running"
             try:
+                if max_token_log is not None:
+                    try:
+                        max_token_log.parent.mkdir(parents=True, exist_ok=True)
+                        with max_token_log.open("x", encoding="utf-8"):
+                            pass
+                    except OSError as exc:
+                        message = f"Max-token log write failed: {max_token_log}: {exc}"
+                        summary.write(message + "\n")
+                        summary.flush()
+                        raise OSError(message) from exc
                 for group in dict.fromkeys(args.group or GROUPS):
                     directory = args.dataset_dir / group
                     if not directory.is_dir() or not any(directory.glob("*.json")):
