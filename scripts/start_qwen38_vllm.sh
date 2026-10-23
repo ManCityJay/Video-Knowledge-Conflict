@@ -81,9 +81,9 @@ else
   cmd+=(
     --allowed-local-media-path "$MEDIA_ROOT"
     --limit-mm-per-prompt '{"image":0,"video":1,"audio":0}'
-    # 加载原始帧，交给模型处理器按官方默认 2 fps 采样一次。
+    # 加载原始帧，交给模型处理器按 1 fps 采样一次。
     --media-io-kwargs '{"video":{"video_backend":"opencv","num_frames":-1,"fps":-1}}'
-    --mm-processor-kwargs '{"fps":2,"do_sample_frames":true}'
+    --mm-processor-kwargs '{"fps":1,"do_sample_frames":true}'
   )
 fi
 # 首轮关闭 torch.compile / CUDA graph；验收后可设 ENFORCE_EAGER=0。

@@ -71,8 +71,8 @@ else
   cmd+=(
     --allowed-local-media-path "$MEDIA_ROOT"
     --limit-mm-per-prompt '{"image":4,"video":1,"audio":0}'
-    # Match the HF video defaults: uniform whole-video sampling, 70 tokens/frame.
-    --media-io-kwargs '{"video":{"video_backend":"opencv","num_frames":32,"fps":-1}}'
+    # 加载器按 1 fps 采样一次，不设固定帧数上限；处理器每帧使用 70 tokens。
+    --media-io-kwargs '{"video":{"video_backend":"opencv","num_frames":-1,"fps":1}}'
   )
 fi
 

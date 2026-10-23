@@ -205,7 +205,16 @@ video/control 缺少 prefix 元数据时，须按 [pipeline.md](pipeline.md#历�
 | `qwen3.8-27b` | `Qwen/Qwen3.8-27B` | temperature 0、seed 0；none/default，开启 thinking 时 reasoning effort 为 xhigh |
 
 省略 effort 时统一使用 default。本地服务请求模型 ID 取 `/v1/models` 返回值，
-持久化 ID 保持表中实验标识。Gemma 通过 `chat_template_kwargs.enable_thinking`
+持久化 ID 保持表中实验标识。
+Cosmos `none` 保留原问题和 `Final answer:` 格式要求，不再添加
+`Answer without using <think> tags.`，改为在请求顶层发送
+`"bad_words": ["<think>", "</think>"]`，由服务端 tokenizer 将字符串转换为 token ID，
+在生成阶段屏蔽两个标签，不硬编码 ID。该规则统一适用于 video、control、description
+和 question_only；`default` 保留现有推理格式提示，不发送 `bad_words`。
+屏蔽标签不保证没有推理文字，不额外修改输出或添加提示词。此变更不使历史结果自动
+失效；需要统一协议时使用 `--force-qa` 重跑所选范围。
+
+Gemma 通过 `chat_template_kwargs.enable_thinking`
 显式控制推理；回答正文与可选 reasoning 分开保存，final_answer 仅从正文提取。
 Qwen27B 同样显式设置 `chat_template_kwargs.enable_thinking`，开启时在该对象内设置
 `reasoning_effort=xhigh`，正文和 reasoning 分开保存。三个本地模型的默认总输出预算
@@ -244,13 +253,14 @@ Gemma 起始边界末尾的 `\n` 表示实际换行。配置依据为
 
 - Gemini 和 Kimi 将本地视频编码为 Base64 Data URL，Kimi 请求体上限 100 MB。
 - 云端 Qwen (`qwen3.8-max`) 使用中国大陆 DashScope SDK 上传本地视频，文件上限
-  100 MiB，固定 fps=2。
+  100 MiB，视频请求固定 fps=1。
 - 本地 Qwen27B 使用服务端可读的 MP4 file URI。加载器保留原始帧，模型处理器
-  采用官方默认 2 fps 和帧数边界，执行一次采样，避免重复采样。
+  按 1 fps 采样并保留原有帧数边界，执行一次采样，避免重复采样。
 - Cosmos 使用服务端可读的 MP4 file URI。加载器保留原始帧，再由模型视频处理器
   从头到尾均匀按 4 fps 采样，避免加载器和处理器重复采样。
-- Gemma 使用服务端可读的 MP4 file URI，加载器对整段视频均匀采样最多 32 帧，
-  不足时保留全部；视频处理路径每帧最多 70 个视觉 token，不叠加处理器 fps 采样。
+- Gemma 使用服务端可读的 MP4 file URI，加载器对整段视频按 1 fps 采样，
+  `num_frames=-1` 取消固定 32 帧上限；视频处理路径每帧最多 70 个视觉 token，
+  不叠加处理器 fps 采样。
 
 Cosmos 视频请求参数：
 
@@ -265,7 +275,7 @@ Gemma 视频请求参数：
 
 ```json
 {
-  "media_io_kwargs": {"video": {"video_backend": "opencv", "num_frames": 32, "fps": -1}}
+  "media_io_kwargs": {"video": {"video_backend": "opencv", "num_frames": -1, "fps": 1}}
 }
 ```
 
@@ -274,7 +284,7 @@ Qwen27B 视频请求参数：
 ```json
 {
   "media_io_kwargs": {"video": {"video_backend": "opencv", "num_frames": -1, "fps": -1}},
-  "mm_processor_kwargs": {"fps": 2, "do_sample_frames": true}
+  "mm_processor_kwargs": {"fps": 1, "do_sample_frames": true}
 }
 ```
 

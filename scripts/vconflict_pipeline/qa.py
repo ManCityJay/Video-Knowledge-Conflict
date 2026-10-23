@@ -320,7 +320,7 @@ def _send_qwen_request(
     dashscope = _require_dashscope_sdk()
     content: list[dict[str, Any]] = []
     if video_uri is not None:
-        content.append({"video": video_uri, "fps": 2})
+        content.append({"video": video_uri, "fps": 1})
     content.append({"text": prompt_text})
     messages = [{"role": "user", "content": content}]
     try:
@@ -465,7 +465,7 @@ def _cosmos_prompt(prompt_text: str, thinking_effort: str | None) -> str:
         raise PipelineError("Cosmos3-Nano question is missing its final-answer instruction.")
     task = prompt_text[: -len(FINAL_ANSWER_INSTRUCTION)].rstrip()
     if thinking_effort is None:
-        instruction = "Answer without using <think> tags."
+        return prompt_text
     elif thinking_effort == "default":
         instruction = (
             "Answer the question using the following format:\n"
@@ -515,7 +515,9 @@ def _cosmos_payload(
             {"role": "user", "content": content},
         ],
     }
-    if thinking_effort == "default":
+    if thinking_effort is None:
+        payload["bad_words"] = ["<think>", "</think>"]
+    elif thinking_effort == "default":
         validate_thinking_token_budget(thinking_token_budget, max_tokens)
         payload["thinking_token_budget"] = thinking_token_budget
     if video_uri is not None:
@@ -562,10 +564,10 @@ def _gemma_payload(
         validate_thinking_token_budget(thinking_token_budget, max_tokens)
         payload["thinking_token_budget"] = thinking_token_budget
     if video_uri is not None:
-        # Sample the whole video once. Gemma's vLLM processor uses 70 tokens
-        # per frame; no Cosmos fps resampling or image-budget override applies.
+        # Sample once at 1 fps in the loader, without a fixed frame-count cap.
+        # Gemma's vLLM processor uses 70 tokens per frame; no resampling applies.
         payload["media_io_kwargs"] = {
-            "video": {"video_backend": "opencv", "num_frames": 32, "fps": -1}
+            "video": {"video_backend": "opencv", "num_frames": -1, "fps": 1}
         }
     return payload
 
@@ -605,11 +607,11 @@ def _qwen38_payload(
         payload["thinking_token_budget"] = thinking_token_budget
     if video_uri is not None:
         # Keep original frames in the loader; the HF processor samples once at
-        # Qwen's default 2 fps, including its normal frame-count bounds.
+        # 1 fps, retaining Qwen's normal frame-count bounds.
         payload["media_io_kwargs"] = {
             "video": {"video_backend": "opencv", "num_frames": -1, "fps": -1}
         }
-        payload["mm_processor_kwargs"] = {"fps": 2, "do_sample_frames": True}
+        payload["mm_processor_kwargs"] = {"fps": 1, "do_sample_frames": True}
     return payload
 
 

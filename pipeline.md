@@ -185,6 +185,12 @@ QA 及其中的 Judge 历史；保留其他视频的历史、共享问题及其 
 省略 effort 使用 `default`；`all` 执行模型支持的全部 effort，也可重复指定该选项。
 模型 ID、温度和视频采样协议见 [plan.md](plan.md#模型配置与采样协议)。
 
+Cosmos `none` 在四种输入的请求顶层发送
+`"bad_words": ["<think>", "</think>"]`，由服务端在生成阶段屏蔽标签；提示词仅保留
+原问题、适用的输入条件和 `Final answer:` 格式要求，移除原有不使用 think 标签的
+提示句。屏蔽标签不保证没有推理文字。`default` 保持原推理提示且不发送 `bad_words`。
+历史结果仍可复用；需要采用新协议重新实验时，使用现有 `--force-qa`。
+
 三个本地模型默认总输出预算为 8192（含推理和正文），默认
 `--thinking-token-budget 6144`。该正整数参数仅在本地实际 effort 为 `default` 时作为
 顶层 `thinking_token_budget` 发送，并须严格小于所选模型的 `--*-max-tokens`；
@@ -239,6 +245,15 @@ Qwen27B 默认 `vllm` 环境、GPU 0 单卡、BF16、65536 上下文、`MAX_NUM_
 `http://127.0.0.1:8002/v1`。预检从 `/v1/models` 获取实际模型 ID，持久化实验 ID
 始终为 `Qwen/Qwen3.8-27B`。整条 pipeline 与 vLLM 在同一服务器运行。
 Description 与独立 question-only 实验都只用文本，`TEXT_ONLY=1` 同时适用于二者。
+
+Gemma、本地 Qwen27B 和云端 Qwen Max 的 video/control 均按 1 FPS 采样。
+Gemma 客户端与启动脚本设置 `media_io_kwargs.video.fps=1`、`num_frames=-1`，
+由加载器采样一次，取消固定 32 帧上限；本地 Qwen27B 加载器保留原始帧，
+客户端与启动脚本设置 `mm_processor_kwargs.fps=1`，由模型处理器采样一次，
+保留原有帧数边界；Qwen Max 视频内容项设置 `fps=1`。
+Description 和 question-only 请求不携带视频采样参数。完整参数见
+[plan.md](plan.md#模型配置与采样协议)。更新服务端采样默认值需要重启对应服务；
+已有历史结果仍可复用，需要统一采样协议时使用 `--force-qa` 重跑所选范围。
 
 ```bash
 python scripts/pipeline.py qa-judge --group classic_fairy_tale_film_conflicts \
@@ -351,7 +366,7 @@ python scripts/run_all/run_qa_judge.py
 python scripts/run_all/run_qa_judge.py --model gemini
 ```
 
-统一使用 `run_qa_judge.py`，省略 `--model` 等同于 `--model all`。
+常规批量运行使用 `run_qa_judge.py`，省略 `--model` 等同于 `--model all`。
 默认三个云端模型依次运行四个 group（含 math），每组执行 `video`、`video-based`、
 `description`、`description-based`，共 48 条命令；不包含 control 或 question_only。
 保留模型、effort 和 Fairy video 的作品名前缀设置：Qwen Max 使用 all effort，
