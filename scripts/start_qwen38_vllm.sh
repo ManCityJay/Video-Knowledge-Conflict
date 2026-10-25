@@ -37,6 +37,11 @@ QWEN_MODEL="${QWEN_MODEL:-Qwen/Qwen3.8-27B}"
 TENSOR_PARALLEL_SIZE="${TENSOR_PARALLEL_SIZE:-1}"
 MAX_MODEL_LEN="${MAX_MODEL_LEN:-65536}"
 MAX_NUM_SEQS="${MAX_NUM_SEQS:-1}"
+MAX_OUTPUT_TOKENS="${MAX_OUTPUT_TOKENS:-8192}"
+if [[ ! "$MAX_OUTPUT_TOKENS" =~ ^[1-9][0-9]*$ ]]; then
+  echo "MAX_OUTPUT_TOKENS 必须是正整数。" >&2
+  exit 1
+fi
 GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.90}"
 VLLM_HOST="${VLLM_HOST:-127.0.0.1}"
 VLLM_PORT="${VLLM_PORT:-8002}"
@@ -54,11 +59,12 @@ cmd=(
   --served-model-name Qwen/Qwen3.8-27B
   --tensor-parallel-size "$TENSOR_PARALLEL_SIZE"
   --dtype bfloat16
-  --override-generation-config '{"max_new_tokens":8192}'
+  --override-generation-config "{\"max_new_tokens\":$MAX_OUTPUT_TOKENS}"
   --max-model-len "$MAX_MODEL_LEN"
   --max-num-seqs "$MAX_NUM_SEQS"
   --gpu-memory-utilization "$GPU_MEMORY_UTILIZATION"
   --reasoning-parser qwen3
+  --reasoning-config '{"reasoning_start_str":"<think>","reasoning_end_str":"</think>"}'
   --default-chat-template-kwargs '{"enable_thinking":false}'
   --host "$VLLM_HOST" --port "$VLLM_PORT"
 )
@@ -75,9 +81,9 @@ else
   cmd+=(
     --allowed-local-media-path "$MEDIA_ROOT"
     --limit-mm-per-prompt '{"image":0,"video":1,"audio":0}'
-    # 加载原始帧，交给模型处理器按官方默认 2 fps 采样一次。
+    # 加载原始帧，交给模型处理器按 1 fps 采样一次。
     --media-io-kwargs '{"video":{"video_backend":"opencv","num_frames":-1,"fps":-1}}'
-    --mm-processor-kwargs '{"fps":2,"do_sample_frames":true}'
+    --mm-processor-kwargs '{"fps":1,"do_sample_frames":true}'
   )
 fi
 # 首轮关闭 torch.compile / CUDA graph；验收后可设 ENFORCE_EAGER=0。

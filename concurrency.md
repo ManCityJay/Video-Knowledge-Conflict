@@ -114,15 +114,23 @@ QA/Judge 请求。清理不是跨文件事务，失败后可能已有部分 case
 
 只有满足所有额度的任务才进入网络线程。每次重试重新计入 RPM，退避保存在
 协调器的时间队列，不占请求线程。保持原有重试分类、次数和退避策略；429 会
-更新对应服务的共享冷却时间。正常结束但缺少有效末行 `Final answer:`（含空正文）
-时，全部 QA 模型在所选四种输入中均完整重试原请求一次；输入、提示词和
-生成参数不变，不增加纠错提示或历史回答。截断和判分错误不触发格式重试。
+更新对应服务的共享冷却时间。正常结束但缺少有效末行 `Final answer:`（含空正文
+或只有 reasoning）时，全部 QA 模型在所选四种输入中均恢复一次。云端完整重试
+原请求，输入、提示词和生成参数不变，不增加纠错提示或历史回答。
 
-格式失败后先释放本次 permit，保持原任务认领和下游依赖；原任务重新进入同一
+Cosmos、Gemma 和本地 Qwen 使用 assistant 续写；首次返回 `length` 或 `max_tokens`
+也在记录截断日志和计数后进入同一恢复流程。保留原 system/user、媒体、采样参数和
+完整正文及独立 reasoning，追加 assistant 消息并以 `\nFinal answer:` 结尾。
+续写设置 `continue_final_message=true`、`add_generation_prompt=false`、`echo=false`、
+`max_tokens=256`，移除 `thinking_token_budget`，不裁剪输入或首次回答；上下文不足
+直接报错。云端截断和全部模型的判分错误不触发答案恢复。
+
+需要恢复时先释放本次 permit，保持原任务认领和下游依赖；原任务重新进入同一
 调度队列，通过归属检查并重新申请全部共享并发及 RPM 额度后才能发起重试。
 `final_answer_retry_count` 最多为 1；`network_retry_count` 独立遵循 `--max-retries`，
-不会因格式重试清零或耗用。第二次有效才写入 QA 并释放 Judge；再次格式失败则
-共享该任务失败状态，不保存失败回答，不执行下游。已有有效历史结果仍直接复用。
+不会因答案恢复清零或耗用。截断与缺失答案共享一次恢复额度；续写网络重试重发
+同一续写请求。第二次有效才写入 QA 并释放 Judge；续写为空、格式无效或再次截断
+则共享该任务失败状态，不保存成功 QA，不执行下游。已有有效历史结果仍直接复用。
 
 进程内相同视频内容只准备一份可复用编码。闲置 Base64 缓存采用 512 MiB LRU，
 在途请求持有的对象可以超过该缓存容量，因此它不是进程内存上限。不改变 Qwen
@@ -137,6 +145,7 @@ QA/Judge 请求。清理不是跨文件事务，失败后可能已有部分 case
 运行时打印保存及重试信息，结束时统计所选输入的全部目标完成数、实际请求、
 保存、缓存复用和跨进程复用数；不再打印执行准入 gate 统计。
 `main`、`question_only` 两组 QA 诊断另显示 `final_answer_retries`、
-`final_answer_retry_recovered`、`final_answer_retry_failed`，分别表示安排格式重试的任务数、
+`final_answer_retry_recovered`、`final_answer_retry_failed`，分别表示安排答案恢复的任务数、
 重试后成功落盘数和最终失败数（包括重试后耗尽网络额度等失败）。保留最终完成统计
-和非零退出规则。
+和非零退出规则。本地首次截断只计 `max_tokens_truncated`，不计 `missing_final_answer`；
+续写截断只计 `final_answer_continuation_max_tokens_truncated`，同时计任务恢复失败。

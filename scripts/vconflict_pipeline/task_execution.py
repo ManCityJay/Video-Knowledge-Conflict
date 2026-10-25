@@ -6,7 +6,8 @@ import os
 
 from .common import PipelineError, utc_now
 from .integrity import digest, judgment_fingerprint
-from .qa import get_backend, local_qa_max_tokens, preflight_qa_backend, run_qa_once
+from .qa import TruncatedAnswerError, get_backend, local_qa_max_tokens, preflight_qa_backend, run_qa_once
+from .qa_truncation import split_truncated_response
 from .result_rules import set_filter_field
 from .schema import JUDGMENT_SCHEMA
 from .settings import AUTHOR_JUDGE_MODEL, VERDICTS
@@ -34,8 +35,9 @@ Return only the requested structured result."""
 
 
 class TaskExecutor:
-    def __init__(self, args, planner, diagnostics):
+    def __init__(self, args, planner, diagnostics, max_token_log=None):
         self.args, self.planner, self.diagnostics = args, planner, diagnostics
+        self.max_token_log = max_token_log
         self.backend = get_backend(args.qa_model)
         self.api_key = os.environ.get(self.backend.api_key_variable, '').strip() if self.backend.api_key_variable else ''
         self.judge_key = os.environ.get('OPENROUTER_API_KEY', '').strip()
@@ -57,15 +59,22 @@ class TaskExecutor:
 
     def request(self, task, media):
         if task.kind == 'qa':
-            return run_qa_once(
-                input_mode=task.mode, video_path=task.video_path, context_text=task.context_text,
-                work_title=task.context['title'].split(':', 1)[0].strip() if task.prefix else None,
-                work_title_prefix=task.prefix, question=task.question, thinking_effort=task.effort,
-                qa_model=self.args.qa_model, api_key=self.api_key, timeout=self.args.timeout,
-                local_served_model_id=self.served,
-                local_max_tokens=local_qa_max_tokens(self.args), based=task.based,
-                diagnostics=self.diagnostics, prepared_video_input=media,
-                diagnostic_stage=task.diagnostic_stage)
+            try:
+                return run_qa_once(
+                    input_mode=task.mode, video_path=task.video_path, context_text=task.context_text,
+                    work_title=task.context['title'].split(':', 1)[0].strip() if task.prefix else None,
+                    work_title_prefix=task.prefix, question=task.question, thinking_effort=task.effort,
+                    qa_model=self.args.qa_model, api_key=self.api_key, timeout=self.args.timeout,
+                    local_served_model_id=self.served,
+                    local_max_tokens=local_qa_max_tokens(self.args), based=task.based,
+                    thinking_token_budget=self.args.thinking_token_budget,
+                    diagnostics=self.diagnostics, prepared_video_input=media,
+                    final_answer_continuation=task.final_answer_continuation,
+                    diagnostic_stage=task.diagnostic_stage)
+            except TruncatedAnswerError as exc:
+                if self.max_token_log is not None:
+                    self.log_truncated_answer(task, exc)
+                raise
         q, facts = task.question, task.context['conflict_spec']
         final_answer = task.result.get('final_answer')
         if not isinstance(final_answer, str) or not final_answer.strip():
@@ -88,6 +97,30 @@ class TaskExecutor:
             raise PipelineError('Invalid judgment confidence')
         return {**verdict, 'confidence': confidence, 'timestamp': utc_now(),
                 'judge_model': AUTHOR_JUDGE_MODEL, 'judge_request_id': response.get('id')}
+
+    def log_truncated_answer(self, task, exc):
+        response, parameters = exc.raw_response, exc.generation_parameters
+        record = {
+            'timestamp': exc.timestamp,
+            'case_path': str(task.path.resolve()), 'case_id': task.path.stem,
+            'group': self.args.group or task.path.parent.name,
+            'video_id': task.video_id, 'video_role': task.context['role'],
+            'question_id': task.question_id, 'question': task.question['text_en'],
+            'model': self.args.qa_model, 'input': self.args.input, 'input_mode': task.mode,
+            'thinking_effort': task.effort, 'based': task.based, 'work_title_prefix': task.prefix,
+            'stage': task.diagnostic_stage, 'task_key': task.key,
+            'final_answer_retry_count': task.final_answer_retry_count,
+            'max_tokens': parameters.get('max_tokens'),
+            'thinking_token_budget': parameters.get('thinking_token_budget'),
+            'generation_parameters': parameters,
+            'finish_reason': response['choices'][0]['finish_reason'],
+            'request_id': response.get('id'), 'usage': response.get('usage'),
+            **split_truncated_response(response, self.args.qa_model),
+            'raw_response': response,
+        }
+        if exc.final_answer_continuation is not None:
+            record['final_answer_continuation'] = exc.final_answer_continuation
+        self.max_token_log.append(record)
 
     def merge(self, case, task, output):
         video, q = self.planner.owners(case, task)

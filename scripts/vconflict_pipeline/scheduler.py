@@ -12,8 +12,13 @@ from .common import PipelineError
 from .integrity import digest
 from .media_cache import MediaCache
 from .paths import grouped_dir, iter_case_paths
-from .qa import LOCAL_QA_CONFIGS, MissingFinalAnswerError, preflight_qa_backend, qa_service_endpoint
+from .qa import (
+    FINAL_ANSWER_CONTINUATION_MAX_TOKENS, LOCAL_QA_CONFIGS, MissingFinalAnswerError,
+    TruncatedAnswerError, preflight_qa_backend, prepare_final_answer_continuation,
+    qa_service_endpoint,
+)
 from .qa_diagnostics import QADiagnostics
+from .qa_truncation import MaxTokenLog
 from .result_rules import expand_thinking_efforts
 from .runtime import Runtime, case_lock, path_key
 from .settings import AUTHOR_JUDGE_MODEL
@@ -24,7 +29,7 @@ from .transport import OPENROUTER_URL, TransportError, is_retryable, require_ope
 
 
 class Engine:
-    def __init__(self, args, runtime, loaded, diagnostics):
+    def __init__(self, args, runtime, loaded, diagnostics, max_token_log=None):
         self.args, self.runtime, self.diagnostics = args, runtime, diagnostics
         self.cases = dict(loaded)
         self.efforts = expand_thinking_efforts(args.thinking_effort, args.qa_model)
@@ -43,7 +48,7 @@ class Engine:
         self.next_pool = 0
         self.planner = TaskPlanner(args, self.failed, self.failed_cases,
                                    self.note_cache, self._error)
-        self.execution = TaskExecutor(args, self.planner, diagnostics)
+        self.execution = TaskExecutor(args, self.planner, diagnostics, max_token_log)
         self.media_cache = MediaCache(args.qa_model, self.planner.tasks)
         self.interrupted = False
         self.resources = self._resources()
@@ -141,14 +146,25 @@ class Engine:
             self.failed_cases.add(task.path)
 
     def request_failed(self, task, permit, exc):
-        if task.kind == 'qa' and isinstance(exc, MissingFinalAnswerError):
+        local = self.args.qa_model in LOCAL_QA_CONFIGS
+        if task.kind == 'qa' and (isinstance(exc, MissingFinalAnswerError)
+                                  or local and isinstance(exc, TruncatedAnswerError)):
             self.runtime.release(permit)
             if task.final_answer_retry_count == 0:
+                if local:
+                    try:
+                        task.final_answer_continuation = prepare_final_answer_continuation(
+                            exc, self.execution.backend.service)
+                    except PipelineError as continuation_error:
+                        self.fail(task, continuation_error)
+                        return
                 task.final_answer_retry_count = 1
                 task.due = time.monotonic()
                 self.diagnostics.record(task.diagnostic_stage, 'final_answer_retries')
+                action = (f'continuing the assistant answer (max_tokens={FINAL_ANSWER_CONTINUATION_MAX_TOKENS})'
+                          if local else 'repeating the original request')
                 print(f"Final-answer retry {task.path.stem}/{task.question_id}/{task.stage or 'main'} "
-                      "(1/1), repeating the original request", flush=True)
+                      f"(1/1), {action}", flush=True)
             else:
                 self.fail(task, exc)
             return
@@ -335,6 +351,10 @@ def command_qa_judge(args):
         require_selected_prefix_metadata,
         qa_completed_from_loaded,
     )
+    log_path = getattr(args, 'max_token_log', None)
+    max_token_log = MaxTokenLog(log_path) if log_path is not None else None
+    if max_token_log is not None:
+        print(f'Max-token log: {max_token_log.path}', flush=True)
     paths = iter_case_paths(grouped_dir(args.dataset_dir, args.group), args.case_id)
     efforts = expand_thinking_efforts(args.thinking_effort, args.qa_model)
     diagnostics = QADiagnostics(include_truncation=args.qa_model in LOCAL_QA_CONFIGS)
@@ -348,7 +368,7 @@ def command_qa_judge(args):
             if not args.force_qa:
                 require_selected_prefix_metadata(loaded, args=args, efforts=set(efforts))
                 require_selected_final_answers(loaded, args=args, efforts=set(efforts))
-            engine = Engine(args, runtime, loaded, diagnostics)
+            engine = Engine(args, runtime, loaded, diagnostics, max_token_log)
             if args.force_qa or args.force_judge:
                 require_openrouter_api_key()
                 qa_done = qa_completed_from_loaded(loaded, args=args, efforts=efforts)

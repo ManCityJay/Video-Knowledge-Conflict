@@ -21,19 +21,13 @@ RUNNER_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(RUNNER_DIR.parent))
 
 from vconflict_pipeline.settings import (
-    DEFAULT_COSMOS_WORKERS,
-    DEFAULT_GEMMA_WORKERS,
     FAIRY_TALE_GROUP,
     PROJECT_ROOT,
 )
 
 
 CLOSED_MODELS = ("gemini-3.1-pro", "gemini-4-argon", "qwen3.8-max", "kimi-k3")
-LOCAL_MODELS = {
-    "cosmos3-nano": DEFAULT_COSMOS_WORKERS,
-    "gemma4": DEFAULT_GEMMA_WORKERS,
-    "qwen3.8-27b": 4,
-}
+LOCAL_MODELS = ("cosmos3-nano", "gemma4", "qwen3.8-27b")
 MODELS = (*CLOSED_MODELS, *LOCAL_MODELS)
 MODEL_ALIASES = {"cosmos": "cosmos3-nano", "gemma": "gemma4"}
 GROUPS = (
@@ -66,30 +60,14 @@ def project_path(path: Path) -> Path:
     return (path if path.is_absolute() else PROJECT_ROOT / path).resolve()
 
 
-def load_config(path: Path) -> dict:
+def load_config() -> dict:
+    path = RUNNER_DIR / "run_all_qa_judge_config.json"
     config = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(config, dict) or set(config) != {*SHARED_FIELDS, "models"}:
         raise ValueError(f"Config must contain {', '.join(SHARED_FIELDS)} and models")
     models = config["models"]
-    # Older custom configs retain their limits and gain Argon's defaults.
-    if isinstance(models, dict):
-        models.setdefault("gemini-4-argon", {
-            "qa_concurrency": 24,
-            "qa_service_concurrency": 24,
-            "qa_rpm": 20,
-        })
-    if (not isinstance(models, dict) or not set(CLOSED_MODELS).issubset(models)
-            or not set(models).issubset(MODELS)):
-        raise ValueError(
-            f"Config models must include {', '.join(CLOSED_MODELS)}; "
-            f"optional local models: {', '.join(LOCAL_MODELS)}")
-    # Existing cloud-only config files keep working; local entries are optional.
-    for model, concurrency in LOCAL_MODELS.items():
-        models.setdefault(model, {
-            "qa_concurrency": concurrency,
-            "qa_service_concurrency": concurrency,
-            "qa_rpm": 0,
-        })
+    if not isinstance(models, dict) or set(models) != set(MODELS):
+        raise ValueError(f"Config models must contain exactly {', '.join(MODELS)}")
     options = [("shared", {field: config[field] for field in SHARED_FIELDS})]
     for model in MODELS:
         if not isinstance(models[model], dict) or set(models[model]) != set(QA_FIELDS):
@@ -110,7 +88,8 @@ def load_config(path: Path) -> dict:
     return config
 
 
-def build_plan(args: argparse.Namespace, config: dict) -> list[tuple[str, list[str]]]:
+def build_plan(args: argparse.Namespace, config: dict,
+               max_token_log: Path | None = None) -> list[tuple[str, list[str]]]:
     models = CLOSED_MODELS if args.model == "all" else (args.model,)
     groups = tuple(dict.fromkeys(args.group or GROUPS))
     conditions = tuple(dict.fromkeys(args.condition or CONDITIONS))
@@ -134,6 +113,8 @@ def build_plan(args: argparse.Namespace, config: dict) -> list[tuple[str, list[s
                     command.append("--with-work-title-prefix")
                 if based:
                     command.append("--based")
+                if model in LOCAL_MODELS and max_token_log is not None:
+                    command.extend(("--max-token-log", str(max_token_log)))
                 for field, value in limits.items():
                     command.extend(("--" + field.replace("_", "-"), str(value)))
                 plan.append((f"{model}__{group}__{condition}", command))
@@ -146,6 +127,7 @@ def display_command(command: list[str]) -> str:
 
 STATISTIC_PREFIXES = (
     "QA:", "Judge:", "This run:", "QA output diagnostics (", "Question filter gates:",
+    "Max-token log:", "Max-token log write failed:",
 )
 NO_TARGETS = "No eligible question/video targets in the selected scope."
 
@@ -256,32 +238,37 @@ def main(argv: list[str] | None = None) -> int:
                         help="Repeat to select groups; default: all four groups, including math.")
     parser.add_argument("--condition", action="append", choices=tuple(CONDITIONS),
                         help="Repeat to select conditions; default: all four conditions.")
-    parser.add_argument("--config", type=Path,
-                        default=RUNNER_DIR / "run_all_qa_judge_config.json")
     parser.add_argument("--dataset-dir", type=Path, default=Path("dataset/cases"))
     parser.add_argument("--log-dir", type=Path, default=Path("results/run_all"),
-                        help="Parent directory for each run's summary.txt.")
+                        help="Parent directory for run summaries and local-model max_token/ logs.")
     parser.add_argument("--dry-run", action="store_true",
                         help="Print commands without credentials, API calls, or file writes.")
     args = parser.parse_args(argv)
     args.dataset_dir = project_path(args.dataset_dir)
     try:
-        config = load_config(project_path(args.config))
-        plan = build_plan(args, config)
+        config = load_config()
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        log_dir = project_path(args.log_dir)
+        run_dir = log_dir / f"{stamp}_{args.model}_{uuid.uuid4().hex[:8]}"
+        max_token_log = (log_dir / "max_token" / f"{run_dir.name}.jsonl"
+                         if args.model in LOCAL_MODELS else None)
+        plan = build_plan(args, config, max_token_log)
         print(f"Planned qa-judge commands: {len(plan)}", flush=True)
         if args.dry_run:
             for name, command in plan:
                 print(f"\n{name}\n{display_command(command)}")
             return 0
 
-        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        run_dir = project_path(args.log_dir) / f"{stamp}_{args.model}_{uuid.uuid4().hex[:8]}"
         run_dir.mkdir(parents=True)
         summary_path = run_dir / "summary.txt"
         print(f"Summary: {summary_path}", flush=True)
+        if max_token_log is not None:
+            print(f"Max-token log: {max_token_log}", flush=True)
         outcomes: list[JobOutcome] = []
         with summary_path.open("w", encoding="utf-8") as summary:
             summary.write(f"Started: {stamp}\nModel selection: {args.model}\nPlanned commands: {len(plan)}\n")
+            if max_token_log is not None:
+                summary.write(f"Max-token log: {max_token_log}\n")
             summary.flush()
             batch_status = "running"
             try:

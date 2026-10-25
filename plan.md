@@ -69,16 +69,48 @@ Video 报告只统计 conflict，control 报告只统计 control，未选角色�
 所有 QA 提示都要求末行使用 `Final answer:`。保存完整 `raw_answer` 供核查，但
 Judge 只读取从正文提取的 `final_answer`，不从解释或 reasoning 中推断答案。
 解析取最后一个非空行最后一次大小写匹配标记之后的非空文本，允许标记前有解释。
-正常结束但标记缺失、答案为空或仅出现在更早的行时，由调度器完整重试原请求一次；
-正文为空或只有 reasoning 也属于格式失败。重试的输入、提示词和生成参数完全相同，
-不添加纠错提示，也不传回第一次回答。第二次有效时只保存第二次并进入 Judge，记录
-可选 `final_answer_retry_count: 1`；第二次仍格式失败则终止该任务，不保存成功 QA，
-不释放下游。输出截断直接拒绝，不进入格式重试；其他成功回答继续判分。
+正常结束但标记缺失、答案为空或仅出现在更早的行时，由调度器恢复一次；正文为空
+或只有 reasoning 也属于格式失败。云端模型完整重试原请求，输入、提示词和生成参数
+完全相同，不添加纠错提示，也不传回第一次回答。
+
+Cosmos、Gemma 和本地 Qwen 保留首次请求的 system/user、媒体和采样参数，追加一条
+assistant 消息，正文包含首次完整回答（含独立返回的 reasoning），再追加
+`\nFinal answer:`。首次正文为空时仍保留此前缀。第二次发送
+`continue_final_message=true`、`add_generation_prompt=false`、`echo=false`，最多新增
+256 tokens，不发送 `thinking_token_budget`。将预填正文与返回后缀原样拼接，再按同一
+末行规则提取答案；不裁剪原始证据或首次回答，上下文不足直接报错。
+
+第二次有效才保存成功 QA 并进入 Judge，记录 `final_answer_retry_count: 1`。
+本地恢复结果的 `raw_answer` 为拼接正文，可选 `final_answer_continuation` 保存首次
+响应及生成参数、追加的 assistant 消息、续写参数及响应；顶层 usage、请求 ID、
+`max_tokens=256` 和 `thinking_token_budget=null` 均对应续写请求。续写为空、仍不合
+格式或截断则终止任务，不保存成功 QA、不释放下游，也不再格式重试。
+本地模型首次返回 `length` 或 `max_tokens` 时，先记录截断日志和计数，再按相同
+协议续写一次，适用于全部输入和 effort；云端截断仍直接失败。每个任务共享一次
+恢复额度，不因截断或缺失答案的不同原因增加次数；其他成功回答继续判分。
 
 此规则统一用于全部 QA 模型、输入和 effort，包括独立 question-only 实验。判分错误
-不触发 QA 重试，已有有效历史结果不自动重跑。每次格式重试重新申请共享并发和
-RPM 额度，沿用同一任务认领；格式重试与网络重试分别计数，网络错误仍遵循
-`--max-retries`，格式重试不会重置或占用其额度。
+不触发 QA 重试，已有有效历史结果不自动重跑。每次答案恢复重新申请共享并发和
+RPM 额度，沿用同一任务认领；答案恢复与网络重试分别计数，网络错误仍遵循
+`--max-retries`，答案恢复不会重置或占用其额度。
+
+本地模型 run_all 仅在首次实际截断时创建目录和日志，在
+`results/run_all/max_token/<运行ID>.jsonl` 保存全部实际截断响应；无截断、零目标或
+预检失败时不创建该次运行的日志，也不新建 `max_token` 目录，不清理历史空日志。
+运行 ID 与 summary 目录相同；`--log-dir` 覆盖父目录。同次运行
+各组、条件和 effort 共用一份文件。首次和续写截断均保存，以
+`final_answer_retry_count` 的 0/1 区分，记录实际预算，续写截断另含完整续写审计上下文。
+本地首次截断只增加 `max_tokens_truncated`，不增加 `missing_final_answer`，恢复过程
+复用 `final_answer_retries`、`final_answer_retry_recovered` 和 `final_answer_retry_failed`。
+`max_tokens_truncated` 仅计首次 QA 截断，
+`final_answer_continuation_max_tokens_truncated` 仅计续写截断，同一响应不重复计数。
+续写截断同时计为任务级 `final_answer_retry_failed`，不额外计入 `missing_final_answer`。
+两项截断诊断按 `main`、`question_only` 分开显示，即使为零也显示，批量 summary
+保留同一诊断行。独立 `qa-judge` 仅在指定 `--max-token-log` 时
+启用。日志按请求追加并 flush，保留 case/问题/条件、生成参数、usage、完整原始
+响应，以及分离的 reasoning/正文和来源；无法可靠分离时明确标识，不猜测。
+日志不作为成功 QA 或 Judge 输入，写入失败保留截断计数并报告路径和原因。
+细节见 [pipeline.md](pipeline.md#保存本地模型的截断回答)。
 
 Judge 根据问题、最终答案、输入角色、事实和两类 reference 分类：
 
@@ -123,7 +155,7 @@ Question-only 仅统计 answer-level control 指标，重复历史按 `(timestam
 | question | `question_id`、`text_en`、两类 reference，可选 `question_only_results` |
 | video | `video_id`、`role`、`seedance_prompt_en`、`task_id`、`status`、`local_path`、`qa_results` |
 | description | `context_en`、可选 `context_prefix_en`、来源、来源 SHA-256、生成模型、时间和请求 ID |
-| QA | `run_id`、时间、输入模式、问题 ID/正文、模型、effort、温度、`raw_answer`、`final_answer`、可选 usage/reasoning、`final_answer_retry_count: 1`、judgment |
+| QA | `run_id`、时间、输入模式、问题 ID/正文、模型、effort、温度、`raw_answer`、`final_answer`、本地模型的 `max_tokens` / `thinking_token_budget`、可选 usage/reasoning、`final_answer_retry_count: 1`、`final_answer_continuation` 审计对象、judgment |
 | variant_context | 私有 facts/questions、可选标题、`matched_control_path` |
 | 画面与审题证据 | `video_observation`、`require_video_observation`、`question_audit` 和来源指纹 |
 
@@ -147,6 +179,11 @@ Fairy video: input + question_id + model + thinking_effort + based + work_title_
 `video_grounded` 解释为 grounded，缺失 based 解释为 false，Gemini 3.1 Pro medium effort
 解释为 default。Filter 读取新字段优先，否则读取 baseline 别名；私有新旧容器共同
 查找最新记录，续跑在原容器更新。命名变化不改变指纹算法或版本。
+
+本地输出预算及续写审计只记录在新 QA 中，不加入去重键、任务身份或来源指纹，
+也不补写历史记录。缺少预算或续写审计字段的有效旧结果仍按原规则复用；
+修改预算或续写协议不会自动重跑，旧、新协议结果可能同时被复用和汇总。
+需要统一预算或续写协议时，使用 `--force-qa` 重跑相应输入、模型和 effort 范围。
 
 ## 来源与过期规则
 
@@ -199,23 +236,66 @@ Argon 显式发送 `reasoning.effort: "medium"`，结果的
 最终答案解析和格式重试；截断报错，不进行长输出续写。Argon 使用独立模型 ID，
 结果、续跑与 question-only 筛选均与 Gemini 3.1 Pro 隔离，无需迁移历史数据。
 本地服务请求模型 ID 取 `/v1/models` 返回值，
-持久化 ID 保持表中实验标识。Gemma 通过 `chat_template_kwargs.enable_thinking`
+持久化 ID 保持表中实验标识。
+
+Cosmos `none` 保留原问题和 `Final answer:` 格式要求，不再添加
+`Answer without using <think> tags.`，改为在请求顶层发送
+`"bad_words": ["<think>", "</think>"]`，由服务端 tokenizer 将字符串转换为 token ID，
+在生成阶段屏蔽两个标签，不硬编码 ID。该规则统一适用于 video、control、description
+和 question_only；`default` 保留现有推理格式提示，不发送 `bad_words`。
+屏蔽标签不保证没有推理文字，不额外修改输出或添加提示词。此变更不使历史结果自动
+失效；需要统一协议时使用 `--force-qa` 重跑所选范围。
+
+Gemma 通过 `chat_template_kwargs.enable_thinking`
 显式控制推理；回答正文与可选 reasoning 分开保存，final_answer 仅从正文提取。
 Qwen27B 同样显式设置 `chat_template_kwargs.enable_thinking`，开启时在该对象内设置
-`reasoning_effort=xhigh`，正文和 reasoning 分开保存。本地默认输出上限为 Cosmos
-8192、Gemma 2048、Qwen27B 32768；Qwen27B 服务默认上下文 65536。
+`reasoning_effort=xhigh`，正文和 reasoning 分开保存。三个本地模型的默认总输出预算
+统一为 `max_tokens=8192`，保留各模型的 `--*-max-tokens` 覆盖参数。
+Gemma 客户端默认由 2048 调整到 8192，Qwen27B 由 32768 调整到 8192，修正客户端
+与默认服务端上限不一致的问题；Qwen27B 服务默认上下文仍为 65536。
+
+共用 `--thinking-token-budget` 接受正整数，默认 6144。这是本实验采用的工程预算，
+不是官方推荐值。仅本地模型的实际 effort 为 `default` 时，在请求顶层发送
+`thinking_token_budget`，并要求它严格小于该模型请求的总输出预算；`none` 不发送，
+`all` 逐任务按实际 effort 处理，云端模型不使用此参数。四种输入独立执行，均经过
+同一预算传递流程；本地首次截断或格式失败后的 assistant 续写固定最多新增 256 tokens，
+保留其他采样和媒体参数，但移除 `thinking_token_budget`。
+
+vLLM 0.29.0 通过 `--reasoning-config` 显式设置以下边界，由 tokenizer 转为 token
+序列；达到预算时只强制注入结束标记，让模型继续自然生成正文，不加入额外收尾提示。
+
+| 模型 | `reasoning_start_str` | `reasoning_end_str` | Parser |
+|---|---|---|---|
+| Cosmos | `<think>` | `</think>` | 不启用 |
+| Qwen27B | `<think>` | `</think>` | `qwen3` |
+| Gemma | `<\|channel>thought\n` | `<channel\|>` | `gemma4` |
+
+Gemma 起始边界末尾的 `\n` 表示实际换行。配置依据为
+[vLLM 0.29.0 ReasoningConfig](https://github.com/vllm-project/vllm/blob/v0.29.0/vllm/config/reasoning.py)，
+请求字段依据为
+[ChatCompletionRequest](https://github.com/vllm-project/vllm/blob/v0.29.0/vllm/entrypoints/openai/chat_completion/protocol.py)。
+本地新 QA 保存实际请求的 `max_tokens` 和 `thinking_token_budget`，后者在未启用时为
+`null`；不按输出长度推断是否触发强制收尾。`Final answer:` 提示和末行解析保持
+不变；本地首次总输出截断或缺失最终答案时采用上述一次 assistant 续写协议。
+
+三个服务启动脚本统一使用 `MAX_OUTPUT_TOKENS` 环境变量，默认 8192，传入
+`--override-generation-config`。更新边界配置后必须重启服务；提高客户端总预算时也须
+提高服务端上限，并确保输入与输出能放入上下文。服务不支持预算时直接报告错误，
+不删除参数后静默重试。逐模型确认强制关闭推理且正文继续生成后，才开始批量实验；
+验收步骤见 [pipeline.md](pipeline.md#本地推理预算验收)。
 
 - Gemini 3.1 Pro、Gemini 4 Argon 和 Kimi 将本地视频编码为 Base64 Data URL，Kimi 请求体上限 100 MB。
   两种 Gemini QA 均使用 `OPENROUTER_API_KEY` 和 OpenRouter Chat Completions，
   支持 video、control、description、question_only，并与 Judge 共享 OpenRouter 总额度。
 - 云端 Qwen (`qwen3.8-max`) 使用中国大陆 DashScope SDK 上传本地视频，文件上限
-  100 MiB，固定 fps=2。
+  100 MiB，视频请求固定 fps=1。
 - 本地 Qwen27B 使用服务端可读的 MP4 file URI。加载器保留原始帧，模型处理器
-  采用官方默认 2 fps 和帧数边界，执行一次采样，避免重复采样。
+  按 1 fps 采样并保留原有帧数边界，执行一次采样，避免重复采样。
 - Cosmos 使用服务端可读的 MP4 file URI。加载器保留原始帧，再由模型视频处理器
   从头到尾均匀按 4 fps 采样，避免加载器和处理器重复采样。
-- Gemma 使用服务端可读的 MP4 file URI，加载器对整段视频均匀采样最多 32 帧，
-  不足时保留全部；视频处理路径每帧最多 70 个视觉 token，不叠加处理器 fps 采样。
+- Gemma 使用服务端可读的 MP4 file URI，加载器对整段视频按 1 fps 采样，
+  `num_frames=-1` 取消固定 32 帧上限；视频处理路径每帧最多 70 个视觉 token，
+  不叠加处理器 fps 采样。
 
 Cosmos 视频请求参数：
 
@@ -230,7 +310,7 @@ Gemma 视频请求参数：
 
 ```json
 {
-  "media_io_kwargs": {"video": {"video_backend": "opencv", "num_frames": 32, "fps": -1}}
+  "media_io_kwargs": {"video": {"video_backend": "opencv", "num_frames": -1, "fps": 1}}
 }
 ```
 
@@ -239,7 +319,7 @@ Qwen27B 视频请求参数：
 ```json
 {
   "media_io_kwargs": {"video": {"video_backend": "opencv", "num_frames": -1, "fps": -1}},
-  "mm_processor_kwargs": {"fps": 2, "do_sample_frames": true}
+  "mm_processor_kwargs": {"fps": 1, "do_sample_frames": true}
 }
 ```
 
@@ -262,7 +342,7 @@ Qwen27B 的 thinking 开关与 parser 参考 [vLLM 官方配方](https://recipes
 | `authoring_definitions.py` / `authoring.py` | Prompt/schema 定义、生成校验修复与保存 |
 | `generation.py` / `descriptions.py` / `deletion.py` | 视频、文本 context 和数据删除操作 |
 | `result_rules.py` / `selection.py` / `filters.py` | 输入介质与角色、统一结果条件、有效视频/问题选择、question-only 来源及可选报告筛选 |
-| `qa.py` / `qa_diagnostics.py` | 单次模型请求、回答解析、本次运行诊断 |
+| `qa.py` / `qa_diagnostics.py` / `qa_truncation.py` | 单次模型请求、回答解析、本次运行诊断和截断响应日志 |
 | `task_planning.py` / `task_execution.py` / `media_cache.py` | 任务身份与依赖规划、请求执行与结果合并、媒体准备与缓存 |
 | `scheduler.py` / `runtime.py` | 调度、认领、额度准入、退避和进度；同机进程协调与锁 |
 | `evaluation.py` / `reporting.py` | 共用目标规划的预检、force 清理与完成计数；按角色汇总快照与独立报告 |
