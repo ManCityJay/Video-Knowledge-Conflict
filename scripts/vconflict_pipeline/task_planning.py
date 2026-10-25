@@ -58,6 +58,7 @@ class Task:
     token: str | None = None
     network_retry_count: int = 0
     final_answer_retry_count: int = 0
+    final_answer_continuation: dict | None = None
     due: float = 0
     prepared: str | None = None
 

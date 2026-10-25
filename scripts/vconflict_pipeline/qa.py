@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import base64
+import copy
 import os
 import uuid
 from collections.abc import Mapping
@@ -48,6 +49,7 @@ KIMI_DEFAULT_BASE_URL = "https://api.moonshot.cn/v1"
 QWEN_MAX_LOCAL_VIDEO_BYTES = 100 * 1024 * 1024
 KIMI_MAX_REQUEST_BODY_BYTES = 100_000_000
 FINAL_ANSWER_PREFIX = "Final answer:"
+FINAL_ANSWER_CONTINUATION_MAX_TOKENS = 256
 FINAL_ANSWER_INSTRUCTION = (
     "Conclude with exactly one final line in this format: "
     "Final answer: <your clear, direct answer in one sentence>."
@@ -57,16 +59,75 @@ FINAL_ANSWER_INSTRUCTION = (
 class MissingFinalAnswerError(PipelineError):
     """Answer text does not contain a valid final-answer line."""
 
+    def __init__(self, message: str, *, raw_response: dict[str, Any] | None = None,
+                 request_payload: dict[str, Any] | None = None) -> None:
+        super().__init__(message)
+        self.raw_response = raw_response
+        self.request_payload = request_payload
+
 
 class TruncatedAnswerError(PipelineError):
     """A local QA response stopped at its output token limit."""
 
     def __init__(self, message: str, *, raw_response: dict[str, Any],
-                 generation_parameters: dict[str, Any]) -> None:
+                 generation_parameters: dict[str, Any],
+                 request_payload: dict[str, Any],
+                 final_answer_continuation: dict[str, Any] | None = None) -> None:
         super().__init__(message)
         self.timestamp = utc_now()
         self.raw_response = raw_response
         self.generation_parameters = generation_parameters
+        self.request_payload = request_payload
+        self.final_answer_continuation = final_answer_continuation
+
+
+def prepare_final_answer_continuation(
+    error: MissingFinalAnswerError | TruncatedAnswerError, service: str,
+) -> dict[str, Any]:
+    """Preserve the first request and append its complete assistant response."""
+    response, original = error.raw_response, error.request_payload
+    if response is None or not original:
+        raise PipelineError("Final-answer continuation requires the first response and request.")
+    try:
+        answer = extract_response_text(response, service)
+    except EmptyResponseTextError:
+        answer = ""
+    message = response["choices"][0]["message"]
+    for field in ("reasoning", "reasoning_content"):
+        reasoning = message.get(field)
+        if isinstance(reasoning, str) and reasoning.strip():
+            # Plain text retains separated reasoning without template-specific
+            # channel tags that some model templates strip from content.
+            answer = reasoning + "\n" + answer
+            break
+    assistant_message = {"role": "assistant", "content": answer + "\n" + FINAL_ANSWER_PREFIX}
+    payload = copy.deepcopy(original)
+    payload["messages"].append(assistant_message)
+    payload.update(continue_final_message=True, add_generation_prompt=False,
+                   echo=False, max_tokens=FINAL_ANSWER_CONTINUATION_MAX_TOKENS)
+    payload.pop("thinking_token_budget", None)
+    return {
+        "first_response": response,
+        "first_generation_parameters": {
+            key: value for key, value in original.items() if key != "messages"
+        },
+        "assistant_message": assistant_message,
+        "request_payload": payload,
+    }
+
+
+def final_answer_continuation_audit(
+    continuation: dict[str, Any], response: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        key: value for key, value in continuation.items() if key != "request_payload"
+    } | {
+        "continuation_generation_parameters": {
+            key: value for key, value in continuation["request_payload"].items()
+            if key != "messages"
+        },
+        "continuation_response": response,
+    }
 
 
 VIDEO_MIME_TYPES = {
@@ -756,9 +817,12 @@ def run_qa_once(
     diagnostics: QADiagnostics | None = None,
     diagnostic_stage: QADiagnosticStage = "main",
     prepared_video_input: str | None = None,
+    final_answer_continuation: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Execute one request; the scheduler owns admission, retries and failures."""
     backend = get_backend(qa_model)
+    if final_answer_continuation is not None and qa_model not in LOCAL_QA_CONFIGS:
+        raise PipelineError("Assistant final-answer continuation requires a local QA model.")
     if input_mode == "video":
         if video_path is None:
             raise PipelineError("Video input requires a local video path.")
@@ -806,7 +870,9 @@ def run_qa_once(
                 timeout=timeout,
             )
         else:
-            if qa_model in LOCAL_QA_CONFIGS:
+            if final_answer_continuation is not None:
+                payload = final_answer_continuation["request_payload"]
+            elif qa_model in LOCAL_QA_CONFIGS:
                 if local_served_model_id is None:
                     raise PipelineError(f"{backend.service} served model ID is missing.")
                 config = LOCAL_QA_CONFIGS[qa_model]
@@ -840,25 +906,41 @@ def run_qa_once(
             config = LOCAL_QA_CONFIGS.get(qa_model)
             hint = (f"increase --{config.max_tokens_argument.replace('_', '-')} "
                     if config else "increase the service output budget ")
+            message = (
+                f"{backend.service} final-answer continuation was truncated at "
+                f"max_tokens={FINAL_ANSWER_CONTINUATION_MAX_TOKENS}; rerun this QA."
+                if final_answer_continuation is not None else
+                f"{backend.service} answer was truncated at max_tokens; {hint}and rerun this QA."
+            )
             raise TruncatedAnswerError(
-                f"{backend.service} answer was truncated at max_tokens; {hint}and rerun this QA.",
+                message,
                 raw_response=response,
                 generation_parameters={key: value for key, value in payload.items() if key != "messages"},
+                request_payload=payload,
+                final_answer_continuation=(
+                    final_answer_continuation_audit(final_answer_continuation, response)
+                    if final_answer_continuation is not None else None
+                ),
             )
         if finish_reason not in (None, "stop"):
             raise PipelineError(f"{backend.service} answer did not finish normally: {finish_reason}")
         raw_answer = backend.extract_answer(response)
+        if final_answer_continuation is not None:
+            raw_answer = final_answer_continuation["assistant_message"]["content"] + raw_answer
         final_answer = extract_final_answer(raw_answer)
-    except EmptyResponseTextError as exc:
+    except (EmptyResponseTextError, MissingFinalAnswerError) as exc:
         if diagnostics is not None:
             diagnostics.record(diagnostic_stage, "missing_final_answer")
-        raise MissingFinalAnswerError(str(exc)) from exc
-    except PipelineError as exc:
+        raise MissingFinalAnswerError(
+            str(exc), raw_response=response, request_payload=payload,
+        ) from exc
+    except TruncatedAnswerError:
         if diagnostics is not None:
-            if isinstance(exc, TruncatedAnswerError):
-                diagnostics.record(diagnostic_stage, "max_tokens_truncated")
-            elif isinstance(exc, MissingFinalAnswerError):
-                diagnostics.record(diagnostic_stage, "missing_final_answer")
+            diagnostics.record(
+                diagnostic_stage,
+                "final_answer_continuation_max_tokens_truncated"
+                if final_answer_continuation is not None else "max_tokens_truncated",
+            )
         raise
     result: dict[str, Any] = {
         "run_id": uuid.uuid4().hex,
@@ -883,6 +965,10 @@ def run_qa_once(
     if qa_model in LOCAL_QA_CONFIGS:
         result["max_tokens"] = payload["max_tokens"]
         result["thinking_token_budget"] = payload.get("thinking_token_budget")
+    if final_answer_continuation is not None:
+        result["final_answer_continuation"] = final_answer_continuation_audit(
+            final_answer_continuation, response,
+        )
     if backend.effective_reasoning_effort is not None:
         result["effective_reasoning_effort"] = backend.effective_reasoning_effort
     if qa_model == QWEN38_QA_MODEL and thinking_effort == "default":

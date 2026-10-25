@@ -69,6 +69,7 @@ class TaskExecutor:
                     local_max_tokens=local_qa_max_tokens(self.args), based=task.based,
                     thinking_token_budget=self.args.thinking_token_budget,
                     diagnostics=self.diagnostics, prepared_video_input=media,
+                    final_answer_continuation=task.final_answer_continuation,
                     diagnostic_stage=task.diagnostic_stage)
             except TruncatedAnswerError as exc:
                 if self.max_token_log is not None:
@@ -99,7 +100,7 @@ class TaskExecutor:
 
     def log_truncated_answer(self, task, exc):
         response, parameters = exc.raw_response, exc.generation_parameters
-        self.max_token_log.append({
+        record = {
             'timestamp': exc.timestamp,
             'case_path': str(task.path.resolve()), 'case_id': task.path.stem,
             'group': self.args.group or task.path.parent.name,
@@ -116,7 +117,10 @@ class TaskExecutor:
             'request_id': response.get('id'), 'usage': response.get('usage'),
             **split_truncated_response(response, self.args.qa_model),
             'raw_response': response,
-        })
+        }
+        if exc.final_answer_continuation is not None:
+            record['final_answer_continuation'] = exc.final_answer_continuation
+        self.max_token_log.append(record)
 
     def merge(self, case, task, output):
         video, q = self.planner.owners(case, task)

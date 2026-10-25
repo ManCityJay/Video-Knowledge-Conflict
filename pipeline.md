@@ -346,8 +346,10 @@ Schema 只接受 4.0。旧 question ID、`video_grounded`、baseline filter 字�
 旧 `QWEN_BASE_URL` 仍可读取，`/compatible-mode/v1` 后缀会转换为 `/api/v1`。
 
 新保存的本地 QA 记录增加实际请求的 `max_tokens` 和 `thinking_token_budget`，未启用
-thinking 时后者为 `null`。历史记录不补写预算；去重、任务身份、来源指纹和复用规则
-不变，因此旧、新预算协议结果可能同时被复用和汇总，修改预算本身不会触发重跑。
+thinking 或执行答案续写时后者为 `null`。本地续写成功的记录可包含
+`final_answer_continuation` 审计对象，顶层预算、usage 和请求 ID 对应第二次请求。
+历史记录不补写预算或续写审计；去重、任务身份、来源指纹和复用规则不变，因此
+旧、新协议结果可能同时被复用和汇总，修改预算或续写协议本身不会触发重跑。
 要统一重跑，显式使用对应输入、模型和 effort 的 `--force-qa`；四种输入仍须独立执行。
 不按输出长度推断是否发生强制收尾。
 
@@ -409,7 +411,11 @@ python scripts/pipeline.py qa-judge --group real_world_commonsense_conflicts \
 `thinking_effort`、`based`、`work_title_prefix`、`max_tokens`、`thinking_token_budget`、
 `generation_parameters`、`finish_reason`、`request_id`、`usage`、`reasoning_text`、
 `answer_text`、`reasoning_source` 和未经修改的完整 `raw_response`，另含任务标识与
-格式重试次数。`input` 保留 control 条件，`input_mode` 沿用 QA 中的 video 表示。
+答案恢复次数 `final_answer_retry_count`（首次为 0，续写为 1）。续写截断记录另含
+`final_answer_continuation`：首次完整响应及生成参数、追加的 assistant 消息和第二次
+响应及参数，便于还原续写上下文；顶层 `raw_response` 为第二次响应，实际
+`max_tokens=256`、`thinking_token_budget=null`。`input` 保留 control 条件，
+`input_mode` 沿用 QA 中的 video 表示。
 “完整”指截至截断时服务已经返回的全部响应，不包含服务未返回的 token。
 
 Gemma/Qwen 优先用 `message.reasoning`，其次用 `message.reasoning_content` 分离推理
@@ -421,8 +427,14 @@ Cosmos 从正文中的 `<think>…</think>` 提取推理，来源标为 `content
 原文完整保留在 `answer_text` 和原始响应中，不猜测其语义。分离文本不裁剪空白，
 不额外请求原始 token，也不更改提示、生成预算或服务端 parser。
 
-截断仍计入 `max_tokens_truncated` 并视为失败，不进入 Judge、不触发格式重试、
-不写为成功 QA；正常回答和缓存复用保持现有规则。写入失败会报告完整路径和原因，
+本地首次 QA 返回 `length` 或 `max_tokens` 时，先写截断日志，只计入
+`max_tokens_truncated`，不计 `missing_final_answer`，再进入一次 assistant 续写；
+恢复过程复用现有重试、成功和失败计数。第二次 assistant 续写截断
+只计入 `final_answer_continuation_max_tokens_truncated`，并计入任务级
+`final_answer_retry_failed`，不额外计入 `missing_final_answer`。同一响应不进入两项
+截断计数。首次截断响应本身不写为成功 QA、不进入 Judge；只有续写提取有效答案
+后才保存并判分。续写截断终止任务，不再恢复。正常回答和缓存复用保持现有规则。
+写入失败会报告完整路径和原因，
 保留截断计数，summary 同时收录该错误。启用日志前已经丢弃的截断回答无法补回。
 
 ### 批量汇总已运行的实验
@@ -516,32 +528,58 @@ results/classic_fairy_tale_film_conflicts/qwen/qwen_control_based_with_prefix_fi
 终端比例统计所选角色的全部有效目标，复用结果也计为完成；独立 question-only 按
 去重后的 conflict 有效 question scope × 问题 × effort 统计。缺少目标角色时不发模型
 请求，返回零目标。另打印 `main`、`question_only` 两组输出诊断：本地模型显示
-`max_tokens_truncated` 和 `missing_final_answer`，云端只显示后者。只统计本次实际
-请求，缓存复用不计入。另显示安排格式重试的任务数 `final_answer_retries`、
+`max_tokens_truncated`、`final_answer_continuation_max_tokens_truncated` 和
+`missing_final_answer`，两项截断计数即使为零也显示；云端只显示后者。只统计本次实际
+请求，缓存复用不计入。另显示安排答案恢复的任务数 `final_answer_retries`、
 成功落盘数 `final_answer_retry_recovered`、最终失败数 `final_answer_retry_failed`。
 部分 QA 失败时继续判定其他成功回答，最终返回非零状态。
+
+```text
+QA output diagnostics (main, this run): max_tokens_truncated=3, final_answer_continuation_max_tokens_truncated=2, missing_final_answer=5, final_answer_retries=8, final_answer_retry_recovered=6, final_answer_retry_failed=2
+```
+
+此例为首次截断 3 次、缺失答案 5 次，共 8 个任务进入续写，其中恢复 6 个、续写截断
+2 个；两种截断分开计数。批量运行的 `summary.txt` 保留完整诊断行。
 
 | 问题 | 处理方法 |
 |---|---|
 | 缺少凭据、服务不可达或模型 ID 不明确 | 检查对应 key、地址、`/v1/models` 和模型服务日志 |
 | 视频未就绪、文件缺失或观察过期 | 完成生成并补齐与当前文件绑定的 video_observation；文件存在不会自动修复状态 |
 | description 过期 | 完成视频观察后重跑 description，再运行 QA |
-| 本地回答达到 token 上限 | 在 run_all 的 max_token 日志或显式指定的 `--max-token-log` 中核对完整响应；增大对应 max-tokens 参数，并同步提高服务端 `MAX_OUTPUT_TOKENS` 后重启，检查输入与输出能否放入上下文；替换已有 QA 时使用 `--force-qa` |
+| 本地回答达到 token 上限 | 首次截断自动尝试一次 256-token 续写；恢复失败时在 run_all 的 max_token 日志或显式指定的 `--max-token-log` 中核对响应，检查服务端预算与上下文容量；替换已有 QA 时使用 `--force-qa` |
 | `thinking_token_budget` 不支持、服务拒绝或疑似被忽略 | 检查 vLLM 版本和 `--reasoning-config`，用更新后的脚本重启，再按下节验收；保留预算字段并报告错误，不删除参数静默重试，HTTP 成功本身不能证明生效 |
 | 空正文、只有 reasoning 或缺少有效末行答案 | 检查模型输出；最终非空行须包含大小写匹配的 `Final answer:` 和非空答案 |
 | 筛选报告为空或题目被排除 | 查看逐题 gate 原因，显式运行对应模型的 `--input question_only`；重跑/重判可加 force，不影响目标实验执行 |
 | 共享服务配额冲突或 force 占用冲突 | 对齐活跃命令配置，等待占用命令结束；恢复机制见 concurrency.md |
 
 全部 QA 模型、输入和 effort（含独立 question-only）正常结束但缺少有效最终答案时，
-调度器完整重试原请求一次，输入、提示词、生成参数完全一致，不传回首次回答或
-增加纠错提示。解析允许最后一个非空行在标记前有解释，取该行最后一次标记后的
-非空答案；标记缺失、答案为空、标记只在更早行、正常结束但正文为空均触发此规则。
-第二次有效才保存该回答并进入 Judge，结果增加 `final_answer_retry_count: 1`；
-第二次仍格式失败则终止任务，不保存成功 QA，也不执行下游。截断和判分错误不触发
-格式重试，已有有效结果不自动重跑。这取代此前缺少 final answer 直接失败的约定。
+调度器恢复一次。解析允许最后一个非空行在标记前有解释，取该行最后一次标记后的
+非空答案；标记缺失、答案为空、标记只在更早行、正常结束但正文为空或只有 reasoning
+均触发此规则。云端仍完整重试原请求，输入、提示词和生成参数完全一致，不传回
+首次回答或增加纠错提示。
+
+Cosmos、Gemma 和本地 Qwen 对缺失答案及首次截断（`length` 或 `max_tokens`）使用
+同一 assistant 续写流程，覆盖全部输入和 effort。截断先保存日志和计数，再安排恢复，
+不误计为缺失答案。原始 system/user 和媒体输入不变，
+追加 assistant 消息，其正文为首次完整回答再加 `\nFinal answer:`。独立返回的
+reasoning 按 `reasoning`、`reasoning_content` 顺序选择非空字段，原样放在首次正文前，
+以换行分隔；不插入可能被模型模板移除的推理通道标签。首次正文为空时也使用答案
+前缀。请求设置 `continue_final_message=true`、`add_generation_prompt=false`、
+`echo=false`、`max_tokens=256`，保留原采样、thinking 开关及媒体参数，移除
+`thinking_token_budget`。不裁剪输入或首次回答，上下文不足直接报告服务端错误。
+
+将预填的 assistant 正文和实际返回后缀原样拼接，再按末行规则提取 `final_answer`。
+只有第二次有效才保存 QA 并进入 Judge，结果增加 `final_answer_retry_count: 1`；
+本地 `raw_answer` 为拼接正文，`final_answer_continuation` 保存 `first_response`、
+`first_generation_parameters`、`assistant_message`、`continuation_response` 和
+`continuation_generation_parameters`，顶层 usage、请求 ID、预算对应第二次请求。
+续写为空、不合格式或截断均终止任务，不保存成功 QA、不执行下游、不再格式重试。
+每个任务最多恢复一次，截断和缺失答案共享此额度；云端截断仍直接失败，
+判分错误不触发 QA 重试，已有有效结果不自动重跑。
 
 每次重试重新申请并发和 RPM 额度，沿用同一任务认领。网络请求默认最多重试
-4 次，与一次格式重试分别计数，不因格式重试重置额度。QA/Judge 超时默认
+4 次，与一次答案恢复分别计数，不因答案恢复重置额度；续写网络重试重发同一续写
+请求，每次都重新申请并发和 RPM。QA/Judge 超时默认
 600 秒，其他模型阶段默认 900 秒。用 `--max-retries` 和 `--timeout` 调整。
 
 ### 本地推理预算验收
@@ -558,8 +596,9 @@ results/classic_fairy_tale_film_conflicts/qwen/qwen_control_based_with_prefix_fi
    `none` 请求应无预算字段，`all` 中仅 default 任务发送；保留原有采样、视频处理和
    Qwen `xhigh` 参数。服务拒绝预算时应报告失败，不应去掉预算继续请求。
 3. 用少量现有样本分别运行 video、control、description、question_only，检查实际
-   请求和新结果中的预算字段及 Judge 流程。格式失败仍完整重试一次且预算相同，
-   总输出截断仍直接拒绝；Judge 只读取解析出的 `final_answer`。
+   请求和新结果中的预算字段及 Judge 流程。本地缺失答案或首次截断按上述协议续写
+   一次，固定 256-token 预算且不发送 thinking budget；
+   Judge 只读取解析出的 `final_answer`。
 4. 检查旧结果按原规则复用；选择明确的小范围加 `--force-qa` 重跑，确认新 QA
    记录预算。预算不参与去重或指纹，缺少预算字段的旧记录不会自动失效。
 
@@ -573,3 +612,19 @@ python scripts/pipeline.py qa-judge --case-id existing-case-id \
 ```
 
 上述命令会替换所选范围的 QA/Judge；强制边界证据仍需从原始输出或服务端日志核对。
+
+### 本地答案续写验收
+
+仅使用少量现有样本，不启动全量实验、不新增测试代码。逐个模型核对实际聊天模板
+在 `continue_final_message=true`、`add_generation_prompt=false` 下，最终 prompt 停在
+开放的 assistant `Final answer:` 前缀，未追加结束 token 或新的 assistant turn。
+分别覆盖空正文、独立 reasoning、正常恢复、再次格式失败、首次截断后恢复和续写截断；
+包含 none/default effort 与 video/control/description/question_only 输入。
+
+检查每次续写重新申请并发/RPM，网络错误重发同一请求且重试额度不重置，服务端
+上下文不足时报告错误。核对成功结果的拼接正文、审计对象、第二次 usage/请求 ID
+和预算；失败结果不保存成功 QA、不进入 Judge。首次截断只增加原截断计数并安排
+一次恢复，不计为缺失答案；续写截断只能增加新截断计数和任务重试失败数。
+核对 `main`、`question_only` 的终端、
+批量 summary 和截断日志一致。确认有效历史记录无需新增审计字段即可复用。
+服务不可用时，模板静态核对、语法/CLI 检查不代表实机验收通过，须明确记录未完成。

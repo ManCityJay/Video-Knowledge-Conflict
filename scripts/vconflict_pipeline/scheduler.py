@@ -12,7 +12,11 @@ from .common import PipelineError
 from .integrity import digest
 from .media_cache import MediaCache
 from .paths import grouped_dir, iter_case_paths
-from .qa import LOCAL_QA_CONFIGS, MissingFinalAnswerError, preflight_qa_backend, qa_service_endpoint
+from .qa import (
+    FINAL_ANSWER_CONTINUATION_MAX_TOKENS, LOCAL_QA_CONFIGS, MissingFinalAnswerError,
+    TruncatedAnswerError, preflight_qa_backend, prepare_final_answer_continuation,
+    qa_service_endpoint,
+)
 from .qa_diagnostics import QADiagnostics
 from .qa_truncation import MaxTokenLog
 from .result_rules import expand_thinking_efforts
@@ -142,14 +146,25 @@ class Engine:
             self.failed_cases.add(task.path)
 
     def request_failed(self, task, permit, exc):
-        if task.kind == 'qa' and isinstance(exc, MissingFinalAnswerError):
+        local = self.args.qa_model in LOCAL_QA_CONFIGS
+        if task.kind == 'qa' and (isinstance(exc, MissingFinalAnswerError)
+                                  or local and isinstance(exc, TruncatedAnswerError)):
             self.runtime.release(permit)
             if task.final_answer_retry_count == 0:
+                if local:
+                    try:
+                        task.final_answer_continuation = prepare_final_answer_continuation(
+                            exc, self.execution.backend.service)
+                    except PipelineError as continuation_error:
+                        self.fail(task, continuation_error)
+                        return
                 task.final_answer_retry_count = 1
                 task.due = time.monotonic()
                 self.diagnostics.record(task.diagnostic_stage, 'final_answer_retries')
+                action = (f'continuing the assistant answer (max_tokens={FINAL_ANSWER_CONTINUATION_MAX_TOKENS})'
+                          if local else 'repeating the original request')
                 print(f"Final-answer retry {task.path.stem}/{task.question_id}/{task.stage or 'main'} "
-                      "(1/1), repeating the original request", flush=True)
+                      f"(1/1), {action}", flush=True)
             else:
                 self.fail(task, exc)
             return
