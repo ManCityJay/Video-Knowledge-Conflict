@@ -344,6 +344,7 @@ Qwen27B 的 thinking 开关与 parser 参考 [vLLM 官方配方](https://recipes
 | `result_rules.py` / `selection.py` / `filters.py` | 输入介质与角色、统一结果条件、有效视频/问题选择、question-only 来源及可选报告筛选 |
 | `qa.py` / `qa_diagnostics.py` / `qa_truncation.py` | 单次模型请求、回答解析、本次运行诊断和截断响应日志 |
 | `task_planning.py` / `task_execution.py` / `media_cache.py` | 任务身份与依赖规划、请求执行与结果合并、媒体准备与缓存 |
+| `judging.py` | 主 pipeline 和独立 VCD 共用的最终答案 Judge prompt、结构化请求及判定校验 |
 | `scheduler.py` / `runtime.py` | 调度、认领、额度准入、退避和进度；同机进程协调与锁 |
 | `evaluation.py` / `reporting.py` | 共用目标规划的预检、force 清理与完成计数；按角色汇总快照与独立报告 |
 | `evidence.py` / `integrity.py` / `audit.py` | 画面证据、来源新鲜度、离线结构审核 |

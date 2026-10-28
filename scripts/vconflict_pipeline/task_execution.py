@@ -1,37 +1,14 @@
 """Single-task QA/Judge requests and provenance-checked result merging."""
 from __future__ import annotations
 
-import json
 import os
 
-from .common import PipelineError, utc_now
+from .common import PipelineError
 from .integrity import digest, judgment_fingerprint
 from .qa import TruncatedAnswerError, get_backend, local_qa_max_tokens, preflight_qa_backend, run_qa_once
 from .qa_truncation import split_truncated_response
 from .result_rules import set_filter_field
-from .schema import JUDGMENT_SCHEMA
-from .settings import AUTHOR_JUDGE_MODEL, VERDICTS
-from .transport import openrouter_json
-
-
-JUDGE_SYSTEM_PROMPT = """Evaluate the supplied final_answer against the context
-references. Treat final_answer as the complete answer to judge. Do not infer,
-reconstruct, or consider any reasoning or other response text that is not in
-final_answer.
-
-For video_role=conflict:
-- context_grounded means final_answer clearly reports the conflict-context fact.
-- knowledge_trapped means final_answer substitutes the normal-control answer for the
-  conflict-context fact.
-- ambiguous_or_unjudgeable covers irrelevant, unresolved, mixed, contradictory,
-  hedged, or otherwise unclassifiable final answers.
-
-For video_role=control:
-- context_grounded means final_answer clearly reports the normal-control fact.
-- never use knowledge_trapped; an answer matching the conflict reference or
-  neither reference is ambiguous_or_unjudgeable.
-
-Return only the requested structured result."""
+from .judging import judge_answer
 
 
 class TaskExecutor:
@@ -75,28 +52,10 @@ class TaskExecutor:
                 if self.max_token_log is not None:
                     self.log_truncated_answer(task, exc)
                 raise
-        q, facts = task.question, task.context['conflict_spec']
-        final_answer = task.result.get('final_answer')
-        if not isinstance(final_answer, str) or not final_answer.strip():
-            raise PipelineError('Selected QA has no final_answer; run --force-qa')
-        payload = {'video_role': task.context['role'], 'question': q['text_en'], 'final_answer': final_answer,
-                   'normal_fact': facts['normal_fact_en'], 'intended_video_fact': facts['intended_video_fact_en'],
-                   'conflict_video_reference': q['conflict_video_reference_en'],
-                   'normal_control_reference': q['normal_control_reference_en']}
-        verdict, response = openrouter_json(
-            messages=[{'role': 'system', 'content': JUDGE_SYSTEM_PROMPT},
-                      {'role': 'user', 'content': json.dumps(payload, ensure_ascii=False)}],
-            model=AUTHOR_JUDGE_MODEL, schema_name='knowledge_conflict_judgment', schema=JUDGMENT_SCHEMA,
-            api_key=self.judge_key, timeout=self.args.timeout, single_attempt=True)
-        if verdict.get('verdict') not in VERDICTS:
-            raise PipelineError('Invalid judgment verdict')
-        if task.context['role'] == 'control' and verdict['verdict'] == 'knowledge_trapped':
-            raise PipelineError('Judge returned knowledge_trapped for a control input')
-        confidence = float(verdict['confidence'])
-        if not 0 <= confidence <= 1:
-            raise PipelineError('Invalid judgment confidence')
-        return {**verdict, 'confidence': confidence, 'timestamp': utc_now(),
-                'judge_model': AUTHOR_JUDGE_MODEL, 'judge_request_id': response.get('id')}
+        return judge_answer(
+            question=task.question, facts=task.context['conflict_spec'],
+            role=task.context['role'], final_answer=task.result.get('final_answer'),
+            api_key=self.judge_key, timeout=self.args.timeout)
 
     def log_truncated_answer(self, task, exc):
         response, parameters = exc.raw_response, exc.generation_parameters
