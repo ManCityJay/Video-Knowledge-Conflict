@@ -108,10 +108,11 @@ class Branch:
                 self.owner.rope_deltas = old
 
 
-def native_generate(model, processor, inputs, *, family, max_new_tokens, thinking_token_budget, device, dtype):
+def native_generate(model, processor, inputs, *, family, max_new_tokens, thinking_token_budget,
+                    device, dtype, thinking=True):
     import torch
     from transformers import GenerationConfig, LogitsProcessorList
-    from .control import ReasoningControl
+    from .control import ReasoningControl, suppressed_tokens
 
     stop = eos_ids(model, processor)
     pad = processor.tokenizer.pad_token_id
@@ -120,10 +121,11 @@ def native_generate(model, processor, inputs, *, family, max_new_tokens, thinkin
     config = GenerationConfig(
         do_sample=False, num_beams=1, use_cache=True, max_new_tokens=max_new_tokens,
         top_p=None, top_k=None,
-        eos_token_id=sorted(stop), pad_token_id=pad, return_dict_in_generate=False)
+        eos_token_id=sorted(stop), pad_token_id=pad, return_dict_in_generate=False,
+        suppress_tokens=suppressed_tokens(processor.tokenizer, family=family, thinking=thinking) or None)
     prompt_length = inputs["input_ids"].shape[1]
-    controller = ReasoningControl(processor.tokenizer, inputs["input_ids"][0].tolist(),
-                                  family=family, budget=thinking_token_budget)
+    controllers = ([ReasoningControl(processor.tokenizer, inputs['input_ids'][0].tolist(),
+                                    family=family, budget=thinking_token_budget)] if thinking else [])
 
     owner = getattr(model, "model", model)
     has_rope = hasattr(owner, "rope_deltas")
@@ -134,7 +136,7 @@ def native_generate(model, processor, inputs, *, family, max_new_tokens, thinkin
         with torch.inference_mode():
             output = model.generate(
                 **move_inputs(inputs, device, dtype), generation_config=config,
-                logits_processor=LogitsProcessorList([controller]))
+                logits_processor=LogitsProcessorList(controllers))
         return output[0, prompt_length:].tolist()
     finally:
         if has_rope:

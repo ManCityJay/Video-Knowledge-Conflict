@@ -7,16 +7,17 @@ from pathlib import Path
 from vconflict_pipeline.qa import _cosmos_prompt, _video_question_prompt
 
 
-def template_kwargs(family):
-    return ({"enable_thinking": True, "reasoning_effort": "xhigh"} if family == "qwen"
-            else {"enable_thinking": True} if family == "gemma" else {})
+def template_kwargs(family, thinking=True):
+    if family == 'qwen':
+        return {'enable_thinking': thinking, **({'reasoning_effort': 'xhigh'} if thinking else {})}
+    return {'enable_thinking': thinking} if family == 'gemma' else {}
 
 
-def build_messages(question, *, family, video=None, based=False, work_title=None):
+def build_messages(question, *, family, video=None, based=False, work_title=None, thinking=True):
     prompt = _video_question_prompt(question, work_title=work_title,
                                     work_title_prefix=work_title is not None, based=based)
     if family == "cosmos":
-        prompt = _cosmos_prompt(prompt, "default")
+        prompt = _cosmos_prompt(prompt, 'default' if thinking else None)
     content = ([{"type": "video", "path": str(video)}] if video is not None else [])
     content.append({"type": "text", "text": prompt})
     result = [] if family == "qwen" else [
@@ -74,9 +75,9 @@ def gemma_inputs(processor, rendered, frames, metadata):
     return result
 
 
-def prepare_inputs(processor, messages, *, family, media=None, continuation=False):
+def prepare_inputs(processor, messages, *, family, media=None, continuation=False, thinking=True):
     """Both CD branches receive identical text, template kwargs and assistant history."""
-    kwargs = template_kwargs(family)
+    kwargs = template_kwargs(family, thinking)
     rendered = processor.apply_chat_template(
         messages, tokenize=False, add_generation_prompt=not continuation,
         continue_final_message=continuation, **kwargs)

@@ -3,8 +3,9 @@ from __future__ import annotations
 
 import argparse
 import gc
+import importlib.metadata
 import math
-import re
+import subprocess
 import sys
 import uuid
 from pathlib import Path
@@ -14,6 +15,11 @@ from vconflict_pipeline.qa import validate_thinking_token_budget
 from vconflict_pipeline.qa_truncation import MaxTokenLog
 from vconflict_pipeline.settings import DEFAULT_CASE_DIR, PROJECT_ROOT
 from .core import validate_parameters
+from .config import from_arguments
+from .launcher import (
+    add_queue_options, gpu_indices, load_status, new_run, preflight, preview, supervise,
+    validate_models, validate_root,
+)
 from .reporting import write_report
 from .storage import (
     GROUPS, bind_target, current_judgment, current_qa, make_config, matching_records, mutate_case,
@@ -22,22 +28,18 @@ from .storage import (
 
 
 def parser():
-    result = argparse.ArgumentParser(description='VCD aligned with the main conflict-video QA/Judge protocol.')
-    result.add_argument('--model-family', required=True, choices=('cosmos', 'qwen', 'gemma'),
-                        help='Cached defaults: nvidia/Cosmos3-Nano, Qwen/Qwen3.8-27B (main), '
-                             'google/gemma-4-31B-it (pinned main-experiment revision)')
-    result.add_argument('--model', type=Path, help='Local model directory override; default: offline cache '
-                        'from HF_HUB_CACHE, HF_HOME/hub, or /cache/huggingface/hub')
+    result = argparse.ArgumentParser(
+        description='VCD aligned with the main conflict-video QA/Judge protocol.', allow_abbrev=False)
+    add_queue_options(result, required_models=True)
     result.add_argument('--dataset-dir', type=Path, default=DEFAULT_CASE_DIR)
     result.add_argument('--group', action='append', choices=GROUPS, help='Repeat; default: all four main groups')
     for name in ('case-id', 'video-id', 'question-id'):
         result.add_argument('--' + name, action='append')
     result.add_argument('--output', type=Path, default=PROJECT_ROOT / 'results/vcd')
     result.add_argument('--alpha', type=float, default=.5)
-    result.add_argument('--beta', type=float, default=.1)
+    result.add_argument('--beta', type=float, default=.05, help='CD plausibility threshold (default: 0.05)')
     result.add_argument('--max-new-tokens', type=int, default=8192)
     result.add_argument('--thinking-token-budget', type=int, default=6144)
-    result.add_argument('--device', default='cuda:0')
     result.add_argument('--dtype', choices=('bfloat16', 'float16', 'float32'), default='bfloat16')
     result.add_argument('--based', action='store_true')
     result.add_argument('--compare-baseline', action='store_true')
@@ -58,9 +60,12 @@ def parser():
 
 def validate(args):
     validate_parameters(args.alpha, args.beta)
-    validate_thinking_token_budget(args.thinking_token_budget, args.max_new_tokens)
-    if not re.fullmatch(r'cpu|mps|cuda(?::[0-9]+)?', args.device):
-        raise ValueError('--device must be cpu, mps, cuda, or cuda:N')
+    if args.max_new_tokens <= 0:
+        raise ValueError('--max-new-tokens must be positive')
+    if args.disable_thinking:
+        args.thinking_token_budget = None
+    else:
+        validate_thinking_token_budget(args.thinking_token_budget, args.max_new_tokens)
     for key in ('judge_concurrency', 'openrouter_concurrency', 'timeout'):
         if getattr(args, key) <= 0:
             raise ValueError(f'--{key.replace("_", "-")} must be positive')
@@ -190,7 +195,7 @@ def run(args):
     config = make_config(args)
     validate_output(args.output)
     cases, targets = select_sources(args)
-    run_id = uuid.uuid4().hex
+    run_id = args.run_id or uuid.uuid4().hex
     methods = ('cd', 'baseline') if args.compare_baseline else ('cd',)
     with output_lock(args.output):
         prepare_output(args.output, config, cases, run_id)
@@ -221,7 +226,43 @@ def main(argv=None):
     arguments = parser()
     args = arguments.parse_args(argv)
     try:
-        return run(args)
-    except (PipelineError, ValueError, OSError) as exc:
+        validate_models(args.models)
+        args.output = args.output.expanduser().resolve()
+        validate_root(args.output)
+        configs = []
+        for family in args.models:
+            config = from_arguments(args, family)
+            if args.max_token_log and len(args.models) > 1:
+                path = args.max_token_log
+                config.max_token_log = path.with_name(f'{path.stem}_{family}{path.suffix}')
+            validate(config)
+            config.model_path = make_config(config)['model_path']
+            validate_output(config.output)
+            select_sources(config)
+            configs.append(config)
+        indices = gpu_indices(args.gpus, len(configs))
+        phases = [('summarize' if args.summarize_only else 'run', configs)]
+        if args.dry_run:
+            preview(phases, indices)
+            return 0
+        with output_lock(args.output):
+            validate_root(args.output)
+            checks = {} if args.summarize_only else preflight(configs, indices)
+            status_path = args.output / 'queue_status.json'
+            status = load_status(status_path, 'vcd_queue_status')
+            current = new_run(args.models, checks, gpus=args.gpus)
+            status['runs'].append(current)
+            from .storage import atomic_json
+            atomic_json(status_path, status)
+            try:
+                return supervise(phases, indices, checks, status, current, status_path)
+            except Exception as exc:
+                current.update(status='failed', finished_at=utc_now(), error=str(exc))
+                atomic_json(status_path, status)
+                raise
+    except KeyboardInterrupt:
+        return 130
+    except (PipelineError, ValueError, OSError, KeyError, importlib.metadata.PackageNotFoundError,
+            subprocess.SubprocessError) as exc:
         print(f'Error: {exc}', file=sys.stderr)
         return 2

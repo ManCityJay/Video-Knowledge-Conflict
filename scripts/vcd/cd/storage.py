@@ -147,7 +147,8 @@ def select_sources(args):
                               'based': args.based,
                               'label': f"{group}/{case['case_id']}/{video['video_id']}/{question['question_id']}"}
                     target['messages'] = build_messages(question['text_en'], family=args.model_family,
-                                                       video=video_path, based=args.based, work_title=work_title)
+                                                       video=video_path, based=args.based, work_title=work_title,
+                                                       thinking=not args.disable_thinking)
                     targets.append(target)
             cases.append({'vcd_schema_version': SCHEMA_VERSION, 'group': group,
                           'case_id': case['case_id'], 'source_path': str(path.resolve()),
@@ -161,10 +162,11 @@ def select_sources(args):
 
 def make_config(args):
     return {'model_family': args.model_family, 'model': MODELS[args.model_family],
-            'model_path': str(resolve_model(args.model_family, args.model)),
+            'model_path': args.model_path or str(resolve_model(args.model_family)),
             'protocol_version': PROTOCOL_VERSION, 'generation_protocols': dict(GENERATION_PROTOCOLS),
             'dtype': args.dtype,
             'max_new_tokens': args.max_new_tokens, 'thinking_token_budget': args.thinking_token_budget,
+            'thinking_effort': args.thinking_effort,
             'alpha': args.alpha, 'beta': args.beta, 'based': args.based,
             'device': args.device, 'compare_baseline': args.compare_baseline,
             'qa_only': args.qa_only, 'summarize_only': args.summarize_only,
@@ -185,7 +187,8 @@ def bind_target(target, config, method):
         'model_family', 'model', 'model_path', 'dtype',
         'max_new_tokens', 'thinking_token_budget')})
     binding.update(question_id=target['question']['question_id'],
-                   question=target['question']['text_en'], method=method, thinking_effort='default',
+                   question=target['question']['text_en'], method=method,
+                   thinking_effort=config.get('thinking_effort', 'default'),
                    protocol_version=config['generation_protocols'][method])
     if method == 'cd':
         binding.update(alpha=config['alpha'], beta=config['beta'])
@@ -240,7 +243,7 @@ def validate_output(output):
         return
     path = output / 'config.json'
     if not path.exists():
-        if any(p.name != '.run.lock' for p in output.iterdir()):
+        if any(p.name not in ('.run.lock', 'logs') for p in output.iterdir()):
             raise ValueError('Output has no current VCD manifest; choose a new output directory')
         return
     manifest = read_json(path)

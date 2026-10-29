@@ -8,6 +8,23 @@ BOUNDARIES = {
 }
 
 
+def suppressed_tokens(tokenizer, *, family, thinking):
+    """Resolve Cosmos tag IDs from this tokenizer; never rewrite its vocabulary."""
+    if thinking or family != 'cosmos':
+        return []
+    result = []
+    for tag in BOUNDARIES['cosmos']:
+        ids = tokenizer.encode(tag, add_special_tokens=False)
+        if (len(ids) != 1 or not isinstance(ids[0], int) or not 0 <= ids[0] < len(tokenizer)
+                or ids[0] == tokenizer.unk_token_id
+                or tokenizer.convert_ids_to_tokens(ids[0]) != tag):
+            raise ValueError(f'Cosmos tokenizer must encode {tag} as one distinct valid token')
+        result.append(ids[0])
+    if len(set(result)) != 2:
+        raise ValueError('Cosmos reasoning tag IDs must be distinct')
+    return result
+
+
 def last_sequence(ids, sequence):
     for index in range(len(ids) - len(sequence), -1, -1):
         if ids[index:index + len(sequence)] == sequence:

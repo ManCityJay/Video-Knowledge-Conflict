@@ -8,23 +8,26 @@ from vconflict_pipeline.qa import (
     MissingFinalAnswerError, extract_final_answer,
 )
 from .adapters import Branch, eos_ids, native_generate
-from .control import ReasoningControl
+from .control import ReasoningControl, suppressed_tokens
 from .core import combine_logits
 from .video import load_frames, prepare_inputs, question_messages
 
 
 def decode(model, processor, video, question, *, family, alpha, beta,
-           max_new_tokens, thinking_token_budget, stop, device, dtype):
+           max_new_tokens, thinking_token_budget, stop, device, dtype, thinking=True):
     import torch
     generated = []
-    controller = ReasoningControl(processor.tokenizer, video['input_ids'][0].tolist(),
-                                  family=family, budget=thinking_token_budget)
+    controller = (ReasoningControl(processor.tokenizer, video['input_ids'][0].tolist(),
+                                   family=family, budget=thinking_token_budget) if thinking else None)
+    suppressed = suppressed_tokens(processor.tokenizer, family=family, thinking=thinking)
     with torch.inference_mode():
         left = Branch(model, video, device, dtype)
-        right = Branch(model, question, device, dtype)
-        lv, lq = left.logits(), right.logits()
+        right = Branch(model, question, device, dtype) if alpha else None
+        lv, lq = left.logits(), right.logits() if right else None
         for index in range(max_new_tokens):
-            scores = controller(left.sequence, combine_logits(lv, lq, alpha=alpha, beta=beta))
+            scores = combine_logits(lv, lq, alpha=alpha, beta=beta, suppress_tokens=suppressed)
+            if controller:
+                scores = controller(left.sequence, scores)
             if not torch.isfinite(scores).any(dim=-1).all():
                 raise ValueError('no valid decoding candidates after reasoning control')
             probabilities = torch.softmax(scores, dim=-1)
@@ -36,13 +39,13 @@ def decode(model, processor, video, question, *, family, alpha, beta,
             generated.append(tid)
             if tid in stop or index + 1 == max_new_tokens:
                 break
-            lv, lq = left.logits(token), right.logits(token)
-            if left.kwargs.get('past_key_values') is right.kwargs.get('past_key_values'):
+            lv, lq = left.logits(token), right.logits(token) if right else None
+            if right and left.kwargs.get('past_key_values') is right.kwargs.get('past_key_values'):
                 raise RuntimeError('CD branches unexpectedly share a KV cache')
     return generated
 
 
-def parsed(processor, ids, stop, family, *, continuation=False):
+def parsed(processor, ids, stop, family, *, continuation=False, thinking=True):
     tokens = ids[:-1] if ids and ids[-1] in stop else ids
     raw = processor.tokenizer.decode(tokens, skip_special_tokens=False,
                                      clean_up_tokenization_spaces=False)
@@ -54,10 +57,10 @@ def parsed(processor, ids, stop, family, *, continuation=False):
         # Reuse the very parsers used by the main vLLM endpoints.
         if family == 'qwen':
             from vllm.parser.qwen3 import Qwen3Parser
-            parser = Qwen3Parser(processor.tokenizer, chat_template_kwargs={'enable_thinking': True})
+            parser = Qwen3Parser(processor.tokenizer, chat_template_kwargs={'enable_thinking': thinking})
         else:
             from vllm.parser.gemma4 import Gemma4Parser
-            parser = Gemma4Parser(processor.tokenizer, chat_template_kwargs={'enable_thinking': True})
+            parser = Gemma4Parser(processor.tokenizer, chat_template_kwargs={'enable_thinking': thinking})
         reasoning, body = parser.extract_reasoning(raw, None)
         body = body or ''
     return body, reasoning
@@ -78,32 +81,37 @@ def generate_answer(model, processor, target, *, method, args, dtype, on_checkpo
     started = time.perf_counter()
     result = {'status': 'running', 'phases': [], 'final_answer_retry_count': 0}
     prefill = ''
+    thinking = not args.disable_thinking
     try:
         media = load_frames(target['video_path'], args.model_family)
         messages = target['messages']
         for phase in range(2):
             budget = args.max_new_tokens if phase == 0 else FINAL_ANSWER_CONTINUATION_MAX_TOKENS
-            think_budget = args.thinking_token_budget if phase == 0 else None
+            think_budget = args.thinking_token_budget if phase == 0 and thinking else None
             stage = {'stage': 'initial' if phase == 0 else 'continuation',
                      'max_tokens': budget, 'thinking_token_budget': think_budget, 'finish_reason': 'error'}
             result['phases'].append(stage)
             video = prepare_inputs(processor, messages, family=args.model_family,
-                                   media=media, continuation=bool(phase))
+                                   media=media, continuation=bool(phase), thinking=thinking)
             check_context(model, processor, video, budget)
             stop = eos_ids(model, processor)
             tick = time.perf_counter()
-            if method == 'cd':
+            question = None
+            if method == 'cd' and args.alpha:
                 question = prepare_inputs(processor, question_messages(messages),
-                                          family=args.model_family, continuation=bool(phase))
+                                          family=args.model_family, continuation=bool(phase), thinking=thinking)
                 check_context(model, processor, question, budget)
+            if method == 'cd':
                 ids = decode(model, processor, video, question, family=args.model_family,
                              alpha=args.alpha, beta=args.beta, max_new_tokens=budget,
-                             thinking_token_budget=think_budget, stop=stop, device=args.device, dtype=dtype)
+                             thinking_token_budget=think_budget, stop=stop, device=args.device, dtype=dtype,
+                             thinking=thinking)
             else:
                 ids = native_generate(model, processor, video, family=args.model_family,
                                       max_new_tokens=budget, thinking_token_budget=think_budget,
-                                      device=args.device, dtype=dtype)
-            body, reasoning = parsed(processor, ids, stop, args.model_family, continuation=bool(phase))
+                                      device=args.device, dtype=dtype, thinking=thinking)
+            body, reasoning = parsed(processor, ids, stop, args.model_family,
+                                     continuation=bool(phase), thinking=thinking)
             stage.update(generated_tokens=len(ids), finish_reason='stop' if ids and ids[-1] in stop else 'length',
                          seconds=round(time.perf_counter() - tick, 6))
             result.update(raw_answer=prefill + body, finish_reason=stage['finish_reason'])
