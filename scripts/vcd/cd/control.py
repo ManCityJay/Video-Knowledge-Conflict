@@ -8,9 +8,9 @@ BOUNDARIES = {
 }
 
 
-def suppressed_tokens(tokenizer, *, family, thinking):
+def suppressed_tokens(tokenizer, *, family, thinking, continuation=False):
     """Resolve Cosmos tag IDs from this tokenizer; never rewrite its vocabulary."""
-    if thinking or family != 'cosmos':
+    if family != 'cosmos' or (thinking and not continuation):
         return []
     result = []
     for tag in BOUNDARIES['cosmos']:

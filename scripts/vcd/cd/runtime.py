@@ -7,19 +7,21 @@ from vconflict_pipeline.qa import (
     FINAL_ANSWER_CONTINUATION_MAX_TOKENS, FINAL_ANSWER_PREFIX,
     MissingFinalAnswerError, extract_final_answer,
 )
-from .adapters import Branch, eos_ids, native_generate
+from .adapters import Branch, eos_ids
 from .control import ReasoningControl, suppressed_tokens
 from .core import combine_logits
-from .video import load_frames, prepare_inputs, question_messages
+from .video import load_frames, prepare_inputs
 
 
 def decode(model, processor, video, question, *, family, alpha, beta,
-           max_new_tokens, thinking_token_budget, stop, device, dtype, thinking=True):
+           max_new_tokens, thinking_token_budget, stop, device, dtype, thinking=True,
+           continuation=False):
     import torch
     generated = []
     controller = (ReasoningControl(processor.tokenizer, video['input_ids'][0].tolist(),
                                    family=family, budget=thinking_token_budget) if thinking else None)
-    suppressed = suppressed_tokens(processor.tokenizer, family=family, thinking=thinking)
+    suppressed = suppressed_tokens(processor.tokenizer, family=family, thinking=thinking,
+                                   continuation=continuation)
     with torch.inference_mode():
         left = Branch(model, video, device, dtype)
         right = Branch(model, question, device, dtype) if alpha else None
@@ -76,7 +78,7 @@ def check_context(model, processor, inputs, budget):
                          f"{budget} output tokens exceeds {min(limits)}; inputs are never cropped")
 
 
-def generate_answer(model, processor, target, *, method, args, dtype, on_checkpoint, on_truncated=None):
+def generate_answer(model, processor, target, *, args, dtype, on_checkpoint, on_truncated=None):
     """Persist one answer and small phase summaries; keep continuation inputs in memory."""
     started = time.perf_counter()
     result = {'status': 'running', 'phases': [], 'final_answer_retry_count': 0}
@@ -85,6 +87,7 @@ def generate_answer(model, processor, target, *, method, args, dtype, on_checkpo
     try:
         media = load_frames(target['video_path'], args.model_family)
         messages = target['messages']
+        question_messages = target['question_messages']
         for phase in range(2):
             budget = args.max_new_tokens if phase == 0 else FINAL_ANSWER_CONTINUATION_MAX_TOKENS
             think_budget = args.thinking_token_budget if phase == 0 and thinking else None
@@ -97,19 +100,14 @@ def generate_answer(model, processor, target, *, method, args, dtype, on_checkpo
             stop = eos_ids(model, processor)
             tick = time.perf_counter()
             question = None
-            if method == 'cd' and args.alpha:
-                question = prepare_inputs(processor, question_messages(messages),
+            if args.alpha:
+                question = prepare_inputs(processor, question_messages,
                                           family=args.model_family, continuation=bool(phase), thinking=thinking)
                 check_context(model, processor, question, budget)
-            if method == 'cd':
-                ids = decode(model, processor, video, question, family=args.model_family,
-                             alpha=args.alpha, beta=args.beta, max_new_tokens=budget,
-                             thinking_token_budget=think_budget, stop=stop, device=args.device, dtype=dtype,
-                             thinking=thinking)
-            else:
-                ids = native_generate(model, processor, video, family=args.model_family,
-                                      max_new_tokens=budget, thinking_token_budget=think_budget,
-                                      device=args.device, dtype=dtype, thinking=thinking)
+            ids = decode(model, processor, video, question, family=args.model_family,
+                         alpha=args.alpha, beta=args.beta, max_new_tokens=budget,
+                         thinking_token_budget=think_budget, stop=stop, device=args.device, dtype=dtype,
+                         thinking=thinking, continuation=bool(phase))
             body, reasoning = parsed(processor, ids, stop, args.model_family,
                                      continuation=bool(phase), thinking=thinking)
             stage.update(generated_tokens=len(ids), finish_reason='stop' if ids and ids[-1] in stop else 'length',
@@ -139,7 +137,9 @@ def generate_answer(model, processor, target, *, method, args, dtype, on_checkpo
                 raise ValueError(f'Final-answer continuation failed: {error}')
             # Match the main experiment's assistant prefill, including separate reasoning.
             prefill = (reasoning + '\n' if reasoning else '') + body + '\n' + FINAL_ANSWER_PREFIX
-            messages = target['messages'] + [{'role': 'assistant', 'content': prefill}]
+            assistant = {'role': 'assistant', 'content': prefill}
+            messages = target['messages'] + [assistant]
+            question_messages = target['question_messages'] + [assistant]
             result['final_answer_retry_count'] = 1
             on_checkpoint(result)
     except KeyboardInterrupt:

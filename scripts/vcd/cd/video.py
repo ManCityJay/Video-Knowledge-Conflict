@@ -25,14 +25,6 @@ def build_messages(question, *, family, video=None, based=False, work_title=None
     return result + [{"role": "user", "content": content}]
 
 
-def question_messages(messages):
-    result = copy.deepcopy(messages)
-    for message in result:
-        if isinstance(message["content"], list):
-            message["content"] = [p for p in message["content"] if p.get("type") != "video"]
-    return result
-
-
 def load_frames(path, family):
     # Exactly the loader used by the main vLLM endpoint, in this same environment.
     from vllm.multimodal.video import VideoBackend
@@ -76,7 +68,7 @@ def gemma_inputs(processor, rendered, frames, metadata):
 
 
 def prepare_inputs(processor, messages, *, family, media=None, continuation=False, thinking=True):
-    """Both CD branches receive identical text, template kwargs and assistant history."""
+    """Render each branch's prompt with shared template settings and assistant history."""
     kwargs = template_kwargs(family, thinking)
     rendered = processor.apply_chat_template(
         messages, tokenize=False, add_generation_prompt=not continuation,

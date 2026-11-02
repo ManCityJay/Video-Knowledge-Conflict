@@ -149,6 +149,10 @@ def select_sources(args):
                     target['messages'] = build_messages(question['text_en'], family=args.model_family,
                                                        video=video_path, based=args.based, work_title=work_title,
                                                        thinking=not args.disable_thinking)
+                    target['question_messages'] = build_messages(
+                        question['text_en'], family=args.model_family,
+                        based=args.based and not args.question_no_based, work_title=work_title,
+                        thinking=not args.disable_thinking)
                     targets.append(target)
             cases.append({'vcd_schema_version': SCHEMA_VERSION, 'group': group,
                           'case_id': case['case_id'], 'source_path': str(path.resolve()),
@@ -168,7 +172,8 @@ def make_config(args):
             'max_new_tokens': args.max_new_tokens, 'thinking_token_budget': args.thinking_token_budget,
             'thinking_effort': args.thinking_effort,
             'alpha': args.alpha, 'beta': args.beta, 'based': args.based,
-            'device': args.device, 'compare_baseline': args.compare_baseline,
+            'question_no_based': args.question_no_based,
+            'device': args.device,
             'qa_only': args.qa_only, 'summarize_only': args.summarize_only,
             'force_qa': args.force_qa, 'force_judge': args.force_judge,
             'judge': {'model': AUTHOR_JUDGE_MODEL, 'concurrency': args.judge_concurrency,
@@ -179,7 +184,7 @@ def make_config(args):
                           for key in ('dataset_dir', 'group', 'case_id', 'video_id', 'question_id')}}
 
 
-def bind_target(target, config, method):
+def bind_target(target, config):
     binding = {key: target[key] for key in (
         'group', 'case_id', 'source_path', 'video_id', 'video_path', 'question_scope',
         'based', 'work_title', 'work_title_prefix')}
@@ -187,11 +192,13 @@ def bind_target(target, config, method):
         'model_family', 'model', 'model_path', 'dtype',
         'max_new_tokens', 'thinking_token_budget')})
     binding.update(question_id=target['question']['question_id'],
-                   question=target['question']['text_en'], method=method,
+                   question=target['question']['text_en'], method='cd',
                    thinking_effort=config.get('thinking_effort', 'default'),
-                   protocol_version=config['generation_protocols'][method])
-    if method == 'cd':
-        binding.update(alpha=config['alpha'], beta=config['beta'])
+                   protocol_version=config['generation_protocols']['cd'])
+    binding.update(alpha=config['alpha'], beta=config['beta'])
+    # Preserve historical keys unless the question branch's prompt actually changes.
+    if target['based'] and config.get('question_no_based', False) and config['alpha']:
+        binding['question_no_based'] = True
     return {**binding, 'qa_key': digest_json(binding)}
 
 
@@ -218,7 +225,8 @@ def records_for(case, target, field='qa_results'):
 
 
 def matching_records(case, target, binding, field='qa_results'):
-    return [r for r in records_for(case, target, field) if r.get('qa_key') == binding['qa_key']]
+    return [r for r in records_for(case, target, field)
+            if r.get('method') == 'cd' and r.get('qa_key') == binding['qa_key']]
 
 
 def current_qa(case, target, binding):

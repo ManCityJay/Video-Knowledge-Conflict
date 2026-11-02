@@ -141,7 +141,7 @@ def report_status(config):
     report = read_json(path)
     if report['run_id'] != config.run_id:
         return {'complete': False, 'error': 'Worker report belongs to another run'}
-    metrics = {method: data['overall'] for method, data in report['methods'].items()}
+    metrics = {'cd': report['methods']['cd']['overall']}
     return {'complete': report['incomplete'] == 0 and not report['run_error'],
             'methods': metrics, 'incomplete': report['incomplete'], 'run_error': report['run_error']}
 

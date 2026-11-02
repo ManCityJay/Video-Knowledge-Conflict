@@ -46,7 +46,7 @@ worker 按 GPU UUID 隔离设备，进程内固定使用 `cuda:0`。
 
 ## 单次运行
 
-以下示例运行一个视频的一道题，并生成原生 greedy baseline 供比较：
+以下示例对一个视频的一道题执行 CD 生成和判分：
 
 ```bash
 python scripts/vcd/run.py \
@@ -54,7 +54,7 @@ python scripts/vcd/run.py \
   --group classic_fairy_tale_film_conflicts \
   --case-id aladdin_lamp_rubbing_draws_genie_back_inside \
   --video-id v001 --question-id q001 \
-  --output results/vcd/example --compare-baseline
+  --output results/vcd/example
 ```
 
 `--dataset-dir` 默认 `dataset/cases`。`--group`、`--case-id`、`--video-id`、
@@ -65,10 +65,10 @@ python scripts/vcd/run.py \
 | 参数 | 默认值与说明 |
 |---|---|
 | `--output` | `results/vcd`，模型结果写入其下的 `<family>/` |
-| `--alpha` | `0.5`，有限且不小于 0；设为 0 时跳过对比和 beta 过滤 |
-| `--beta` | `0.05`，有限且在 `(0, 1]` 内 |
+| `--alpha` | `1`，有限且不小于 0；设为 0 时跳过对比和 beta 过滤 |
+| `--beta` | `0.1`，有限且在 `(0, 1]` 内 |
 | `--based` | 默认关闭；开启后加入依据视频回答的指令 |
-| `--compare-baseline` | 默认关闭；开启后独立生成和判分原生 greedy baseline |
+| `--question-no-based` | 默认关闭；based 开启时，仅从 CD 的 question 分支省略依据视频回答的指令 |
 | `--max-new-tokens` | `8192`，总输出预算，必须为正 |
 | `--thinking-token-budget` | `6144`；开启 thinking 时必须为正且严格小于总输出预算 |
 | `--dtype` | `bfloat16`；可选 `float16`、`float32` |
@@ -85,9 +85,30 @@ python scripts/vcd/run.py \
   --disable-thinking --output results/vcd/no_thinking
 ```
 
+仅 video 分支使用 based 时，单次运行须显式开启 `--based`：
+
+```bash
+python scripts/vcd/run.py \
+  --models qwen --gpus 0 \
+  --based --question-no-based \
+  --output results/vcd/video_based_question_no_based --dry-run
+```
+
+检查配置后移除 `--dry-run` 执行。
+
 ## 解码与回答规则
 
-CD 的视频和纯问题分支使用相同文字、模板参数及生成历史，仅视频输入不同。
+CD 默认在视频和纯问题分支使用相同文字，仅 video 分支带视频。
+`--question-no-based` 允许两分支使用不同的 based 指令配置；两套消息分别构造，
+始终保留相同问题、Fairy 作品名前缀、回答格式要求、模板参数和 thinking 设置。
+
+| 配置 | video 分支 | question 分支 |
+|---|---|---|
+| based 开启 | 加 based | 加 based |
+| based 开启且传入 `--question-no-based` | 加 based | 不加 based |
+| based 关闭 | 不加 based | 不加 based |
+
+Fairy 的 question 分支仍保留作品名前缀。两分支共享逐 token 生成历史，各自使用独立 KV cache。
 两分支 logits 转为 FP32 后计算：
 
 ```text
@@ -98,23 +119,28 @@ next_token = argmax(softmax(scores))
 ```
 
 `allowed_video_logits` 排除禁止生成的 token。开启 thinking 时，达到 reasoning 预算后
-强制关闭 reasoning，再继续生成答案。Baseline 使用相同输入、thinking 设置和回答恢复规则。
+强制关闭 reasoning，再继续生成答案。`alpha=0` 时不运行 question 分支，也不进行 beta 过滤，
+`--question-no-based` 不改变该条件的缓存键；结果仍记录为 `method: "cd"`。
 
 Prompt 复用主实验协议，要求最后一个非空行包含 `Final answer:` 和非空答案。
 Fairy 使用当前有效标题第一个冒号前的作品名作为前缀，其他组不添加作品名前缀。
 Cosmos/Gemma 保留 helpful-assistant system，Qwen 使用 user-only messages。
 
 关闭 thinking 时，Cosmos 去掉推理格式指令，并动态解析 tokenizer 的 `<think>`、
-`</think>` token ID，在 CD 和 baseline 生成中屏蔽；Gemma/Qwen 使用
+`</think>` token ID，在 CD 生成中屏蔽；Gemma/Qwen 使用
 `enable_thinking=false`，Qwen 不传 `reasoning_effort=xhigh`。
 此时忽略 thinking 预算参数，有效预算记录为 `null`，总输出预算仍须为正。
-开关同时作用于 CD 两分支、baseline、首次生成、答案解析和一次续写。
+开关同时作用于 CD 两分支、首次生成、答案解析和一次续写。
 
 视频预处理沿用主实验：Cosmos/Qwen 由 processor 分别按 4 FPS / 1 FPS 采样；
 Gemma 在 loader 按 1 FPS 采样，逐帧处理，每帧最多 70 个视觉 token。
 
 首次截断或最终答案格式失败时，保留完整首次回答，追加 assistant 预填
 `\nFinal answer:`，最多续写 256 tokens，不再设置 thinking 预算。
+CD 两分支分别在各自原始消息后追加同一份 assistant 预填，续写保留各自的 based 配置。
+Cosmos 首次生成沿用当前 thinking 设置；assistant 续写无论是否开启 thinking，
+均屏蔽 `<think>` 和 `</think>`。标签 ID 由当前 tokenizer 动态解析并校验，
+同时从生成候选和 beta 阈值所用的最大 video logits 中排除；`alpha=0` 时仍屏蔽标签。
 再次截断、格式失败或上下文不足即记录失败，不裁剪输入。
 Judge 只读取提取的最终答案，不从 reasoning 推断答案。
 
@@ -144,7 +170,16 @@ results/vcd/example/
 修改同路径权重后需使用 `--force-qa`。
 
 开启 thinking 时记录 `thinking_effort=default`，关闭时为 `null`；两种模式不复用 QA。
-改变 alpha/beta 只影响 CD 缓存，baseline 可复用。源视频按固定输入处理，不计算视频哈希。
+改变 alpha/beta 会改变 CD 缓存键。源视频按固定输入处理，不计算视频哈希。
+配置记录 `question_no_based`，旧配置缺失时按 `false` 解释。仅在 based 开启、
+`alpha>0` 且传入 `--question-no-based` 的 CD 绑定及 `qa_key` 中增加
+`question_no_based=true`；新条件不复用旧 CD，其他条件保留历史缓存键。
+续跑及 `--summarize-only` 应保留原有 `--based --question-no-based` 等参数，确保匹配同一条件。
+
+仅 CD 参与执行、判分、报告和完成计数，报告保留 `methods.cd` 结构。
+历史 baseline 记录保留在原文件中并忽略，旧 CLI 参数 `--compare-baseline` 报不支持。
+本次 Cosmos 续写标签屏蔽不改变 CD 协议版本或缓存键，也不自动使历史结果失效；
+需要删除的 Cosmos 旧结果由用户自行处理，程序不清理或迁移。
 
 ```bash
 # 只生成 QA
@@ -160,7 +195,7 @@ Judge 默认并发 24 / RPM 20，OpenRouter 并发 24 / RPM 20，超时 600 秒�
 `--timeout`、`--max-retries` 调整。`--max-token-log /path/truncation.jsonl` 只在真实截断时
 追加保存任务、阶段、有效预算、回答文本和结束原因。
 
-报告按方法、group 和总体汇总 answer-level / video-level 的 grounded、trapped 比例，
+报告按 group 和总体汇总 CD 的 answer-level / video-level grounded、trapped 比例，
 ambiguous 计入分母，空分母为 `null`。未完成任务及原因见 `report.json` 的 `incomplete_tasks`。
 全部所选 QA/Judge 有效时退出 0，未完成返回 1，预检错误返回 2；QA-only 尚缺判分也返回 1。
 SIGINT / SIGTERM 会停止派发、通知活动进程并等待退出，分别返回 130 / 143，随后可普通续跑。
@@ -171,8 +206,12 @@ SIGINT / SIGTERM 会停止派发、通知活动进程并等待退出，分别返
 纳入全部 ready conflict 视频和关联有效问题。当前为 82 个 case、149 个视频、
 每模型 177 条 QA，四组分别为 54 / 46 / 43 / 34 条。
 
-批次默认选择 `qwen cosmos gemma`，GPU 默认 `all`；固定 `alpha=1`、`based=true`、
-BF16、greedy、8192 / 6144 预算，不生成 baseline。beta 默认 `0.05`，可用 `--beta` 调整。
+批次默认选择 `qwen cosmos gemma`，GPU 默认 `all`；固定 `alpha=1`、
+BF16、greedy、8192 / 6144 预算。beta 默认 `0.1`，可用 `--beta` 调整。
+`based` 默认开启，传入 `--no-based` 可关闭依据视频回答的指令；该开关适用于全部模型、
+smoke、正式运行及汇总。`run.py` 仍默认关闭，使用 `--based` 开启。
+传入 `--question-no-based` 时，仅 question 分支去掉 based，video 分支保持开启；
+与 `--no-based` 一起使用时，两分支均无 based 指令。
 `--disable-thinking` 时有效 thinking 预算为 `null`。
 
 ```bash
@@ -194,16 +233,37 @@ python scripts/vcd/run_batch.py \
 # 从已有结果重建报告
 python scripts/vcd/run_batch.py \
   --disable-thinking --output-root results/vcd/small82_no_thinking --summarize-only
+
+# 关闭 based，复用已有批次样本并使用独立目录；移除 --dry-run 后执行
+python scripts/vcd/run_batch.py \
+  --no-based \
+  --selection-from results/vcd/small82_alpha1_based/selection.json \
+  --output-root results/vcd/small82_alpha1_no_based --dry-run
+
+# 仅 video 分支开启 based；检查配置后移除 --dry-run，可加 --smoke-first 先验收单题
+python scripts/vcd/run_batch.py \
+  --models qwen cosmos gemma --gpus all \
+  --question-no-based \
+  --output-root results/vcd/small82_video_based_question_no_based --dry-run
 ```
 
 `--output-root` 默认 `results/vcd/small82_alpha1_based`。首次运行写入 `selection.json`，
 保存分组、case、视频、问题、模型路径和生成配置；续跑核对冻结任务，不重新抽样。
 未选模型不解析缓存，兼容清单允许补充 Cosmos。`--smoke-first` 中任一模型失败时不进入正式批次。
 
-更换 beta、thinking 模式或其他冻结配置时使用独立输出目录。
+更换 beta、based、question_no_based、thinking 模式或其他冻结配置时使用独立输出目录。
+关闭 based 时须显式指定独立的 `--output-root`；默认输出目录保持不变。
+续跑及 `--summarize-only` 必须保持原批次的参数开关；关闭 based 的批次仍须传 `--no-based`。
+仅 question 关闭 based 的批次仍须传 `--question-no-based`；同目录切换此开关会报配置不兼容。
 `--selection-from /path/to/selection.json` 可继承另一批次的相同样本，使用本批生成参数，
-不复制旧 QA/Judge。旧清单缺少 `thinking_effort` 时按开启解释；旧 beta=0.1 批次续跑
-须显式传 `--beta 0.1`。
+包括不同的 based 和 question_no_based 条件；新开关取本批参数，
+复制的任务快照中的 `based` 调整为本批配置，再完整校验，
+保留任务身份和数量，不修改来源清单、不复制旧 QA/Judge。已有输出目录仍严格核对
+冻结参数及任务快照，不能通过 `--selection-from` 改写旧批次条件。
+旧清单缺少 `question_no_based` 时按 `false` 解释，缺少 `thinking_effort` 时按开启解释；旧 beta=0.05 批次续跑
+须显式传 `--beta 0.05`。
+读取旧批次清单时，仅在内存中忽略 `compare_baseline` 和
+`generation_protocols.baseline`；其他参数继续严格匹配，不改写来源清单。
 
 各模型仍写入 `<输出根目录>/<family>/`，父目录使用 `batch_status.json` 记录队列状态。
 成功完成的批次每模型应有 `qa_valid=177`、`judge_valid=177`、`incomplete=0`。

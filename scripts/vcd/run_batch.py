@@ -28,7 +28,7 @@ from vconflict_pipeline.settings import AUTHOR_JUDGE_MODEL, DEFAULT_CASE_DIR, PR
 
 QUOTAS = dict(zip(GROUPS, (25, 25, 25, 7)))
 PARAMETERS = {
-    'alpha': 1.0, 'beta': 0.05, 'based': True, 'compare_baseline': False,
+    'alpha': 1.0, 'beta': 0.1, 'based': True, 'question_no_based': False,
     'max_new_tokens': 8192, 'thinking_token_budget': 6144, 'thinking_effort': 'default',
     'dtype': 'bfloat16',
     'generation_protocols': dict(GENERATION_PROTOCOLS), 'vcd_schema_version': SCHEMA_VERSION,
@@ -43,7 +43,11 @@ def parser():
     result.add_argument('--output-root', type=Path,
                         default=PROJECT_ROOT / 'results/vcd/small82_alpha1_based')
     result.add_argument('--beta', type=float, default=PARAMETERS['beta'],
-                        help='CD plausibility threshold (default: 0.05); use a separate root when changing it')
+                        help='CD plausibility threshold (default: 0.1); use a separate root when changing it')
+    result.add_argument('--no-based', action='store_false', dest='based',
+                        help='Disable the video-grounding instruction (default: enabled); use a separate output root')
+    result.add_argument('--question-no-based', action='store_true',
+                        help='Omit grounding only from the question branch; use a separate output root')
     result.add_argument('--selection-from', type=Path,
                         help='Reuse another selection.json sample without copying its QA/Judge results')
     add_queue_options(result)
@@ -58,7 +62,8 @@ def batch_config(family, parameters):
     judge = parameters['judge']
     return WorkerConfig(
         model_family=family, alpha=parameters['alpha'], beta=parameters['beta'],
-        based=parameters['based'], compare_baseline=parameters['compare_baseline'],
+        based=parameters['based'],
+        question_no_based=parameters.get('question_no_based', False),
         max_new_tokens=parameters['max_new_tokens'],
         thinking_token_budget=parameters['thinking_token_budget'],
         disable_thinking=parameters.get('thinking_effort', 'default') is None,
@@ -99,11 +104,18 @@ def verify_tasks(expected, actual, family):
 
 def read_selection(path, parameters=None):
     manifest = read_json(path)
-    # Old manifests omitted effort because thinking was always enabled.
+    # Old manifests used thinking and identical based instructions in both branches.
     stored = {**manifest.get('parameters', {})}
     stored.setdefault('thinking_effort', 'default')
+    stored.setdefault('question_no_based', False)
+    # Ignore only the retired baseline settings, without rewriting the source manifest.
+    current = {**stored}
+    current.pop('compare_baseline', None)
+    if isinstance(current.get('generation_protocols'), dict):
+        current['generation_protocols'] = dict(current['generation_protocols'])
+        current['generation_protocols'].pop('baseline', None)
     if (manifest.get('format') != 'vcd_small82_batch' or manifest.get('version') != 1
-            or (parameters is not None and stored != parameters)
+            or (parameters is not None and current != parameters)
             or manifest.get('dataset_dir') != str(DEFAULT_CASE_DIR.resolve())):
         raise ValueError('Incompatible frozen batch configuration; choose a separate output root')
     if (not isinstance(manifest.get('tasks'), list) or not manifest['tasks']
@@ -118,12 +130,16 @@ def read_selection(path, parameters=None):
     return manifest
 
 
-def selection(output, *, models, beta=PARAMETERS['beta'], disable_thinking=False, selection_from=None):
-    parameters = {**PARAMETERS, 'beta': beta,
+def selection(output, *, models, beta=PARAMETERS['beta'], based=True, disable_thinking=False,
+              question_no_based=False, selection_from=None):
+    parameters = {**PARAMETERS, 'beta': beta, 'based': based, 'question_no_based': question_no_based,
                   'thinking_effort': None if disable_thinking else 'default',
                   'thinking_token_budget': None if disable_thinking else PARAMETERS['thinking_token_budget']}
     path = output / 'selection.json'
     reference = read_selection(selection_from) if selection_from is not None else None
+    if reference is not None:
+        # Reuse the source sample under this batch's prompt condition, then fully validate it.
+        reference['tasks'] = [{**task, 'based': based} for task in reference['tasks']]
     if path.exists():
         manifest = read_selection(path, parameters)
         if reference is not None:
@@ -223,7 +239,9 @@ def main(argv=None):
         protected = (PROJECT_ROOT / 'dataset', PROJECT_ROOT / 'videos')
         if any(args.output_root == p.resolve() or p.resolve() in args.output_root.parents for p in protected):
             raise ValueError('Batch output must be outside source dataset and videos directories')
-        options = dict(models=args.models, beta=args.beta, disable_thinking=args.disable_thinking,
+        options = dict(models=args.models, beta=args.beta, based=args.based,
+                       question_no_based=args.question_no_based,
+                       disable_thinking=args.disable_thinking,
                        selection_from=args.selection_from)
         manifest = selection(args.output_root, **options)
         print('Frozen sample: ' + str(manifest['counts']), flush=True)

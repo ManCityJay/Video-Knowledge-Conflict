@@ -19,14 +19,14 @@ class WorkerConfig:
     case_id: list[str] | None = None
     video_id: list[str] | None = None
     question_id: list[str] | None = None
-    alpha: float = .5
-    beta: float = .05
+    alpha: float = 1.0
+    beta: float = .1
     max_new_tokens: int = 8192
     thinking_token_budget: int | None = 6144
     disable_thinking: bool = False
     dtype: str = 'bfloat16'
     based: bool = False
-    compare_baseline: bool = False
+    question_no_based: bool = False
     force_qa: bool = False
     force_judge: bool = False
     summarize_only: bool = False
