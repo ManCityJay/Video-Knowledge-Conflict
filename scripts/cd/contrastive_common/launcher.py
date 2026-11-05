@@ -1,4 +1,4 @@
-"""Spawned workers, physical GPU isolation and FIFO scheduling for both CLIs."""
+"""Spawned workers, physical GPU isolation and FIFO scheduling for every entry point."""
 from __future__ import annotations
 
 import importlib.metadata
@@ -65,7 +65,7 @@ def preflight(configs, indices, *, require_judge=False):
         weights = set(read_json(index)['weight_map'].values()) if index.exists() else {'model.safetensors'}
         missing = sorted(name for name in weights if not (root / name).is_file())
         if missing:
-            raise ValueError(f'Incomplete offline {config.model_family} model cache: {missing}')
+            raise ValueError(f'Incomplete offline {config.job_name} model cache: {missing}')
     query = subprocess.run(
         ['nvidia-smi', '--query-gpu=index,uuid,name,memory.total,memory.used', '--format=csv,noheader,nounits'],
         capture_output=True, text=True, timeout=30)
@@ -99,14 +99,14 @@ def preflight(configs, indices, *, require_judge=False):
 
 
 def preview(phases, indices):
-    print('Model order: ' + ' -> '.join(c.model_family for c in phases[0][1]), flush=True)
+    print('Model order: ' + ' -> '.join(c.job_name for c in phases[0][1]), flush=True)
     for phase, configs in phases:
         print(f'Phase: {phase}', flush=True)
         for position, config in enumerate(configs):
             assignment = ('GPU unused (report only)' if config.summarize_only else
                           f'physical GPU {indices[position]}' if position < len(indices) else
                           'waiting for a free GPU')
-            print(f'{config.model_family}: {assignment}; output={config.output}', flush=True)
+            print(f'{config.job_name}: {assignment}; output={config.output}', flush=True)
             print(json.dumps(make_config(config), ensure_ascii=False, indent=2), flush=True)
 
 
@@ -124,7 +124,7 @@ def worker(config, gpu_uuid, log_path):
         sys.stderr.reconfigure(line_buffering=True)
         try:
             from .cli import run
-            print(f'Model={config.model_family}; visible GPU={gpu_uuid}; device={config.device}', flush=True)
+            print(f'Model={config.job_name}; visible GPU={gpu_uuid}; device={config.device}', flush=True)
             code = run(config)
         except KeyboardInterrupt:
             code = 130
@@ -141,9 +141,11 @@ def report_status(config):
     report = read_json(path)
     if report['run_id'] != config.run_id:
         return {'complete': False, 'error': 'Worker report belongs to another run'}
-    metrics = {'cd': report['methods']['cd']['overall']}
-    return {'complete': report['incomplete'] == 0 and not report['run_error'],
-            'methods': metrics, 'incomplete': report['incomplete'], 'run_error': report['run_error']}
+    metrics = {method: value['overall'] for method, value in report['methods'].items()}
+    incomplete = report.get('execution_incomplete', report['incomplete'])
+    return {'complete': incomplete == 0 and not report['run_error'],
+            'methods': metrics, 'incomplete': incomplete,
+            'judge_pending': report['incomplete'], 'run_error': report['run_error']}
 
 
 def supervise(phases, indices, checks, status, run, status_path):
@@ -175,7 +177,7 @@ def supervise(phases, indices, checks, status, run, status_path):
             for config in configs:
                 attempt = {'phase': phase, 'status': 'queued', 'pid': None, 'gpu': None,
                            'exit_code': None, 'queued_at': utc_now()}
-                run['models'][config.model_family]['attempts'].append(attempt)
+                run['models'][config.job_name]['attempts'].append(attempt)
                 attempts.append(attempt)
             pending = list(zip(configs, attempts))
             save()
@@ -192,7 +194,7 @@ def supervise(phases, indices, checks, status, run, status_path):
                     attempt.update(exit_code=code, finished_at=utc_now(), result=result,
                                    status='interrupted' if received else
                                    'complete' if code == 0 and result['complete'] else 'failed')
-                    print(f'{phase}: {config.model_family} exit={code}; {attempt["status"]}', flush=True)
+                    print(f'{phase}: {config.job_name} exit={code}; {attempt["status"]}', flush=True)
                     del active[index]
                     stream.close()
                     child.close()
@@ -216,7 +218,7 @@ def supervise(phases, indices, checks, status, run, status_path):
                                    gpu=gpu, worker_run_id=config.run_id)
                     child = context.Process(target=worker,
                                             args=(config, gpu['uuid'] if gpu else None, str(log_path)),
-                                            name=f'vcd-{config.model_family}')
+                                            name=f'vcd-{config.job_name}')
                     try:
                         child.start()
                     except (OSError, RuntimeError) as exc:
@@ -226,7 +228,7 @@ def supervise(phases, indices, checks, status, run, status_path):
                     else:
                         active[index] = (child, config, attempt, stream)
                         attempt.update(pid=child.pid, status='running')
-                        print(f'{phase}: {config.model_family} PID={child.pid}; '
+                        print(f'{phase}: {config.job_name} PID={child.pid}; '
                               f'GPU={index if gpu else "unused"}; log={log_path}', flush=True)
                         if received:
                             notify(child, signal.SIGINT)

@@ -20,6 +20,7 @@ from vconflict_pipeline.settings import (
 from vconflict_pipeline.storage import load_case
 from . import GENERATION_PROTOCOLS, PROTOCOL_VERSION, SCHEMA_VERSION
 from .models import MODELS, resolve_model
+from .sampling import sampling_config
 from .video import build_messages
 
 GROUPS = (FAIRY_TALE_GROUP, 'classic_physics_chemistry_experiments',
@@ -165,16 +166,21 @@ def select_sources(args):
 
 
 def make_config(args):
-    return {'model_family': args.model_family, 'model': MODELS[args.model_family],
+    config = {'model_family': args.model_family, 'model': MODELS[args.model_family],
             'model_path': args.model_path or str(resolve_model(args.model_family)),
             'protocol_version': PROTOCOL_VERSION, 'generation_protocols': dict(GENERATION_PROTOCOLS),
+            'method': getattr(args, 'method', 'cd'),
+            'sampling': sampling_config(args.model_family, getattr(args, 'method', 'cd')),
+            'season': {'beta': getattr(args, 'season_beta', .33),
+                       'noise_step': getattr(args, 'noise_step', 10),
+                       'noise_seed': getattr(args, 'noise_seed', 42)},
             'dtype': args.dtype,
             'max_new_tokens': args.max_new_tokens, 'thinking_token_budget': args.thinking_token_budget,
             'thinking_effort': args.thinking_effort,
             'alpha': args.alpha, 'beta': args.beta, 'based': args.based,
             'question_no_based': args.question_no_based,
             'device': args.device,
-            'qa_only': args.qa_only, 'summarize_only': args.summarize_only,
+            'qa_only': args.qa_only, 'judge_only': args.judge_only, 'summarize_only': args.summarize_only,
             'force_qa': args.force_qa, 'force_judge': args.force_judge,
             'judge': {'model': AUTHOR_JUDGE_MODEL, 'concurrency': args.judge_concurrency,
                       'rpm': args.judge_rpm, 'openrouter_concurrency': args.openrouter_concurrency,
@@ -182,6 +188,10 @@ def make_config(args):
                       'max_retries': args.max_retries},
             'selection': {key: str(getattr(args, key)) if key == 'dataset_dir' else getattr(args, key)
                           for key in ('dataset_dir', 'group', 'case_id', 'video_id', 'question_id')}}
+    if config['method'] in ('tcd', 'season'):
+        config.update(batch_size=args.batch_size, max_batch_size=args.max_batch_size,
+                      autotune_batch=args.autotune_batch)
+    return config
 
 
 def bind_target(target, config):
@@ -192,12 +202,18 @@ def bind_target(target, config):
         'model_family', 'model', 'model_path', 'dtype',
         'max_new_tokens', 'thinking_token_budget')})
     binding.update(question_id=target['question']['question_id'],
-                   question=target['question']['text_en'], method='cd',
+                   question=target['question']['text_en'], method=config.get('method', 'cd'),
                    thinking_effort=config.get('thinking_effort', 'default'),
-                   protocol_version=config['generation_protocols']['cd'])
+                   protocol_version=config['generation_protocols'][config.get('method', 'cd')])
     binding.update(alpha=config['alpha'], beta=config['beta'])
+    if binding['method'] != 'cd':
+        binding['sampling'] = {**config['sampling'], 'index_policy': 'main_model_sampler',
+                               'frame_bounds': 'main_model_defaults'}
+        if binding['method'] == 'season':
+            binding['season'] = config['season']
+            binding.pop('beta')
     # Preserve historical keys unless the question branch's prompt actually changes.
-    if target['based'] and config.get('question_no_based', False) and config['alpha']:
+    if binding['method'] == 'cd' and target['based'] and config.get('question_no_based', False) and config['alpha']:
         binding['question_no_based'] = True
     return {**binding, 'qa_key': digest_json(binding)}
 
@@ -226,7 +242,7 @@ def records_for(case, target, field='qa_results'):
 
 def matching_records(case, target, binding, field='qa_results'):
     return [r for r in records_for(case, target, field)
-            if r.get('method') == 'cd' and r.get('qa_key') == binding['qa_key']]
+            if r.get('method') == binding['method'] and r.get('qa_key') == binding['qa_key']]
 
 
 def current_qa(case, target, binding):
@@ -251,7 +267,8 @@ def validate_output(output):
         return
     path = output / 'config.json'
     if not path.exists():
-        if any(p.name not in ('.run.lock', 'logs') for p in output.iterdir()):
+        # Batch control may be staged before the first worker creates its manifest.
+        if any(p.name not in ('.run.lock', 'logs', 'batch_control.json') for p in output.iterdir()):
             raise ValueError('Output has no current VCD manifest; choose a new output directory')
         return
     manifest = read_json(path)

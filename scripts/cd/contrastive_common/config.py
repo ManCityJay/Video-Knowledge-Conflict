@@ -1,4 +1,4 @@
-"""Internal worker configuration shared by both public launchers."""
+"""Internal worker configuration shared by independent and baseline launchers."""
 from __future__ import annotations
 
 from dataclasses import dataclass, fields
@@ -19,6 +19,13 @@ class WorkerConfig:
     case_id: list[str] | None = None
     video_id: list[str] | None = None
     question_id: list[str] | None = None
+    method: str = 'cd'
+    batch_size: str = 'auto'
+    max_batch_size: int = 32
+    autotune_batch: bool = False
+    season_beta: float = .33
+    noise_step: int = 10
+    noise_seed: int = 42
     alpha: float = 1.0
     beta: float = .1
     max_new_tokens: int = 8192
@@ -31,6 +38,7 @@ class WorkerConfig:
     force_judge: bool = False
     summarize_only: bool = False
     qa_only: bool = False
+    judge_only: bool = False
     max_token_log: Path | None = None
     judge_concurrency: int = 24
     judge_rpm: float = 20
@@ -39,6 +47,10 @@ class WorkerConfig:
     timeout: int = 600
     max_retries: int = 4
     run_id: str | None = None
+
+    @property
+    def job_name(self):
+        return self.model_family if self.method == 'cd' else f'{self.method}/{self.model_family}'
 
     @property
     def device(self):
@@ -53,8 +65,9 @@ class WorkerConfig:
             self.thinking_token_budget = None
 
 
-def from_arguments(args, family):
+def from_arguments(args, family, method=None, *, baseline=False):
     values = {field.name: getattr(args, field.name) for field in fields(WorkerConfig)
               if hasattr(args, field.name) and field.name != 'model_family'}
-    values['output'] = args.output / family
+    values['method'] = method or getattr(args, 'method', 'cd')
+    values['output'] = (args.output / values['method'] / family if baseline else args.output / family)
     return WorkerConfig(model_family=family, **values)

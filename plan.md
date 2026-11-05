@@ -356,4 +356,3 @@ QA 单请求失败直接向调度器抛出异常，由调度器统一决定重�
 回答或判定，再执行该输入；不先运行 question-only，不清理其他输入条件。
 完整协调实现约定仅在
 [concurrency.md](concurrency.md) 维护。独立对比解码实验见
-[scripts/mcd_v1/README.md](scripts/mcd_v1/README.md)。

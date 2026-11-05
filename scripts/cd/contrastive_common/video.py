@@ -5,6 +5,7 @@ import copy
 from pathlib import Path
 
 from vconflict_pipeline.qa import _cosmos_prompt, _video_question_prompt
+from .sampling import SAMPLING
 
 
 def template_kwargs(family, thinking=True):
@@ -30,7 +31,7 @@ def load_frames(path, family):
     from vllm.multimodal.video import VideoBackend
     frames, metadata = VideoBackend.load_bytes(
         Path(path).read_bytes(), backend="opencv", num_frames=-1,
-        fps=1 if family == "gemma" else -1)
+        fps=SAMPLING[family].positive_fps if family == "gemma" else -1)
     if not len(frames) or not metadata.get("fps") or metadata["fps"] <= 0:
         raise ValueError("Video must contain decodable frames and a positive FPS")
     return frames, metadata
@@ -67,7 +68,7 @@ def gemma_inputs(processor, rendered, frames, metadata):
     return result
 
 
-def prepare_inputs(processor, messages, *, family, media=None, continuation=False, thinking=True):
+def prepare_inputs(processor, messages, *, family, media=None, continuation=False, thinking=True, video_kwargs=None):
     """Render each branch's prompt with shared template settings and assistant history."""
     kwargs = template_kwargs(family, thinking)
     rendered = processor.apply_chat_template(
@@ -91,7 +92,7 @@ def prepare_inputs(processor, messages, *, family, media=None, continuation=Fals
             result = dict(processor(
                 text=[rendered], videos=[frames], video_metadata=[metadata],
                 add_special_tokens=False, return_tensors="pt",
-                videos_kwargs={"fps": 4 if family == "cosmos" else 1,
+                videos_kwargs=video_kwargs or {"fps": SAMPLING[family].positive_fps,
                                "do_sample_frames": True, "return_metadata": True}))
         result.pop("video_metadata", None)
     return result

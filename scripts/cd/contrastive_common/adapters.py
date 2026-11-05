@@ -85,7 +85,7 @@ class Branch:
         if token is not None:
             if self.first:
                 raise ValueError("cannot advance before prefill")
-            self.sequence = torch.cat([self.sequence, token.reshape(1, 1)], dim=-1)
+            self.sequence = torch.cat([self.sequence, token.reshape(self.sequence.shape[0], 1)], dim=-1)
         elif not self.first:
             raise ValueError("need a token to advance cached branch")
         old = getattr(self.owner, "rope_deltas", None)

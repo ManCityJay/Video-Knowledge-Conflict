@@ -7,10 +7,12 @@ from vconflict_pipeline.qa import (
     FINAL_ANSWER_CONTINUATION_MAX_TOKENS, FINAL_ANSWER_PREFIX,
     MissingFinalAnswerError, extract_final_answer,
 )
-from .adapters import Branch, eos_ids
-from .control import ReasoningControl, suppressed_tokens
-from .core import combine_logits
-from .video import load_frames, prepare_inputs
+from cd.contrastive_common.adapters import Branch, eos_ids
+from cd.contrastive_common.control import ReasoningControl, suppressed_tokens
+from cd.contrastive_common.core import combine_logits
+from cd.contrastive_common.generation import check_context, parsed
+from cd.contrastive_common.video import load_frames
+from .method import prepare
 
 
 def decode(model, processor, video, question, *, family, alpha, beta,
@@ -47,37 +49,6 @@ def decode(model, processor, video, question, *, family, alpha, beta,
     return generated
 
 
-def parsed(processor, ids, stop, family, *, continuation=False, thinking=True):
-    tokens = ids[:-1] if ids and ids[-1] in stop else ids
-    raw = processor.tokenizer.decode(tokens, skip_special_tokens=False,
-                                     clean_up_tokenization_spaces=False)
-    reasoning = None
-    if continuation or family == 'cosmos':
-        body = processor.tokenizer.decode(tokens, skip_special_tokens=True,
-                                         clean_up_tokenization_spaces=False)
-    else:
-        # Reuse the very parsers used by the main vLLM endpoints.
-        if family == 'qwen':
-            from vllm.parser.qwen3 import Qwen3Parser
-            parser = Qwen3Parser(processor.tokenizer, chat_template_kwargs={'enable_thinking': thinking})
-        else:
-            from vllm.parser.gemma4 import Gemma4Parser
-            parser = Gemma4Parser(processor.tokenizer, chat_template_kwargs={'enable_thinking': thinking})
-        reasoning, body = parser.extract_reasoning(raw, None)
-        body = body or ''
-    return body, reasoning
-
-
-def check_context(model, processor, inputs, budget):
-    config = model.config.get_text_config()
-    limits = [getattr(config, 'max_position_embeddings', 0),
-              getattr(processor.tokenizer, 'model_max_length', 0)]
-    limits = [n for n in limits if isinstance(n, int) and 0 < n < 10**9]
-    if limits and inputs['input_ids'].shape[1] + budget > min(limits):
-        raise ValueError(f"Insufficient context: {inputs['input_ids'].shape[1]} prompt tokens + "
-                         f"{budget} output tokens exceeds {min(limits)}; inputs are never cropped")
-
-
 def generate_answer(model, processor, target, *, args, dtype, on_checkpoint, on_truncated=None):
     """Persist one answer and small phase summaries; keep continuation inputs in memory."""
     started = time.perf_counter()
@@ -94,15 +65,13 @@ def generate_answer(model, processor, target, *, args, dtype, on_checkpoint, on_
             stage = {'stage': 'initial' if phase == 0 else 'continuation',
                      'max_tokens': budget, 'thinking_token_budget': think_budget, 'finish_reason': 'error'}
             result['phases'].append(stage)
-            video = prepare_inputs(processor, messages, family=args.model_family,
-                                   media=media, continuation=bool(phase), thinking=thinking)
+            video = prepare(processor, messages, args, media=media, continuation=bool(phase))
             check_context(model, processor, video, budget)
             stop = eos_ids(model, processor)
             tick = time.perf_counter()
             question = None
             if args.alpha:
-                question = prepare_inputs(processor, question_messages,
-                                          family=args.model_family, continuation=bool(phase), thinking=thinking)
+                question = prepare(processor, question_messages, args, continuation=bool(phase))
                 check_context(model, processor, question, budget)
             ids = decode(model, processor, video, question, family=args.model_family,
                          alpha=args.alpha, beta=args.beta, max_new_tokens=budget,

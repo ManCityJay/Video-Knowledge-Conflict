@@ -9,18 +9,18 @@ import sys
 from dataclasses import replace
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from cd import GENERATION_PROTOCOLS, SCHEMA_VERSION
-from cd.cli import validate
-from cd.config import FAMILIES, WorkerConfig
-from cd.core import validate_parameters
-from cd.launcher import (
+from cd.contrastive_common import GENERATION_PROTOCOLS, SCHEMA_VERSION
+from cd.contrastive_common.cli import validate
+from cd.contrastive_common.config import FAMILIES, WorkerConfig
+from cd.contrastive_common.core import validate_parameters
+from cd.contrastive_common.launcher import (
     add_queue_options, gpu_indices, load_status, new_run, preflight, preview, supervise,
     validate_models, validate_root,
 )
-from cd.models import MODELS, resolve_model
-from cd.storage import (
+from cd.contrastive_common.models import MODELS, resolve_model
+from cd.contrastive_common.storage import (
     GROUPS, atomic_json, digest_json, output_lock, read_json, select_sources, validate_output,
 )
 from vconflict_pipeline.common import PipelineError, utc_now
@@ -31,7 +31,7 @@ PARAMETERS = {
     'alpha': 1.0, 'beta': 0.1, 'based': True, 'question_no_based': False,
     'max_new_tokens': 8192, 'thinking_token_budget': 6144, 'thinking_effort': 'default',
     'dtype': 'bfloat16',
-    'generation_protocols': dict(GENERATION_PROTOCOLS), 'vcd_schema_version': SCHEMA_VERSION,
+    'generation_protocols': {'cd': GENERATION_PROTOCOLS['cd']}, 'vcd_schema_version': SCHEMA_VERSION,
     'judge': {'model': AUTHOR_JUDGE_MODEL, 'concurrency': 24, 'rpm': 20,
               'openrouter_concurrency': 24, 'openrouter_rpm': 20,
               'timeout': 600, 'max_retries': 4},

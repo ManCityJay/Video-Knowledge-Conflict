@@ -41,6 +41,7 @@ def summarize(rows):
 
 
 def write_report(output, targets, config, *, run_id, counts=None, run_error=None):
+    method = config.get('method', 'cd')
     cases = {}
     rows, diagnostics = [], Counter({k: 0 for k in DIAGNOSTICS})
     for target in targets:
@@ -61,10 +62,13 @@ def write_report(output, targets, config, *, run_id, counts=None, run_error=None
             status = ('qa_failed' if attempts and attempts[-1].get('status') == 'failed' else
                       'qa_interrupted' if attempts else 'qa_stale' if history else 'qa_missing')
         row = {key: target[key] for key in ('group', 'case_id', 'video_id', 'question_scope')}
-        row.update(question_id=target['question']['question_id'], method='cd',
+        row.update(question_id=target['question']['question_id'], method=method,
                    status=status, qa_valid=bool(result),
                    verdict=result['judgment']['verdict'] if status == 'judged' else None,
                    result_path=str(path.relative_to(output)))
+        if result:
+            row['seconds'] = result.get('seconds')
+            row['generated_tokens'] = sum(p.get('generated_tokens', 0) for p in result.get('phases', []))
         if status == 'qa_failed':
             row['error'] = attempts[-1].get('error')
         elif status == 'judge_failed':
@@ -85,18 +89,29 @@ def write_report(output, targets, config, *, run_id, counts=None, run_error=None
                            else 'final_answer_retry_failed')
                     diagnostics[key] += 1
     groups = list(dict.fromkeys(t['group'] for t in targets))
-    summary = {'protocol_version': config['generation_protocols']['cd'],
+    summary = {'protocol_version': config['generation_protocols'][method],
                'overall': summarize(rows), 'groups': {
         group: summarize([r for r in rows if r['group'] == group]) for group in groups}}
+    timed = [r for r in rows if r.get('seconds') is not None]
+    summary['timing'] = {
+        'samples': len(timed),
+        'sample_seconds_sum': round(sum(r['seconds'] for r in timed), 6),
+        'mean_sample_seconds': round(sum(r['seconds'] for r in timed) / len(timed), 6) if timed else None,
+        'note': 'Sample service latency includes preprocessing and recovery, excludes model loading and Judge; overlapping batch latencies must not be treated as run wall time.'}
     incomplete = [{k: v for k, v in row.items() if k not in ('qa_valid', 'verdict')}
                   for row in rows if row['status'] != 'judged']
     failed = len(incomplete)
+    qa_incomplete = sum(not row['qa_valid'] for row in rows)
+    execution_incomplete = (qa_incomplete if config.get('qa_only') else
+                            sum(row['qa_valid'] and row['status'] != 'judged' for row in rows)
+                            if config.get('judge_only') else failed)
     parameters = {k: v for k, v in config.items() if k != 'selection'}
     report = {'vcd_schema_version': SCHEMA_VERSION, 'protocol_version': PROTOCOL_VERSION,
               'run_id': run_id, 'updated_at': utc_now(), 'selection': config['selection'],
-              'parameters': parameters, 'methods': {'cd': summary}, 'incomplete_tasks': incomplete,
-              'incomplete': failed, 'run_error': run_error, 'this_run': counts or {},
-              'diagnostics': {'cd': dict(diagnostics)}}
+              'parameters': parameters, 'methods': {method: summary}, 'incomplete_tasks': incomplete,
+              'incomplete': failed, 'qa_incomplete': qa_incomplete,
+              'execution_incomplete': execution_incomplete, 'run_error': run_error, 'this_run': counts or {},
+              'diagnostics': {method: dict(diagnostics)}}
     atomic_json(output / 'report.json', report)
     def rate(value):
         return 'null' if value is None else f'{value:.6f}'
@@ -106,12 +121,12 @@ def write_report(output, targets, config, *, run_id, counts=None, run_error=None
              '|---|---|---:|---:|---:|---:|---:|---:|']
     for group, metrics in [('overall', summary['overall']), *summary['groups'].items()]:
         a, v = metrics['answers'], metrics['videos']
-        lines.append(f"| cd | {group} | {a['total']} | {rate(a['grounded_answer_rate'])} | "
+        lines.append(f"| {method} | {group} | {a['total']} | {rate(a['grounded_answer_rate'])} | "
                      f"{rate(a['trapped_answer_rate'])} | {v['total']} | {rate(v['grounded_video_rate'])} | "
                      f"{rate(v['trapped_video_rate'])} |")
-    lines += ['', f"cd generation protocol: {summary['protocol_version']}", '',
-              f"cd states: {summary['overall']['states']}",
-              f"cd diagnostics: {dict(diagnostics)}", '']
+    lines += ['', f"{method} generation protocol: {summary['protocol_version']}", '',
+              f"{method} states: {summary['overall']['states']}",
+              f"{method} diagnostics: {dict(diagnostics)}", '']
     lines += ['Configuration and selection:', '', '```json',
               json.dumps({'parameters': parameters, 'selection': config['selection']}, ensure_ascii=False, indent=2), '```', '',
               f'This run: {counts or {}}', '', f'Run error: {run_error}', '']
